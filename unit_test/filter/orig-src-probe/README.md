@@ -31,6 +31,11 @@
  单站点 SOF v2、2 块聚合 PB、2 条 CCO 记录（本跳为中继 PCO），解析得
  cascade=true、present=true（每解析一条记录即置位）、orig_srcs 仅 CCO，
  Dir 列即为 ↓。
+- 绘制时 MAC 回填：短头/TEI-only 段解析时无 MAC，多源/多目的分支此前只
+ 显示条目自带 MAC（与单源/单目的分支会查映射表不同），学到 MAC 后也不
+ 补；现绘制时 mac==0 的条目从学习到的 TEI→MAC 表回填（data() 每次重绘
+ 都重算，换页/翻看历史时新学到的 MAC 即生效，无需重解析）；仍未学到
+ 的 TEI 仍只出名；广播不查表（与单目的分支一致）。
 - 过滤：`sta-12`/`sta-11` 命中（search_text 整词匹配，非 hop TEI）；
   `sta-1` 不误命中 `sta-11`；`sta-99` 不命中；MAC 模式 `01:02`/`aa:bb`
   经映射表展开后命中；子串 `dd:ee:0` 命中；单帧帧级源 `sta-5` 可搜。

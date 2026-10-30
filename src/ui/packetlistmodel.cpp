@@ -107,17 +107,23 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
                     QVector<TeiMacPair> srcs;
                     for (const auto& p : e.msdu.orig_srcs) {
                         if (p.tei == 0) continue;
+                        TeiMacPair f = p;
+                        // 绘制时回填:短头/TEI-only 段解析时无 MAC,之后从学习到的
+                        // TEI→MAC 表补全;data() 每次重绘都重算,换页/翻看历史时
+                        // 新学到的 MAC 即生效,无需重解析。广播不查表(无单点 MAC)。
+                        if (!f.mac && f.tei != kTeiBroadcast)
+                            f.mac = lookup_mac(e.mpdu.net_id, f.tei);
                         bool dup = false;
                         for (const auto& q : srcs)
-                            if (q.tei == p.tei && q.mac == p.mac) { dup = true; break; }
-                        if (!dup) srcs.append(p);
+                            if (q.tei == f.tei && q.mac == f.mac) { dup = true; break; }
+                        if (!dup) srcs.append(f);
                     }
                     if (!srcs.isEmpty()) {
                         QStringList parts;
                         for (const auto& p : srcs) {
                             QString s = (p.tei == kTeiCco) ? QStringLiteral("CCO")
                                                            : QStringLiteral("STA-%1").arg(p.tei);
-                            // TEI-only 段(mac==0)只出 STA-N,不带 MAC 括号
+                            // 解析时 mac==0 且绘制时仍未学到,才只出名,不带 MAC 括号
                             if (p.mac) s += QStringLiteral(" [%1]").arg(format_mac(p.mac));
                             parts.append(s);
                         }
@@ -146,10 +152,14 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
                     QVector<TeiMacPair> dsts;
                     for (const auto& p : e.msdu.orig_dsts) {
                         if (p.tei == 0) continue;
+                        TeiMacPair f = p;
+                        // 绘制时回填(同 Orig Src);广播不查表,与单目的分支一致。
+                        if (!f.mac && f.tei != kTeiBroadcast)
+                            f.mac = lookup_mac(e.mpdu.net_id, f.tei);
                         bool dup = false;
                         for (const auto& q : dsts)
-                            if (q.tei == p.tei && q.mac == p.mac) { dup = true; break; }
-                        if (!dup) dsts.append(p);
+                            if (q.tei == f.tei && q.mac == f.mac) { dup = true; break; }
+                        if (!dup) dsts.append(f);
                     }
                     if (!dsts.isEmpty()) {
                         QStringList parts;
@@ -157,7 +167,7 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
                             QString s = (p.tei == kTeiBroadcast) ? QStringLiteral("BCAST")
                                        : (p.tei == kTeiCco) ? QStringLiteral("CCO")
                                        : QStringLiteral("STA-%1").arg(p.tei);
-                            // TEI-only 段(mac==0)只出 STA-N,不带 MAC 括号
+                            // 解析时 mac==0 且绘制时仍未学到,才只出名,不带 MAC 括号
                             if (p.mac) s += QStringLiteral(" [%1]").arg(format_mac(p.mac));
                             parts.append(s);
                         }

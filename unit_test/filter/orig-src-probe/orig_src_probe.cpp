@@ -8,6 +8,9 @@
 //     expansion to orig TEIs, substring path, negatives.
 //  D. Dir: merged frame with only-CCO orig sources shows downlink (NW cascade
 //     E2E: 2 aggregated PBs, 2 CCO records, relay-PCO hop).
+//  E. Draw-time MAC backfill: multi-source/dst entries parsed MAC-less show
+//     the learned MAC on the next data() read after learning (page-switch /
+//     history redraw), broadcast never looks up.
 // Exit 0 iff every check passes.
 #include <cstdio>
 #include <cstdint>
@@ -470,6 +473,70 @@ int main(int argc, char** argv) {
         };
         check(dirG(0) == QStringLiteral("*"), "dir mixed origins unchanged");
         check(dirG(1) == QStringLiteral("*"), "dir TEI-0-only unchanged");
+    }
+
+    // ---- E. Model column: learned MAC backfill at draw time ----
+    // Multi-source/dst entries parsed with mac==0 (short-head/TEI-only
+    // segments) show the bare name first; once the TEI->MAC pair is
+    // learned (a later frame appended), the NEXT data() read shows the
+    // MAC -- no re-parse. This is the page-switch/history redraw case:
+    // data() recomputes from the current table on every paint.
+    {
+        const quint64 ccoMac = mac6(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
+        const quint64 sta11Mac = mac6(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x0b);
+        PacketListModel modelE;
+        PacketEntry m;  // merged, CCO + station, both MAC-less at parse time
+        m.accepted = true;
+        m.mpdu.net_id = 1;
+        m.msdu.present = false;
+        m.msdu.simple_head = false;
+        m.msdu.msdu_src_tei = -1;
+        m.msdu.msdu_dst_tei = -1;
+        m.msdu.orig_srcs.append({1, 0});
+        m.msdu.orig_srcs.append({11, 0});
+        m.msdu.orig_dsts.append({1, 0});
+        m.msdu.orig_dsts.append({11, 0});
+        modelE.append_packets(QVector<PacketEntry>{m});
+        modelE.set_display_filter(QString());
+        const auto srcE = [&]() {
+            return modelE.data(modelE.index(0, PacketListModel::COL_ORIG_SRC), Qt::DisplayRole).toString();
+        };
+        const auto dstE = [&]() {
+            return modelE.data(modelE.index(0, PacketListModel::COL_ORIG_DST), Qt::DisplayRole).toString();
+        };
+        check(srcE() == QStringLiteral("CCO,STA-11"), "draw-time fill before learn bare");
+        check(dstE() == QStringLiteral("CCO,STA-11"), "dst draw-time fill before learn bare");
+        // Learn CCO + station MACs from a later frame (plus a broadcast
+        // pair, which must NOT backfill BCAST), then re-read the SAME
+        // row: redraw picks the learned MACs up without re-append.
+        PacketEntry l;
+        l.accepted = true;
+        l.mpdu.net_id = 1;
+        l.msdu.tei_mac_pairs.append({1, ccoMac});
+        l.msdu.tei_mac_pairs.append({11, sta11Mac});
+        l.msdu.tei_mac_pairs.append({0xFFF, mac6(0xff, 0xff, 0xff, 0xff, 0xff, 0xff)});
+        modelE.append_packets(QVector<PacketEntry>{l});
+        check(srcE() == QStringLiteral("CCO [00:11:22:33:44:55],STA-11 [aa:bb:cc:dd:ee:0b]"),
+              "draw-time fill after learn src");
+        check(dstE() == QStringLiteral("CCO [00:11:22:33:44:55],STA-11 [aa:bb:cc:dd:ee:0b]"),
+              "draw-time fill after learn dst");
+        // Still-unknown TEI stays bare; broadcast never looks up.
+        PacketEntry u;
+        u.accepted = true;
+        u.mpdu.net_id = 1;
+        u.msdu.present = false;
+        u.msdu.simple_head = false;
+        u.msdu.msdu_src_tei = -1;
+        u.msdu.msdu_dst_tei = -1;
+        u.msdu.orig_srcs.append({99, 0});
+        u.msdu.orig_dsts.append({0xFFF, 0});
+        modelE.append_packets(QVector<PacketEntry>{u});
+        check(modelE.data(modelE.index(2, PacketListModel::COL_ORIG_SRC), Qt::DisplayRole).toString()
+                  == QStringLiteral("STA-99"),
+              "draw-time fill unknown stays bare");
+        check(modelE.data(modelE.index(2, PacketListModel::COL_ORIG_DST), Qt::DisplayRole).toString()
+                  == QStringLiteral("BCAST"),
+              "draw-time fill broadcast never looks up");
     }
 
     std::printf("RESULT: %s (%d failures)\n", g_fails == 0 ? "ALL PASS" : "FAIL", g_fails);
