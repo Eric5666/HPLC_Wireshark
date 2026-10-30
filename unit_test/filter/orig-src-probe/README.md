@@ -25,6 +25,12 @@
  （逗号分隔、重复源去重）；单帧回退不变；拒收帧为空；TEI 1 显示 CCO。
  前提条件：仅当帧级无原始 TEI 时才用多源；帧级已有源时只显示单源，
  且过滤时不含各段/各站源的词。
+- Dir 列：合并帧原始源只有 CCO 时显示下行标志 ↓（与 Orig Src 多源同门：
+ 帧级无原始 TEI 且 orig_srcs 非空，present 门之前判定）；其余行 Dir 不变
+ （多源非 CCO、单帧、拒收帧、帧级已有源仍为 *）。NW 级联端到端：
+ 单站点 SOF v2、2 块聚合 PB、2 条 CCO 记录（本跳为中继 PCO），解析得
+ cascade=true、present=true（每解析一条记录即置位）、orig_srcs 仅 CCO，
+ Dir 列即为 ↓。
 - 过滤：`sta-12`/`sta-11` 命中（search_text 整词匹配，非 hop TEI）；
   `sta-1` 不误命中 `sta-11`；`sta-99` 不命中；MAC 模式 `01:02`/`aa:bb`
   经映射表展开后命中；子串 `dd:ee:0` 命中；单帧帧级源 `sta-5` 可搜。

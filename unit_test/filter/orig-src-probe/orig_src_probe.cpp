@@ -6,6 +6,8 @@
 //     rejected-frame empty, CCO naming.
 //  C. Filter: sta- word match (incl. sta-1 vs sta-11 boundary), MAC-pattern
 //     expansion to orig TEIs, substring path, negatives.
+//  D. Dir: merged frame with only-CCO orig sources shows downlink (NW cascade
+//     E2E: 2 aggregated PBs, 2 CCO records, relay-PCO hop).
 // Exit 0 iff every check passes.
 #include <cstdio>
 #include <cstdint>
@@ -17,6 +19,9 @@
 #include "iprotocolparser.h"
 #include "gw_protocol/gw_2026/gw_2026_parser.h"
 #include "gw_protocol/gw_2026/gw_2026_msdu_parser.h"
+#include "nw_2026_parser.h"
+#include "fieldtools.h"
+#include "crc.h"
 #include "packetlistmodel.h"
 
 static int g_fails = 0;
@@ -33,6 +38,82 @@ static QString srcs_str(const QVector<TeiMacPair>& v) {
     for (const auto& p : v)
         parts << QString("%1:%2").arg(p.tei).arg(p.mac, 12, 16, QChar('0'));
     return parts.join(" ");
+}
+static void put_mac(quint8* p, quint64 mac) {
+    for (int i = 0; i < 6; ++i) p[i] = (quint8)((mac >> (8 * i)) & 0xFF);
+}
+static void put_crc24(quint8* blk, int len) {
+    const quint32 calc = crc24_lsb(blk, len);
+    blk[len - 3] = calc & 0xFF;
+    blk[len - 2] = (calc >> 8) & 0xFF;
+    blk[len - 1] = (calc >> 16) & 0xFF;
+}
+// 与 nw-dlofdma-crc-probe 的 build_nw_assoc 同构:NW AssocReq MAC 帧 134B。
+static QByteArray build_nw_assoc(int dst_tei, quint64 dst_mac, int src_tei,
+                                 quint64 src_mac, int restart) {
+    QByteArray mme(80, 0);
+    quint8* m = reinterpret_cast<quint8*>(mme.data());
+    m[0] = 0x01;
+    m[1] = 0x30; m[2] = 0x00;        // MMType 0x0030 ASSOCREQ (LE)
+    put_mac(m + 6, src_mac);         // STAMAC at mme offset 6
+    const int msdu_len = 18 + (int)mme.size();
+    QByteArray f(32 + msdu_len + 4, 0);
+    quint8* p = reinterpret_cast<quint8*>(f.data());
+    p[0] = 0x02;                     // version 1, long head
+    p[2] = quint8(msdu_len & 0xFF); p[3] = quint8((msdu_len >> 8) & 0xFF);
+    p[4] = quint8(dst_tei & 0xFF);
+    p[5] = quint8(((dst_tei >> 8) & 0x0F) | ((src_tei & 0x0F) << 4));
+    p[6] = quint8((src_tei >> 4) & 0xFF);
+    p[7] = quint8((restart & 0x0F) << 4);
+    p[10] = 0xEE; p[11] = 0x64;
+    put_mac(p + 12, dst_mac);
+    put_mac(p + 32, dst_mac);
+    put_mac(p + 38, src_mac);
+    p[44] = 0x00; p[45] = 0x81; p[46] = 0x00; p[47] = 0x00;  // VLAN 0x8100
+    p[48] = 0xE1; p[49] = 0x88;                              // type 0x88E1
+    memcpy(p + 50, mme.constData(), mme.size());
+    return f;
+}
+// NW 级联帧:单站点 SOF v2,2 块聚合 PB(264B,TMI 9),级联体流 272B =
+// 2 条记录(头 2B:长度 12b + Start/End + MAC 帧 134B),源均为 CCO。
+// 帧级本跳为中继 PCO(FCH 源 TEI 5):本跳说明不了源,orig 才是源证据。
+static QByteArray build_cascade_frame(quint64 cco, quint64 sta27, quint64 sta42) {
+    QByteArray stream;
+    const QByteArray mac1 = build_nw_assoc(27, sta27, 1, cco, 5);  // CCO -> STA27
+    const QByteArray mac2 = build_nw_assoc(42, sta42, 1, cco, 5);  // CCO -> STA42
+    auto append_rec = [&stream](const QByteArray& mac, bool start, bool end) {
+        const int clen = mac.size();
+        stream.append(char(clen & 0xFF));
+        stream.append(char(((clen >> 8) & 0x0F) | (start ? 0x10 : 0) | (end ? 0x20 : 0)));
+        stream.append(mac);
+    };
+    append_rec(mac1, true, false);
+    append_rec(mac2, false, true);
+    // 体流分装 2 块聚合 PB(每块体 256B):记录 2 跨块边界,级联解析按体流连续读。
+    QByteArray body(512, 0);
+    memcpy(body.data(), stream.constData(), stream.size());
+    QByteArray f(544, 0);
+    quint8* p = reinterpret_cast<quint8*>(f.data());
+    p[0] = 0x01;                     // SOF, SNID 0
+    set_bits(p, 1, 0, 12, 5);        // FCH 源 TEI = 5(中继 PCO 本跳,非 CCO)
+    set_bits(p, 2, 4, 12, 0xFFF);    // FCH 目的 TEI = 广播
+    p[4] = quint8(2 << 2);           // 单站、非训练、PB 个数 2(bits2-5)
+    set_bits(p, 8, 0, 12, 100);      // 帧长(显示用)
+    p[12] = 0x20;                    // version 2
+    p[6] = quint8(9 << 1);           // TMI 9 -> 264B(bit0=0 非 Bitloading)
+    put_crc24(p, 16);                // FCH CRC24
+    auto block = [](const QByteArray& body256, int seq) {
+        QByteArray blk(264, 0);
+        quint8* b = reinterpret_cast<quint8*>(blk.data());
+        b[0] = quint8(seq & 0xFF); b[1] = quint8((seq >> 8) & 0xFF);
+        b[2] = 0x01;                 // agg bit0 = 1:聚合分支
+        memcpy(b + 4, body256.constData(), body256.size());
+        put_crc24(b, 264);
+        return blk;
+    };
+    f.replace(16, 264, block(body.mid(0, 256), 0));
+    f.replace(280, 264, block(body.mid(256, 256), 1));
+    return f;
 }
 
 int main(int argc, char** argv) {
@@ -172,6 +253,15 @@ int main(int argc, char** argv) {
         check(col(3) == QStringLiteral("CCO [00:11:22:33:44:55]"), "column CCO naming");
         check(col(4) == QStringLiteral("STA-5 [0a:0b:0c:0d:0e:0f]"),
               "column precondition: frame src present -> single, not multi");
+        // Dir: merged frame whose orig sources are only CCO shows downlink.
+        const auto dir = [&](int row) {
+            return model.data(model.index(row, PacketListModel::COL_DIR), Qt::DisplayRole).toString();
+        };
+        check(dir(0) == QStringLiteral("*"), "dir multi non-CCO unchanged");
+        check(dir(1) == QStringLiteral("*"), "dir single unchanged");
+        check(dir(2) == QStringLiteral("*"), "dir rejected unchanged");
+        check(dir(3) == QStringLiteral("\u2193"), "dir merged only-CCO downlink");
+        check(dir(4) == QStringLiteral("*"), "dir frame-src-present unchanged");
     }
 
     // ---- C. Filter ----
@@ -319,6 +409,67 @@ int main(int argc, char** argv) {
         t("sta-word-neg", "sta-99", m, false);
         t("precondition-filter", "sta-12", p, false);
         t("precondition-filter", "sta-5", p, true);
+    }
+
+    // ---- D. Dir: merged frame with only-CCO orig sources shows downlink ----
+    // NW cascade E2E: single-station SOF v2, 2 aggregated PBs, cascade stream
+    // of 2 records, both CCO-originated. Frame-level hop is a relay PCO.
+    {
+        const quint64 cco   = mac6(0x02, 0, 0, 0, 0, 0x01);
+        const quint64 sta27 = mac6(0x02, 0, 0, 0, 0, 0x27);
+        const quint64 sta42 = mac6(0x02, 0, 0, 0, 0, 0x42);
+        NW_2026_Parser parser;
+        ParseFilter filt;
+        BplcFrame fr;
+        fr.meta.from_raw = true;
+        fr.data = QByteArray(1, char(0)) + build_cascade_frame(cco, sta27, sta42);
+        MsduState msdu;
+        const auto r = parser.parse(fr, msdu, filt);
+        check(r.accept, "cascade accept");
+        check(r.msdu.cascade, "cascade flag");
+        // 级联帧 present=true:级联分支每解析一条记录即置 present(与 UL-OFDMA
+        // 等 present=false 的合并类不同,此前“present false”断言是误写)。
+        check(r.msdu.present, "cascade present true");
+        check(r.msdu.orig_srcs.size() == 1
+              && r.msdu.orig_srcs[0].tei == 1
+              && r.msdu.orig_srcs[0].mac == cco,
+              "cascade orig_srcs only CCO");
+        PacketListModel modelD;
+        PacketEntry e;
+        e.accepted = r.accept;
+        e.msdu = r.msdu;
+        e.mpdu = r.mpdu;
+        e.protocol = kProtocolNw2026;
+        modelD.append_packets(QVector<PacketEntry>{e});
+        modelD.set_display_filter(QString());
+        check(modelD.data(modelD.index(0, PacketListModel::COL_DIR), Qt::DisplayRole).toString()
+                  == QStringLiteral("\u2193"),
+              "dir cascade only-CCO downlink");
+        check(modelD.data(modelD.index(0, PacketListModel::COL_ORIG_SRC), Qt::DisplayRole).toString()
+                  == QStringLiteral("CCO [02:00:00:00:00:01]"),
+              "orig cascade only-CCO display");
+        // Synthetic guards: mixed origins and TEI-0-only origins stay "*".
+        PacketListModel modelG;
+        PacketEntry mx;  // mixed CCO + station
+        mx.accepted = true;
+        mx.msdu.present = false;
+        mx.msdu.simple_head = false;
+        mx.msdu.msdu_src_tei = -1;
+        mx.msdu.orig_srcs.append({1, cco});
+        mx.msdu.orig_srcs.append({27, sta27});
+        PacketEntry z;  // TEI-0-only: no valid source
+        z.accepted = true;
+        z.msdu.present = false;
+        z.msdu.simple_head = false;
+        z.msdu.msdu_src_tei = -1;
+        z.msdu.orig_srcs.append({0, 0});
+        modelG.append_packets(QVector<PacketEntry>{mx, z});
+        modelG.set_display_filter(QString());
+        const auto dirG = [&](int row) {
+            return modelG.data(modelG.index(row, PacketListModel::COL_DIR), Qt::DisplayRole).toString();
+        };
+        check(dirG(0) == QStringLiteral("*"), "dir mixed origins unchanged");
+        check(dirG(1) == QStringLiteral("*"), "dir TEI-0-only unchanged");
     }
 
     std::printf("RESULT: %s (%d failures)\n", g_fails == 0 ? "ALL PASS" : "FAIL", g_fails);

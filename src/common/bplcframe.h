@@ -537,6 +537,22 @@ enum NwCcoInitiatedMme : quint16 {
 ///        中继判定 = MSDU 头源 TEI≠本跳 TEI,或 MMe 主体≠本跳发送方且非 CCO 发起类消息
 ///        (CCO 作为发起者/回应者直发不算中继;CCO 当转发者仍标 R)
 inline QString dir_display(const PacketEntry& e) {
+    // 聚合/合并帧且原始源只有 CCO:整帧为 CCO 下行,Dir 显示下行标志。
+    // (与 Orig Src 多源分支同门:帧级无原始 TEI 且 orig_srcs 非空;
+    //  合并帧 present=false,故此分支须在 present 门之前。tei==0 的
+    //  空源项跳过,须至少一项有效 CCO 且无其他源;中继后缀 R 不加:
+    //  合并帧无单跳可言,帧级中继字段对此类帧无意义。)
+    if (e.accepted && !e.msdu.simple_head && e.msdu.msdu_src_tei <= 0
+        && !e.msdu.orig_srcs.isEmpty()) {
+        bool has_cco = false;
+        bool only_cco = true;
+        for (const auto& p : e.msdu.orig_srcs) {
+            if (p.tei == 0) continue;
+            if (p.tei == kTeiCco) has_cco = true;
+            else { only_cco = false; break; }
+        }
+        if (has_cco && only_cco) return QStringLiteral("\u2193");
+    }
     if (!e.accepted || !e.msdu.present || e.msdu.simple_head)
         return QStringLiteral("*");
     const bool relay_orig = (e.mpdu.src_tei != 0)
