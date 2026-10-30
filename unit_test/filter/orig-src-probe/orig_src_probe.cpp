@@ -539,6 +539,77 @@ int main(int argc, char** argv) {
               "draw-time fill broadcast never looks up");
     }
 
+    // ---- F. Dir R: relay marker when orig source differs from hop sender ----
+    // Rule (user 2026-10-30): Dir adds R when Orig Src != current sender and
+    // Orig Src is non-empty; sender==0 means no comparison (not inconsistent);
+    // a CCO origin relayed by another node still gets R (downlink R).
+    // Direction unknown + relay shows "*R" (unknown direction, relayed).
+    {
+        PacketListModel modelF;
+        auto merged = [](int sender, QVector<TeiMacPair> srcs) {
+            PacketEntry e;
+            e.accepted = true;
+            e.msdu.present = false;
+            e.msdu.simple_head = false;
+            e.msdu.msdu_src_tei = -1;
+            e.msdu.orig_srcs = srcs;
+            e.mpdu.src_tei = (quint16)sender;
+            return e;
+        };
+        auto single = [](int src, int dst, int sender) {
+            PacketEntry e;
+            e.accepted = true;
+            e.msdu.present = true;
+            e.msdu.simple_head = false;
+            e.msdu.msdu_src_tei = src;
+            e.msdu.msdu_dst_tei = dst;
+            e.mpdu.src_tei = (quint16)sender;
+            return e;
+        };
+        PacketEntry b0 = single(5, 0xFFF, 3);  // bcast, direction unknown
+        b0.msdu.msdu_send_type = 1;
+        b0.msdu.broadcast_direction = 0xFF;
+        PacketEntry b1 = single(5, 0xFFF, 5);
+        b1.msdu.msdu_send_type = 1;
+        b1.msdu.broadcast_direction = 0xFF;
+        PacketEntry nw = single(5, 0xFFF, 3);  // NW reserved bdir 0
+        nw.protocol = kProtocolNw2026;
+        nw.msdu.msdu_send_type = 1;
+        nw.msdu.broadcast_direction = 0;
+        PacketEntry cas = single(-1, 1, 3);  // cascade-style: frame src <= 0
+        cas.msdu.orig_srcs.append({5, 0});
+        modelF.append_packets(QVector<PacketEntry>{
+            merged(3, {{11, 0}}),            // 0: merged relayed
+            merged(11, {{11, 0}}),           // 1: merged direct
+            merged(0, {{11, 0}}),            // 2: merged sender unknown
+            merged(3, {{1, 0}, {27, 0}}),    // 3: merged mixed origins
+            single(5, 7, 3),                // 4: P2P flag unset + relay
+            single(5, 7, 5),                // 5: P2P flag unset, direct
+            single(1, 7, 3),                // 6: CCO origin relayed
+            single(5, 1, 3),                // 7: uplink relay
+            cas,                            // 8: cascade relay feeds direction
+            b0,                             // 9: bcast unknown bdir + relay
+            b1,                             // 10: bcast unknown bdir, direct
+            nw,                             // 11: NW reserved bdir + relay
+        });
+        modelF.set_display_filter(QString());
+        const auto dirF = [&](int row) {
+            return modelF.data(modelF.index(row, PacketListModel::COL_DIR), Qt::DisplayRole).toString();
+        };
+        check(dirF(0) == QStringLiteral("*R"), "dir merged relay *R");
+        check(dirF(1) == QStringLiteral("*"), "dir merged direct no R");
+        check(dirF(2) == QStringLiteral("*"), "dir merged sender 0 no comparison");
+        check(dirF(3) == QStringLiteral("*R"), "dir merged mixed origins *R");
+        check(dirF(4) == QStringLiteral("*R"), "dir P2P flag unset relay *R");
+        check(dirF(5) == QStringLiteral("*"), "dir P2P flag unset direct no R");
+        check(dirF(6) == QStringLiteral("\u2193R"), "dir CCO origin relayed downlink R");
+        check(dirF(7) == QStringLiteral("\u2191R"), "dir uplink relay");
+        check(dirF(8) == QStringLiteral("\u2191R"), "dir cascade relay feeds direction");
+        check(dirF(9) == QStringLiteral("*R"), "dir bcast unknown bdir relay *R");
+        check(dirF(10) == QStringLiteral("*"), "dir bcast unknown bdir direct no R");
+        check(dirF(11) == QStringLiteral("*R"), "dir NW reserved bdir relay *R");
+    }
+
     std::printf("RESULT: %s (%d failures)\n", g_fails == 0 ? "ALL PASS" : "FAIL", g_fails);
     return g_fails == 0 ? 0 : 1;
 }

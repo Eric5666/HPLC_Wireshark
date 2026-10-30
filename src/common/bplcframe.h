@@ -533,10 +533,22 @@ enum NwCcoInitiatedMme : quint16 {
 
 /// @brief Dir 列显示(界面列表 COL_DIR 与 CSV 导出共用):
 ///        广播报文(目的 TEI=0xFFF 且发送类型非单播)按 广播方向+剩余跳数 指示
-///        ↓[R]N→ / ↑[R]N→ / [R]N→,方向未知/保留→*;单播按 TEI 判定 ↑/↓(中继 ↑R/↓R)
-///        中继判定 = MSDU 头源 TEI≠本跳 TEI,或 MMe 主体≠本跳发送方且非 CCO 发起类消息
-///        (CCO 作为发起者/回应者直发不算中继;CCO 当转发者仍标 R)
+///        ↓[R]N→ / ↑[R]N→ / [R]N→,方向未知/保留→*(中继→*R);单播按 TEI 判定 ↑/↓(中继 ↑R/↓R)
+///        中继判定 = MSDU 头源 TEI≠本跳 TEI,或合并帧任一有效原始源≠本跳发送方,
+///        或 MMe 主体≠本跳发送方且非 CCO 发起类消息;本跳发送方为 0 不比较(不算不一致)
+///        (CCO 作为发起者/回应者直发不算中继;CCO 当转发者仍标 R;CCO 原点被转发仍标 ↓R)
+///        合并帧 present=false 且中继时方向未知,显示 *R。
 inline QString dir_display(const PacketEntry& e) {
+    // 合并帧中继:帧级无原始 TEI 且 orig_srcs 非空时,任一有效原始源 ≠ 本跳
+    // 发送方即中继。发送方为 0 不比较(不算不一致);空源项 tei==0 跳过。
+    // CCO 专支在后先行返回,故 CCO-only 合并帧仍为裸 ↓,不受此影响。
+    bool merged_relay = false;
+    if (e.accepted && !e.msdu.simple_head && e.msdu.msdu_src_tei <= 0
+        && !e.msdu.orig_srcs.isEmpty() && e.mpdu.src_tei != 0) {
+        for (const auto& p : e.msdu.orig_srcs) {
+            if (p.tei != 0 && p.tei != e.mpdu.src_tei) { merged_relay = true; break; }
+        }
+    }
     // 聚合/合并帧且原始源只有 CCO:整帧为 CCO 下行,Dir 显示下行标志。
     // (与 Orig Src 多源分支同门:帧级无原始 TEI 且 orig_srcs 非空;
     //  合并帧 present=false,故此分支须在 present 门之前。tei==0 的
@@ -554,7 +566,7 @@ inline QString dir_display(const PacketEntry& e) {
         if (has_cco && only_cco) return QStringLiteral("\u2193");
     }
     if (!e.accepted || !e.msdu.present || e.msdu.simple_head)
-        return QStringLiteral("*");
+        return merged_relay ? QStringLiteral("*R") : QStringLiteral("*");
     const bool relay_orig = (e.mpdu.src_tei != 0)
                     && (e.msdu.msdu_src_tei > 0)
                     && (quint16(e.msdu.msdu_src_tei) != e.mpdu.src_tei);
@@ -566,7 +578,7 @@ inline QString dir_display(const PacketEntry& e) {
                     && (e.msdu.mme_type == NwCcoInitMmeAssocCnf
                         || e.msdu.mme_type == NwCcoInitMmeAssocInd
                         || e.msdu.mme_type == NwCcoInitMmeChangeProxyCnf);
-    const bool relay = relay_orig
+    const bool relay = relay_orig || merged_relay
                     || (e.msdu.sta_mac != 0 && e.msdu.msdu_src_mac != 0
                         && e.msdu.sta_mac != e.msdu.msdu_src_mac
                         && !cco_initiated);
@@ -581,21 +593,21 @@ inline QString dir_display(const PacketEntry& e) {
         return QStringLiteral("\u2191") + (relay ? QStringLiteral("R") : QString())
                + QString::number(hops) + QStringLiteral("\u2192");
     if (bcast && bdir == 0) {       // 双向/保留:国网表7 0=双向 / 南网表7 0=保留(非上下行)
-        if ((e.protocol & 0x7F) == kProtocolNw2021 || (e.protocol & 0x7F) == kProtocolNw2026)   // 南网:0=保留 → *(掩掉插件位后比较)
-            return QStringLiteral("*");
+        if ((e.protocol & 0x7F) == kProtocolNw2021 || (e.protocol & 0x7F) == kProtocolNw2026)   // 南网:0=保留 → *(中继→*R,掩掉插件位后比较)
+            return relay ? QStringLiteral("*R") : QStringLiteral("*");
         return (relay ? QStringLiteral("R") : QString())
                + QString::number(hops) + QStringLiteral("\u2192");  // 国网:0=双向 → [R]N→
     }
     if (bcast && bdir == 0xFF)    // 未知/漏填(解析器未填广播方向)
-        return QStringLiteral("*");
+        return relay ? QStringLiteral("*R") : QStringLiteral("*");
     if (bcast)                    // 保留值(3-15)
-        return QStringLiteral("*");
+        return relay ? QStringLiteral("*R") : QStringLiteral("*");
     if (e.msdu.msdu_dst_tei == kTeiCco) return relay ? QStringLiteral("\u2191R") : QStringLiteral("\u2191");
     if (e.msdu.msdu_src_tei == kTeiCco) return relay ? QStringLiteral("\u2193R") : QStringLiteral("\u2193");
     // 站点间通讯 P2P(非 CCO):用应用层报文 TransDirectionFlag(表8 0=下行 1=上行)
     if (e.msdu.trans_direction_flag == 1) return relay ? QStringLiteral("\u2191R") : QStringLiteral("\u2191");
     if (e.msdu.trans_direction_flag == 0) return relay ? QStringLiteral("\u2193R") : QStringLiteral("\u2193");
-    return QStringLiteral("*");
+    return relay ? QStringLiteral("*R") : QStringLiteral("*");  // 方向未知(标志未填/保留):中继仅标 R
 }
 Q_DECLARE_METATYPE(PacketEntry)
 
