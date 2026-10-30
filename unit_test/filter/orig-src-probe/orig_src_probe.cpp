@@ -578,6 +578,30 @@ int main(int argc, char** argv) {
         nw.msdu.broadcast_direction = 0;
         PacketEntry cas = single(-1, 1, 3);  // cascade-style: frame src <= 0
         cas.msdu.orig_srcs.append({5, 0});
+        // Broadcast unknown-direction + relay + known hops: right-arrow RN→
+        // iff hops > 1; hops 0xFF is the unknown sentinel (cases 9/11 rely on
+        // the default 0xFF and stay *R); no relay means no arrow even with hops.
+        PacketEntry h3 = single(5, 0xFFF, 3);  // unknown bdir + relay + hops 3
+        h3.msdu.msdu_send_type = 1;
+        h3.msdu.broadcast_direction = 0xFF;
+        h3.msdu.route_hops_left = 3;
+        PacketEntry h1 = single(5, 0xFFF, 3);  // unknown bdir + relay + hops 1
+        h1.msdu.msdu_send_type = 1;
+        h1.msdu.broadcast_direction = 0xFF;
+        h1.msdu.route_hops_left = 1;
+        PacketEntry rs = single(5, 0xFFF, 3);  // reserved bdir + relay + hops 2
+        rs.msdu.msdu_send_type = 1;
+        rs.msdu.broadcast_direction = 5;
+        rs.msdu.route_hops_left = 2;
+        PacketEntry nw3 = single(5, 0xFFF, 3);  // NW reserved bdir 0 + relay + hops 3
+        nw3.protocol = kProtocolNw2026;
+        nw3.msdu.msdu_send_type = 1;
+        nw3.msdu.broadcast_direction = 0;
+        nw3.msdu.route_hops_left = 3;
+        PacketEntry dh = single(5, 0xFFF, 5);  // unknown bdir, direct, hops 3
+        dh.msdu.msdu_send_type = 1;
+        dh.msdu.broadcast_direction = 0xFF;
+        dh.msdu.route_hops_left = 3;
         modelF.append_packets(QVector<PacketEntry>{
             merged(3, {{11, 0}}),            // 0: merged relayed
             merged(11, {{11, 0}}),           // 1: merged direct
@@ -591,6 +615,11 @@ int main(int argc, char** argv) {
             b0,                             // 9: bcast unknown bdir + relay
             b1,                             // 10: bcast unknown bdir, direct
             nw,                             // 11: NW reserved bdir + relay
+            h3,                             // 12: bcast unknown + relay + hops 3
+            h1,                             // 13: bcast unknown + relay + hops 1
+            rs,                             // 14: bcast reserved + relay + hops 2
+            nw3,                            // 15: NW reserved + relay + hops 3
+            dh,                             // 16: bcast unknown, direct, hops 3
         });
         modelF.set_display_filter(QString());
         const auto dirF = [&](int row) {
@@ -608,6 +637,11 @@ int main(int argc, char** argv) {
         check(dirF(9) == QStringLiteral("*R"), "dir bcast unknown bdir relay *R");
         check(dirF(10) == QStringLiteral("*"), "dir bcast unknown bdir direct no R");
         check(dirF(11) == QStringLiteral("*R"), "dir NW reserved bdir relay *R");
+        check(dirF(12) == QStringLiteral("R3\u2192"), "dir bcast unknown relay hops3 right arrow");
+        check(dirF(13) == QStringLiteral("*R"), "dir bcast unknown relay hops1 no arrow");
+        check(dirF(14) == QStringLiteral("R2\u2192"), "dir bcast reserved relay hops2 right arrow");
+        check(dirF(15) == QStringLiteral("R3\u2192"), "dir NW reserved relay hops3 right arrow");
+        check(dirF(16) == QStringLiteral("*"), "dir bcast unknown direct hops3 no arrow");
     }
 
     std::printf("RESULT: %s (%d failures)\n", g_fails == 0 ? "ALL PASS" : "FAIL", g_fails);
