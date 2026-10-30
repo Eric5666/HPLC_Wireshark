@@ -21,6 +21,7 @@ struct I18nReg {
         trl::register_en("训练帧(MIMO)", "Training Frame (MIMO)");
         trl::register_en("训练帧(Bitloading)", "Training Frame (Bitloading)");
         trl::register_en("DL-OFDMA(截断)", "DL-OFDMA (Truncated)");
+        trl::register_en("CRC 不完整（截断）", "CRC incomplete (truncated)");
         trl::register_en("UL-OFDMA 数据帧 (需 trigger)", "UL-OFDMA Data Frame (needs trigger)");
     }
 };
@@ -360,6 +361,9 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
                           case 2: kind = trl::L("UL-OFDMA trigger"); break;
                           default: kind = trl::L("UL-OFDMA SACK"); break;
                         }
+                        // 注意:此处不以 pb_crc_ok 为门——OFDMA 多站路不设 pb_crc_ok
+                        // (恒 false),套门会把完整 OFDMA 帧也标成截断;多站截断
+                        // 检测与 pb_crc_ok 语义另案处理。
                         int fail_cnt = 0;
                         for (bool ok : e.mpdu.pb_crc_oks) if (!ok) ++fail_cnt;
                         QString crc_str = fail_cnt > 0
@@ -374,12 +378,15 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
                     if (e.mpdu.version == 2 && !e.meta.is_rf && !is_multi
                         && e.raw_bytes.size() > 5 && (quint8(e.raw_bytes.at(4)) & 0x02)) {
                         const bool bitload = (quint8(e.raw_bytes.at(5)) & 0x01) != 0;
-                        // CRC 状态(pb_crc_oks 为空时不断言 CRC OK,避免与红行矛盾)
+                        // CRC 状态:oks 为空不断言 CRC OK(避免与红行矛盾);已收块全过
+                        // 但 pb_crc_ok=false 时为截断(整体校验未完成),不报 CRC OK。
                         int fail_cnt = 0;
                         for (bool ok : e.mpdu.pb_crc_oks) if (!ok) ++fail_cnt;
                         QString crc_str = fail_cnt > 0
                             ? trl::L("CRC FAIL(%1/%2)").arg(fail_cnt).arg(e.mpdu.pb_crc_oks.size())
-                            : (e.mpdu.pb_crc_oks.isEmpty() ? QString() : trl::L("CRC OK"));
+                            : (e.mpdu.pb_crc_oks.isEmpty() ? QString()
+                               : (e.mpdu.pb_crc_ok ? trl::L("CRC OK")
+                                                   : trl::L("CRC 不完整（截断）")));
                         return QStringLiteral("NetID=0x%1 src=%2 dst=%3 %4 PBNum=%5")
                                .arg(nid).arg(e.mpdu.src_tei).arg(e.mpdu.dst_tei)
                                .arg(bitload ? trl::L("训练帧(Bitloading)") : trl::L("训练帧(MIMO)"))
@@ -388,11 +395,14 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
                     }
                     // 默认情况 (含其他 SOF 帧)
                     {
+                        // CRC 状态:同训练分支,已收块全过但 pb_crc_ok=false 时为截断。
                         int fail_cnt = 0;
                         for (bool ok : e.mpdu.pb_crc_oks) if (!ok) ++fail_cnt;
                         QString crc_str = fail_cnt > 0
                             ? trl::L("CRC FAIL(%1/%2)").arg(fail_cnt).arg(e.mpdu.pb_crc_oks.size())
-                            : (e.mpdu.pb_crc_oks.isEmpty() ? QString() : trl::L("CRC OK"));
+                            : (e.mpdu.pb_crc_oks.isEmpty() ? QString()
+                               : (e.mpdu.pb_crc_ok ? trl::L("CRC OK")
+                                                   : trl::L("CRC 不完整（截断）")));
                         QString msdu = e.msdu_body.isEmpty() ? QString() :
                                        QStringLiteral(" MSDU[%1B]").arg(e.msdu_body.size());
                         return QStringLiteral("NetID=0x%1 src=%2 dst=%3 %4=%5 PBNum=%6")
