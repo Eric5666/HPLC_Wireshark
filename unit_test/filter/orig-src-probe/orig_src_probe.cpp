@@ -235,6 +235,8 @@ int main(int argc, char** argv) {
         cco.msdu.simple_head = false;
         cco.msdu.msdu_src_tei = -1;
         cco.msdu.orig_srcs.append({1, macCco});
+        PacketEntry cco_relay = cco;  // CCO 原始源与非零本跳发送方不一致 -> R
+        cco_relay.mpdu.src_tei = 5;
         PacketEntry p;  // precondition: frame src present -> single, never multi
         p.accepted = true;
         p.msdu.present = true;
@@ -243,7 +245,7 @@ int main(int argc, char** argv) {
         p.msdu.msdu_src_mac = macC;
         p.msdu.orig_srcs.append({11, macA});
         p.msdu.orig_srcs.append({12, macB});
-        model.append_packets(QVector<PacketEntry>{m, s, rj, cco, p});
+        model.append_packets(QVector<PacketEntry>{m, s, rj, cco, p, cco_relay});
         model.set_display_filter(QString());
         const auto col = [&](int row) {
             return model.data(model.index(row, PacketListModel::COL_ORIG_SRC), Qt::DisplayRole).toString();
@@ -265,6 +267,7 @@ int main(int argc, char** argv) {
         check(dir(2) == QStringLiteral("*"), "dir rejected unchanged");
         check(dir(3) == QStringLiteral("\u2193"), "dir merged only-CCO downlink");
         check(dir(4) == QStringLiteral("*"), "dir frame-src-present unchanged");
+        check(dir(5) == QStringLiteral("\u2193R"), "dir merged CCO source mismatch is relay");
     }
 
     // ---- C. Filter ----
@@ -446,8 +449,8 @@ int main(int argc, char** argv) {
         modelD.append_packets(QVector<PacketEntry>{e});
         modelD.set_display_filter(QString());
         check(modelD.data(modelD.index(0, PacketListModel::COL_DIR), Qt::DisplayRole).toString()
-                  == QStringLiteral("\u2193"),
-              "dir cascade only-CCO downlink");
+                  == QStringLiteral("\u2193R"),
+              "dir cascade only-CCO relayed downlink");
         check(modelD.data(modelD.index(0, PacketListModel::COL_ORIG_SRC), Qt::DisplayRole).toString()
                   == QStringLiteral("CCO [02:00:00:00:00:01]"),
               "orig cascade only-CCO display");

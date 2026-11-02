@@ -22,6 +22,7 @@ struct I18nReg {
         trl::register_en("训练帧(Bitloading)", "Training Frame (Bitloading)");
         trl::register_en("DL-OFDMA(截断)", "DL-OFDMA (Truncated)");
         trl::register_en("CRC 不完整（截断）", "CRC incomplete (truncated)");
+        trl::register_en("CRC 不完整（重组失败）", "CRC incomplete (reassembly failed)");
         trl::register_en("UL-OFDMA 数据帧 (需 trigger)", "UL-OFDMA Data Frame (needs trigger)");
     }
 };
@@ -30,6 +31,14 @@ const I18nReg g_i18n_reg_pktlist;
 constexpr quint8 kAppPacketAckNack = 0x0;   ///< 帧类型域=确认/否认
 constexpr quint8 kBidConfirm       = 0x00;  ///< BID=确认(ACK)
 constexpr quint8 kBidDeny          = 0x01;  ///< BID=否认(NACK)
+
+// pb_crc_ok=false 不仅表示抓包截断：GW 解析器在 PB 序号乱序时会保留已
+// 校验块并放弃 MSDU 重组。只有已收块少于声明块时，才能确定是截断。
+QString pb_crc_incomplete_text(const MpduInfo& mpdu) {
+    return mpdu.pb_crc_oks.size() < mpdu.pb_num
+        ? trl::L("CRC 不完整（截断）")
+        : trl::L("CRC 不完整（重组失败）");
+}
 
 /// @brief 48-bit MAC 帧内原始字节序 → "aa:bb:cc:dd:ee:ff"(唯一实现见 common/mac_format.h)
 QString format_mac(quint64 v) { return format_mac_u64(v); }
@@ -378,15 +387,16 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
                     if (e.mpdu.version == 2 && !e.meta.is_rf && !is_multi
                         && e.raw_bytes.size() > 5 && (quint8(e.raw_bytes.at(4)) & 0x02)) {
                         const bool bitload = (quint8(e.raw_bytes.at(5)) & 0x01) != 0;
-                        // CRC 状态:oks 为空不断言 CRC OK(避免与红行矛盾);已收块全过
-                        // 但 pb_crc_ok=false 时为截断(整体校验未完成),不报 CRC OK。
+                        // CRC 状态:oks 为空不断言 CRC OK(避免与红行矛盾)。
+                        // pb_crc_ok=false 还可能是 PB 序号乱序导致的重组失败，
+                        // 只有已收块少于声明块时才标记为截断。
                         int fail_cnt = 0;
                         for (bool ok : e.mpdu.pb_crc_oks) if (!ok) ++fail_cnt;
                         QString crc_str = fail_cnt > 0
                             ? trl::L("CRC FAIL(%1/%2)").arg(fail_cnt).arg(e.mpdu.pb_crc_oks.size())
                             : (e.mpdu.pb_crc_oks.isEmpty() ? QString()
                                : (e.mpdu.pb_crc_ok ? trl::L("CRC OK")
-                                                   : trl::L("CRC 不完整（截断）")));
+                                                   : pb_crc_incomplete_text(e.mpdu)));
                         return QStringLiteral("NetID=0x%1 src=%2 dst=%3 %4 PBNum=%5")
                                .arg(nid).arg(e.mpdu.src_tei).arg(e.mpdu.dst_tei)
                                .arg(bitload ? trl::L("训练帧(Bitloading)") : trl::L("训练帧(MIMO)"))
@@ -395,14 +405,14 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
                     }
                     // 默认情况 (含其他 SOF 帧)
                     {
-                        // CRC 状态:同训练分支,已收块全过但 pb_crc_ok=false 时为截断。
+                        // CRC 状态:同训练分支，区分载荷截断和 PB 重组失败。
                         int fail_cnt = 0;
                         for (bool ok : e.mpdu.pb_crc_oks) if (!ok) ++fail_cnt;
                         QString crc_str = fail_cnt > 0
                             ? trl::L("CRC FAIL(%1/%2)").arg(fail_cnt).arg(e.mpdu.pb_crc_oks.size())
                             : (e.mpdu.pb_crc_oks.isEmpty() ? QString()
                                : (e.mpdu.pb_crc_ok ? trl::L("CRC OK")
-                                                   : trl::L("CRC 不完整（截断）")));
+                                                   : pb_crc_incomplete_text(e.mpdu)));
                         QString msdu = e.msdu_body.isEmpty() ? QString() :
                                        QStringLiteral(" MSDU[%1B]").arg(e.msdu_body.size());
                         return QStringLiteral("NetID=0x%1 src=%2 dst=%3 %4=%5 PBNum=%6")
@@ -826,38 +836,55 @@ void PacketListModel::clear_all() {
         QFile::remove(dir.filePath(f));
 }
 
-void PacketListModel::learn_tei_mac(quint32 nid, quint16 tei, quint64 mac) {
-    if (!tei || !mac) return;
+bool PacketListModel::learn_tei_mac(quint32 nid, quint16 tei, quint64 mac) {
+    if (!tei || !mac) return false;
     auto& fwd = m_tei_mac[nid];
     auto& rev = m_mac_tei[nid];
     // TEI 易主:旧 MAC 的反向条目若仍指向本 TEI 则清除,避免 stale 反查
     // (正表行为保持原样:MAC 易 TEI 时旧 TEI→MAC 条目不主动清除)
     const quint64 old_mac = fwd.value(tei, 0);
+    if (old_mac == mac) return false;
     if (old_mac && old_mac != mac) {
         auto rit = rev.find(old_mac);
         if (rit != rev.end() && rit.value() == tei) rev.erase(rit);
     }
     fwd[tei] = mac;
     rev[mac] = tei;
+    return true;
 }
 
 void PacketListModel::update_tei_mac(const PacketEntry& e) {
     if (!e.accepted) return;
     const quint32 nid = e.mpdu.net_id;
-    // BEACON 帧:CCO 的 MAC(TEI=1),供 COORD 等 CCO 发出帧查表
+    bool changed = false;
+    // BEACON 帧:CCO 的 MAC(TEI=1),供 COORD 等 CCO 发出(src_tei 未解析),用 NID 查表
     if (e.mpdu.frame_type == 0 && e.mpdu.beacon_cco_mac)
-        learn_tei_mac(nid, 1, e.mpdu.beacon_cco_mac);
+        changed |= learn_tei_mac(nid, 1, e.mpdu.beacon_cco_mac);
     // 信标管理信息条目(站点能力/精简站点)携带的 TEI→SourceMAC 学习对
     for (const TeiMacPair& p : e.beacon.tei_mac_pairs)
-        if (p.tei != 0 && p.mac) learn_tei_mac(nid, p.tei, p.mac);
+        if (p.tei != 0 && p.mac) changed |= learn_tei_mac(nid, p.tei, p.mac);
     // 管理帧(发现列表等)携带的 TEI→MAC 学习对
     for (const TeiMacPair& p : e.msdu.tei_mac_pairs)
-        if (p.tei != 0 && p.mac) learn_tei_mac(nid, p.tei, p.mac);
-    if (!e.msdu.present || e.msdu.simple_head) return;
-    if (e.msdu.msdu_src_tei > 0 && e.msdu.msdu_src_mac)
-        learn_tei_mac(nid, quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac);
-    if (e.msdu.msdu_dst_tei > 0 && e.msdu.msdu_dst_mac)
-        learn_tei_mac(nid, quint16(e.msdu.msdu_dst_tei), e.msdu.msdu_dst_mac);
+        if (p.tei != 0 && p.mac) changed |= learn_tei_mac(nid, p.tei, p.mac);
+    if (e.msdu.present && !e.msdu.simple_head) {
+        if (e.msdu.msdu_src_tei > 0 && e.msdu.msdu_src_mac)
+            changed |= learn_tei_mac(nid, quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac);
+        if (e.msdu.msdu_dst_tei > 0 && e.msdu.msdu_dst_mac)
+            changed |= learn_tei_mac(nid, quint16(e.msdu.msdu_dst_tei), e.msdu.msdu_dst_mac);
+    }
+    if (changed) notify_mac_mapping_changed();
+}
+
+void PacketListModel::notify_mac_mapping_changed() {
+    // data() 按当前映射表动态补 MAC。这里只发送列范围通知，不 locate/扫描历史条目；
+    // Qt view 只会立即重绘当前可见单元格，未显示的行仍在之后按需调用 data()。
+    const int last = rowCount() - 1;
+    if (last < 0) return;
+    const Qt::ItemDataRole role = Qt::DisplayRole;
+    emit dataChanged(index(0, COL_ORIG_SRC), index(last, COL_ORIG_SRC), {role});
+    emit dataChanged(index(0, COL_SOURCE),   index(last, COL_SOURCE),   {role});
+    emit dataChanged(index(0, COL_DEST),     index(last, COL_DEST),     {role});
+    emit dataChanged(index(0, COL_ORIG_DST), index(last, COL_ORIG_DST), {role});
 }
 
 quint64 PacketListModel::lookup_mac(quint32 nid, quint16 tei) const {

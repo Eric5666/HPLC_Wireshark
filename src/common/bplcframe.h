@@ -543,7 +543,8 @@ enum NwCcoInitiatedMme : quint16 {
 inline QString dir_display(const PacketEntry& e) {
     // 合并帧中继:帧级无原始 TEI 且 orig_srcs 非空时,任一有效原始源 ≠ 本跳
     // 发送方即中继。发送方为 0 不比较(不算不一致);空源项 tei==0 跳过。
-    // CCO 专支在后先行返回,故 CCO-only 合并帧仍为裸 ↓,不受此影响。
+    // CCO 专支在后先行返回,故 CCO-only 合并帧可直接判定下行；若发送方
+    // 非 0 且不是 CCO，仍由 merged_relay 追加 R。
     bool merged_relay = false;
     if (e.accepted && !e.msdu.simple_head && e.msdu.msdu_src_tei <= 0
         && !e.msdu.orig_srcs.isEmpty() && e.mpdu.src_tei != 0) {
@@ -554,8 +555,9 @@ inline QString dir_display(const PacketEntry& e) {
     // 聚合/合并帧且原始源只有 CCO:整帧为 CCO 下行,Dir 显示下行标志。
     // (与 Orig Src 多源分支同门:帧级无原始 TEI 且 orig_srcs 非空;
     //  合并帧 present=false,故此分支须在 present 门之前。tei==0 的
-    //  空源项跳过,须至少一项有效 CCO 且无其他源;中继后缀 R 不加:
-    //  合并帧无单跳可言,帧级中继字段对此类帧无意义。)
+    //  空源项跳过,须至少一项有效 CCO 且无其他源。若本跳发送方非 0
+    //  且不是 CCO，则 CCO 源与发送方不一致，仍需追加 R；发送方为 0
+    //  时不比较，保持裸 ↓。
     if (e.accepted && !e.msdu.simple_head && e.msdu.msdu_src_tei <= 0
         && !e.msdu.orig_srcs.isEmpty()) {
         bool has_cco = false;
@@ -565,7 +567,8 @@ inline QString dir_display(const PacketEntry& e) {
             if (p.tei == kTeiCco) has_cco = true;
             else { only_cco = false; break; }
         }
-        if (has_cco && only_cco) return QStringLiteral("\u2193");
+        if (has_cco && only_cco)
+            return QStringLiteral("\u2193") + (merged_relay ? QStringLiteral("R") : QString());
     }
     if (!e.accepted || !e.msdu.present || e.msdu.simple_head)
         return merged_relay ? QStringLiteral("*R") : QStringLiteral("*");

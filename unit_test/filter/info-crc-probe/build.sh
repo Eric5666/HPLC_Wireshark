@@ -1,13 +1,18 @@
 #!/bin/bash
 # Build info_crc_probe against the model sources in the repo root.
-# Usage: ./build.sh [out-binary [repo-dir]]
+# Usage: QT_ROOT=/path/to/6.11.2/gcc_64 ./build.sh [out-binary [repo-dir]]
 # Run: ./build/info_crc_probe
 set -e
 cd "$(dirname "$0")"
 REPO_ROOT="$(cd "../../.." && pwd)"
 OUT="${1:-./build/info_crc_probe}"
 R="${2:-$REPO_ROOT}"
-QT="$HOME/qt/6.11.2/gcc_64"
+QT="${QT_ROOT:-$HOME/qt/6.11.2/gcc_64}"
+if [ ! -x "$QT/libexec/moc" ]; then
+  echo "Qt 6.11.2 moc not found: $QT/libexec/moc" >&2
+  echo "Set QT_ROOT to the Qt 6.11.2 gcc_64 installation directory." >&2
+  exit 1
+fi
 mkdir -p build
 "$QT/libexec/moc" "$R/src/ui/packetlistmodel.h" -o build/moc_packetlistmodel.cpp
 "$QT/libexec/moc" "$R/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp

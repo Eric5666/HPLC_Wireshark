@@ -30,7 +30,7 @@
  （多源非 CCO、单帧、拒收帧、帧级已有源仍为 *）。NW 级联端到端：
  单站点 SOF v2、2 块聚合 PB、2 条 CCO 记录（本跳为中继 PCO），解析得
  cascade=true、present=true（每解析一条记录即置位）、orig_srcs 仅 CCO，
- Dir 列即为 ↓。
+ Dir 列即为 ↓R（CCO 原始源与本跳 PCO 发送方不一致）。
 - Dir 列 R 标记（F 节）：原始源 ≠ 本跳发送方且原始源非空时加 R；发送方
  为 0 不比较（不算不一致）；CCO 原点被转发仍标 ↓R。方向未知且中继时
  显示 *R：合并帧 present=false（中继/混合源）、P2P 方向标志未填、广播
