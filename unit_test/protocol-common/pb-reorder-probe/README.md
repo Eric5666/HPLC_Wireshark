@@ -38,9 +38,13 @@ QT=C:/Qt/6.11.2/mingw_64 ./build.sh          # Windows
 | 聚合帧坏块 | 翻转 seq=1 块 CRC → `cascade_crc_skipped==1`，只保留 `'A'` 记录 |
 | GW2022/GW2026 乱序 4 块 | 解析器经 `assemble()` 输出体 272B、体序 `0 1 2 3`、`pb_crc_ok` |
 | GW2022/GW2026 单站坏 CRC | 坏块与首 MSDU span 相交时不交付解析；坏块在 span 后时仍交付首 MSDU；CRC 状态保留以供标红 |
+| GW2022/GW2026 乱序到达 + 坏 CRC | `seq1` 坏块不污染 `seq0` 首 span；`seq0` 坏块阻止交付；逐块 CRC 仍按到达序回填 |
+| GW2022/GW2026 后续 MSDU 坏块边界 | 后续跨度坏块不阻止首 MSDU 交付；首 MSDU 跨坏块时整条体流拒交，即使后续 MSDU 在好块 |
 | 跨帧污染回归 | 无 END 帧之后紧跟完整帧（同一 `MsduState`）仍正常重组 272B |
 
 ## 说明
+
+- GW2022/GW2026 顶层对每个重组体流只调用一次 MSDU 解析器；解析器按首个 MSDU 头声明长度切片，不会继续遍历后续 MSDU。坏块若与这个 span 相交，当前完整体流整体不交付；不会出现同一调用中“后续 MSDU 继续解析”的路径。
 
 - 单帧多块重组的帧内状态**不再挂在会话级 `MsduState`** 上；`MsduState` 参数仅为签名兼容，
   函数内 `Q_UNUSED`。旧实现下「无 END 帧 → 后续正常帧整帧被废」的跨帧污染已消除。

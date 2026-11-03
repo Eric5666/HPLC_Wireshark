@@ -395,6 +395,102 @@ static void test_single_bad_crc_span_gate() {
     run_case(true,  1, true,  "gw26: bad CRC after MSDU span");
 }
 
+// 乱序到达 + 坏 CRC：CRC 状态按线序回填，MSDU span 则按 seq 重组序判断。
+static void test_out_of_order_bad_crc_span() {
+    const int seqs[2] = {1, 0};             // seq1 先到，seq0 后到
+    const int pb_size = 72;
+    const int body_len = pb_size - 1 - 3;
+    const int seq0_arrival = 1;
+    const auto make_frame = [&](bool gw2026, int bad_arrival, int msdu_len) {
+        QByteArray f = gw2026 ? gw2026_frame(seqs, 2)
+                              : gw2022_frame(seqs, 2, true);
+        quint8* p = reinterpret_cast<quint8*>(f.data());
+        quint8* body = p + 16 + seq0_arrival * pb_size + 1;
+        // len=8 的 span 为 16B；len=68 的 76B span 跨入逻辑 seq1 块。
+        body[0] = 0x04;
+        body[1] = 0;
+        body[2] = quint8(msdu_len & 0xFF);
+        body[3] = quint8((msdu_len >> 8) & 0x07);
+        for (int i = 0; i < 2; ++i)
+            put_crc24(p + 16 + i * pb_size, pb_size);
+        p[16 + bad_arrival * pb_size + pb_size - 1] ^= 0x01;
+        return f;
+    };
+    const auto run_case = [&](bool gw2026, int bad_arrival, int msdu_len,
+                              bool expect_delivery, const char* label) {
+        MpduInfo info; MsduState msdu; QByteArray complete;
+        const QByteArray f = make_frame(gw2026, bad_arrival, msdu_len);
+        const QString err = gw2026
+            ? gw_2026_sof::assemble(f, info, msdu, complete, 0, false)
+            : gw_2022_sof::assemble(f, info, msdu, complete, 0, false);
+        check(QString("%1: assemble succeeds").arg(label).toUtf8().constData(), err.isEmpty());
+        check(QString("%1: CRC result stays in arrival order").arg(label).toUtf8().constData(),
+              info.pb_crc_oks.size() == 2
+              && !info.pb_crc_oks[bad_arrival]
+              && info.pb_crc_oks[1 - bad_arrival]);
+        check(QString("%1: gate follows seq-order span").arg(label).toUtf8().constData(),
+              expect_delivery ? complete.size() == 2 * body_len : complete.isEmpty());
+    };
+    run_case(false, 0, 8,  true,  "gw22: seq1 bad, seq0 span good");
+    run_case(false, 0, 68, false, "gw22: bad seq1 intersects span");
+    run_case(false, 1, 8,  false, "gw22: seq0 span bad");
+    run_case(true,  0, 8,  true,  "gw26: seq1 bad, seq0 span good");
+    run_case(true,  0, 68, false, "gw26: bad seq1 intersects span");
+    run_case(true,  1, 8,  false, "gw26: seq0 span bad");
+}
+
+// 首 MSDU span 门的多 MSDU 边界：坏块只落在后续 MSDU 时仍交付首条；
+// 首 MSDU 自身跨坏块则整条重组流拒交，即使更后面的 MSDU 位于好块。
+static void test_multiple_msdu_bad_crc_boundary() {
+    const int pb_size = 72;
+    const int body_len = pb_size - 1 - 3;
+    const int seqs2[2] = {1, 0};          // seq1 先到，seq0 后到
+    const int seqs3[3] = {2, 0, 1};       // 先 seq2，后 seq0、seq1
+    const auto set_short_header = [](quint8* body, int off, int len) {
+        body[off] = 0x04;                 // version=2，使用 span 门的 4B 头
+        body[off + 1] = 0;
+        body[off + 2] = quint8(len & 0xFF);
+        body[off + 3] = quint8((len >> 8) & 0x07);
+    };
+    const auto run_case = [&](bool gw2026, bool first_crosses_bad,
+                              const char* label) {
+        const int n = first_crosses_bad ? 3 : 2;
+        const int* seqs = first_crosses_bad ? seqs3 : seqs2;
+        QByteArray f = gw2026 ? gw2026_frame(seqs, n)
+                              : gw2022_frame(seqs, n, true);
+        quint8* p = reinterpret_cast<quint8*>(f.data());
+        quint8* seq0_body = p + 16 + 1 * pb_size + 1;
+        if (first_crosses_bad) {
+            set_short_header(seq0_body, 0, 68); // span=76，跨入坏 seq1
+            quint8* later_good_body = p + 16 + 0 * pb_size + 1; // 逻辑 seq2
+            set_short_header(later_good_body, 0, 8); // 后续 MSDU 在好块
+        } else {
+            set_short_header(seq0_body, 0, 8); // 首 span=16，只覆盖好 seq0
+            set_short_header(seq0_body, 60, 8); // 后续 MSDU span 76..92 跨坏 seq1
+        }
+        for (int i = 0; i < n; ++i)
+            put_crc24(p + 16 + i * pb_size, pb_size);
+        const int bad_arrival = first_crosses_bad ? 2 : 0;
+        p[16 + bad_arrival * pb_size + pb_size - 1] ^= 0x01;
+
+        MpduInfo info; MsduState msdu; QByteArray complete;
+        const QString err = gw2026
+            ? gw_2026_sof::assemble(f, info, msdu, complete, 0, false)
+            : gw_2022_sof::assemble(f, info, msdu, complete, 0, false);
+        check(QString("%1: assemble succeeds").arg(label).toUtf8().constData(), err.isEmpty());
+        check(QString("%1: bad block remains marked").arg(label).toUtf8().constData(),
+              info.pb_crc_oks.size() == n && !info.pb_crc_oks[bad_arrival]
+              && !info.pb_crc_ok);
+        check(QString("%1: first-span policy").arg(label).toUtf8().constData(),
+              first_crosses_bad ? complete.isEmpty()
+                                : complete.size() == n * body_len);
+    };
+    run_case(false, false, "gw22: later MSDU crosses bad block");
+    run_case(false, true,  "gw22: first bad, later good MSDU discarded");
+    run_case(true,  false, "gw26: later MSDU crosses bad block");
+    run_case(true,  true,  "gw26: first bad, later good MSDU discarded");
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     test_reorder_core();
@@ -406,6 +502,8 @@ int main(int argc, char** argv) {
     test_parsers();
     test_parser_2026();
     test_single_bad_crc_span_gate();
+    test_out_of_order_bad_crc_span();
+    test_multiple_msdu_bad_crc_boundary();
     std::printf("\nRESULT: %s (%d failures)\n",
                 g_fails ? "FAILURES" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;
