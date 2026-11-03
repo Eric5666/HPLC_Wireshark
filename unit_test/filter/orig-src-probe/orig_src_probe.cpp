@@ -6,6 +6,11 @@
 //     rejected-frame empty, CCO naming.
 //  C. Filter: sta- word match (incl. sta-1 vs sta-11 boundary), MAC-pattern
 //     expansion to orig TEIs, substring path, negatives.
+//  D. Dir: merged frame with only-CCO orig sources shows downlink (NW cascade
+//     E2E: 2 aggregated PBs, 2 CCO records, relay-PCO hop).
+//  E. Draw-time MAC backfill: multi-source/dst entries parsed MAC-less show
+//     the learned MAC on the next data() read after learning (page-switch /
+//     history redraw), broadcast never looks up.
 // Exit 0 iff every check passes.
 #include <cstdio>
 #include <cstdint>
@@ -17,6 +22,9 @@
 #include "iprotocolparser.h"
 #include "gw_protocol/gw_2026/gw_2026_parser.h"
 #include "gw_protocol/gw_2026/gw_2026_msdu_parser.h"
+#include "nw_2026_parser.h"
+#include "fieldtools.h"
+#include "crc.h"
 #include "packetlistmodel.h"
 
 static int g_fails = 0;
@@ -33,6 +41,82 @@ static QString srcs_str(const QVector<TeiMacPair>& v) {
     for (const auto& p : v)
         parts << QString("%1:%2").arg(p.tei).arg(p.mac, 12, 16, QChar('0'));
     return parts.join(" ");
+}
+static void put_mac(quint8* p, quint64 mac) {
+    for (int i = 0; i < 6; ++i) p[i] = (quint8)((mac >> (8 * i)) & 0xFF);
+}
+static void put_crc24(quint8* blk, int len) {
+    const quint32 calc = crc24_lsb(blk, len);
+    blk[len - 3] = calc & 0xFF;
+    blk[len - 2] = (calc >> 8) & 0xFF;
+    blk[len - 1] = (calc >> 16) & 0xFF;
+}
+// 与 nw-dlofdma-crc-probe 的 build_nw_assoc 同构:NW AssocReq MAC 帧 134B。
+static QByteArray build_nw_assoc(int dst_tei, quint64 dst_mac, int src_tei,
+                                 quint64 src_mac, int restart) {
+    QByteArray mme(80, 0);
+    quint8* m = reinterpret_cast<quint8*>(mme.data());
+    m[0] = 0x01;
+    m[1] = 0x30; m[2] = 0x00;        // MMType 0x0030 ASSOCREQ (LE)
+    put_mac(m + 6, src_mac);         // STAMAC at mme offset 6
+    const int msdu_len = 18 + (int)mme.size();
+    QByteArray f(32 + msdu_len + 4, 0);
+    quint8* p = reinterpret_cast<quint8*>(f.data());
+    p[0] = 0x02;                     // version 1, long head
+    p[2] = quint8(msdu_len & 0xFF); p[3] = quint8((msdu_len >> 8) & 0xFF);
+    p[4] = quint8(dst_tei & 0xFF);
+    p[5] = quint8(((dst_tei >> 8) & 0x0F) | ((src_tei & 0x0F) << 4));
+    p[6] = quint8((src_tei >> 4) & 0xFF);
+    p[7] = quint8((restart & 0x0F) << 4);
+    p[10] = 0xEE; p[11] = 0x64;
+    put_mac(p + 12, dst_mac);
+    put_mac(p + 32, dst_mac);
+    put_mac(p + 38, src_mac);
+    p[44] = 0x00; p[45] = 0x81; p[46] = 0x00; p[47] = 0x00;  // VLAN 0x8100
+    p[48] = 0xE1; p[49] = 0x88;                              // type 0x88E1
+    memcpy(p + 50, mme.constData(), mme.size());
+    return f;
+}
+// NW 级联帧:单站点 SOF v2,2 块聚合 PB(264B,TMI 9),级联体流 272B =
+// 2 条记录(头 2B:长度 12b + Start/End + MAC 帧 134B),源均为 CCO。
+// 帧级本跳为中继 PCO(FCH 源 TEI 5):本跳说明不了源,orig 才是源证据。
+static QByteArray build_cascade_frame(quint64 cco, quint64 sta27, quint64 sta42) {
+    QByteArray stream;
+    const QByteArray mac1 = build_nw_assoc(27, sta27, 1, cco, 5);  // CCO -> STA27
+    const QByteArray mac2 = build_nw_assoc(42, sta42, 1, cco, 5);  // CCO -> STA42
+    auto append_rec = [&stream](const QByteArray& mac, bool start, bool end) {
+        const int clen = mac.size();
+        stream.append(char(clen & 0xFF));
+        stream.append(char(((clen >> 8) & 0x0F) | (start ? 0x10 : 0) | (end ? 0x20 : 0)));
+        stream.append(mac);
+    };
+    append_rec(mac1, true, false);
+    append_rec(mac2, false, true);
+    // 体流分装 2 块聚合 PB(每块体 256B):记录 2 跨块边界,级联解析按体流连续读。
+    QByteArray body(512, 0);
+    memcpy(body.data(), stream.constData(), stream.size());
+    QByteArray f(544, 0);
+    quint8* p = reinterpret_cast<quint8*>(f.data());
+    p[0] = 0x01;                     // SOF, SNID 0
+    set_bits(p, 1, 0, 12, 5);        // FCH 源 TEI = 5(中继 PCO 本跳,非 CCO)
+    set_bits(p, 2, 4, 12, 0xFFF);    // FCH 目的 TEI = 广播
+    p[4] = quint8(2 << 2);           // 单站、非训练、PB 个数 2(bits2-5)
+    set_bits(p, 8, 0, 12, 100);      // 帧长(显示用)
+    p[12] = 0x20;                    // version 2
+    p[6] = quint8(9 << 1);           // TMI 9 -> 264B(bit0=0 非 Bitloading)
+    put_crc24(p, 16);                // FCH CRC24
+    auto block = [](const QByteArray& body256, int seq) {
+        QByteArray blk(264, 0);
+        quint8* b = reinterpret_cast<quint8*>(blk.data());
+        b[0] = quint8(seq & 0xFF); b[1] = quint8((seq >> 8) & 0xFF);
+        b[2] = 0x01;                 // agg bit0 = 1:聚合分支
+        memcpy(b + 4, body256.constData(), body256.size());
+        put_crc24(b, 264);
+        return blk;
+    };
+    f.replace(16, 264, block(body.mid(0, 256), 0));
+    f.replace(280, 264, block(body.mid(256, 256), 1));
+    return f;
 }
 
 int main(int argc, char** argv) {
@@ -151,6 +235,8 @@ int main(int argc, char** argv) {
         cco.msdu.simple_head = false;
         cco.msdu.msdu_src_tei = -1;
         cco.msdu.orig_srcs.append({1, macCco});
+        PacketEntry cco_relay = cco;  // CCO 原始源与非零本跳发送方不一致 -> R
+        cco_relay.mpdu.src_tei = 5;
         PacketEntry p;  // precondition: frame src present -> single, never multi
         p.accepted = true;
         p.msdu.present = true;
@@ -159,7 +245,7 @@ int main(int argc, char** argv) {
         p.msdu.msdu_src_mac = macC;
         p.msdu.orig_srcs.append({11, macA});
         p.msdu.orig_srcs.append({12, macB});
-        model.append_packets(QVector<PacketEntry>{m, s, rj, cco, p});
+        model.append_packets(QVector<PacketEntry>{m, s, rj, cco, p, cco_relay});
         model.set_display_filter(QString());
         const auto col = [&](int row) {
             return model.data(model.index(row, PacketListModel::COL_ORIG_SRC), Qt::DisplayRole).toString();
@@ -172,6 +258,16 @@ int main(int argc, char** argv) {
         check(col(3) == QStringLiteral("CCO [00:11:22:33:44:55]"), "column CCO naming");
         check(col(4) == QStringLiteral("STA-5 [0a:0b:0c:0d:0e:0f]"),
               "column precondition: frame src present -> single, not multi");
+        // Dir: merged frame whose orig sources are only CCO shows downlink.
+        const auto dir = [&](int row) {
+            return model.data(model.index(row, PacketListModel::COL_DIR), Qt::DisplayRole).toString();
+        };
+        check(dir(0) == QStringLiteral("*"), "dir multi non-CCO unchanged");
+        check(dir(1) == QStringLiteral("*"), "dir single unchanged");
+        check(dir(2) == QStringLiteral("*"), "dir rejected unchanged");
+        check(dir(3) == QStringLiteral("\u2193"), "dir merged only-CCO downlink");
+        check(dir(4) == QStringLiteral("*"), "dir frame-src-present unchanged");
+        check(dir(5) == QStringLiteral("\u2193R"), "dir merged CCO source mismatch is relay");
     }
 
     // ---- C. Filter ----
@@ -319,6 +415,238 @@ int main(int argc, char** argv) {
         t("sta-word-neg", "sta-99", m, false);
         t("precondition-filter", "sta-12", p, false);
         t("precondition-filter", "sta-5", p, true);
+    }
+
+    // ---- D. Dir: merged frame with only-CCO orig sources shows downlink ----
+    // NW cascade E2E: single-station SOF v2, 2 aggregated PBs, cascade stream
+    // of 2 records, both CCO-originated. Frame-level hop is a relay PCO.
+    {
+        const quint64 cco   = mac6(0x02, 0, 0, 0, 0, 0x01);
+        const quint64 sta27 = mac6(0x02, 0, 0, 0, 0, 0x27);
+        const quint64 sta42 = mac6(0x02, 0, 0, 0, 0, 0x42);
+        NW_2026_Parser parser;
+        ParseFilter filt;
+        BplcFrame fr;
+        fr.meta.from_raw = true;
+        fr.data = QByteArray(1, char(0)) + build_cascade_frame(cco, sta27, sta42);
+        MsduState msdu;
+        const auto r = parser.parse(fr, msdu, filt);
+        check(r.accept, "cascade accept");
+        check(r.msdu.cascade, "cascade flag");
+        // 级联帧 present=true:级联分支每解析一条记录即置 present(与 UL-OFDMA
+        // 等 present=false 的合并类不同,此前“present false”断言是误写)。
+        check(r.msdu.present, "cascade present true");
+        check(r.msdu.orig_srcs.size() == 1
+              && r.msdu.orig_srcs[0].tei == 1
+              && r.msdu.orig_srcs[0].mac == cco,
+              "cascade orig_srcs only CCO");
+        PacketListModel modelD;
+        PacketEntry e;
+        e.accepted = r.accept;
+        e.msdu = r.msdu;
+        e.mpdu = r.mpdu;
+        e.protocol = kProtocolNw2026;
+        modelD.append_packets(QVector<PacketEntry>{e});
+        modelD.set_display_filter(QString());
+        check(modelD.data(modelD.index(0, PacketListModel::COL_DIR), Qt::DisplayRole).toString()
+                  == QStringLiteral("\u2193R"),
+              "dir cascade only-CCO relayed downlink");
+        check(modelD.data(modelD.index(0, PacketListModel::COL_ORIG_SRC), Qt::DisplayRole).toString()
+                  == QStringLiteral("CCO [02:00:00:00:00:01]"),
+              "orig cascade only-CCO display");
+        // Synthetic guards: mixed origins and TEI-0-only origins stay "*".
+        PacketListModel modelG;
+        PacketEntry mx;  // mixed CCO + station
+        mx.accepted = true;
+        mx.msdu.present = false;
+        mx.msdu.simple_head = false;
+        mx.msdu.msdu_src_tei = -1;
+        mx.msdu.orig_srcs.append({1, cco});
+        mx.msdu.orig_srcs.append({27, sta27});
+        PacketEntry z;  // TEI-0-only: no valid source
+        z.accepted = true;
+        z.msdu.present = false;
+        z.msdu.simple_head = false;
+        z.msdu.msdu_src_tei = -1;
+        z.msdu.orig_srcs.append({0, 0});
+        modelG.append_packets(QVector<PacketEntry>{mx, z});
+        modelG.set_display_filter(QString());
+        const auto dirG = [&](int row) {
+            return modelG.data(modelG.index(row, PacketListModel::COL_DIR), Qt::DisplayRole).toString();
+        };
+        check(dirG(0) == QStringLiteral("*"), "dir mixed origins unchanged");
+        check(dirG(1) == QStringLiteral("*"), "dir TEI-0-only unchanged");
+    }
+
+    // ---- E. Model column: learned MAC backfill at draw time ----
+    // Multi-source/dst entries parsed with mac==0 (short-head/TEI-only
+    // segments) show the bare name first; once the TEI->MAC pair is
+    // learned (a later frame appended), the NEXT data() read shows the
+    // MAC -- no re-parse. This is the page-switch/history redraw case:
+    // data() recomputes from the current table on every paint.
+    {
+        const quint64 ccoMac = mac6(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
+        const quint64 sta11Mac = mac6(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x0b);
+        PacketListModel modelE;
+        PacketEntry m;  // merged, CCO + station, both MAC-less at parse time
+        m.accepted = true;
+        m.mpdu.net_id = 1;
+        m.msdu.present = false;
+        m.msdu.simple_head = false;
+        m.msdu.msdu_src_tei = -1;
+        m.msdu.msdu_dst_tei = -1;
+        m.msdu.orig_srcs.append({1, 0});
+        m.msdu.orig_srcs.append({11, 0});
+        m.msdu.orig_dsts.append({1, 0});
+        m.msdu.orig_dsts.append({11, 0});
+        modelE.append_packets(QVector<PacketEntry>{m});
+        modelE.set_display_filter(QString());
+        const auto srcE = [&]() {
+            return modelE.data(modelE.index(0, PacketListModel::COL_ORIG_SRC), Qt::DisplayRole).toString();
+        };
+        const auto dstE = [&]() {
+            return modelE.data(modelE.index(0, PacketListModel::COL_ORIG_DST), Qt::DisplayRole).toString();
+        };
+        check(srcE() == QStringLiteral("CCO,STA-11"), "draw-time fill before learn bare");
+        check(dstE() == QStringLiteral("CCO,STA-11"), "dst draw-time fill before learn bare");
+        // Learn CCO + station MACs from a later frame (plus a broadcast
+        // pair, which must NOT backfill BCAST), then re-read the SAME
+        // row: redraw picks the learned MACs up without re-append.
+        PacketEntry l;
+        l.accepted = true;
+        l.mpdu.net_id = 1;
+        l.msdu.tei_mac_pairs.append({1, ccoMac});
+        l.msdu.tei_mac_pairs.append({11, sta11Mac});
+        l.msdu.tei_mac_pairs.append({0xFFF, mac6(0xff, 0xff, 0xff, 0xff, 0xff, 0xff)});
+        modelE.append_packets(QVector<PacketEntry>{l});
+        // 第 2 批起:绘制时回填的 MAC 来自"当前映射",用 [MAC*:..] 标注,
+        // 与解析时快照的 [..] 区分(避免 TEI 易主后无法辨别来源)。
+        check(srcE() == QStringLiteral("CCO [MAC*:00:11:22:33:44:55],STA-11 [MAC*:aa:bb:cc:dd:ee:0b]"),
+              "draw-time fill after learn src");
+        check(dstE() == QStringLiteral("CCO [MAC*:00:11:22:33:44:55],STA-11 [MAC*:aa:bb:cc:dd:ee:0b]"),
+              "draw-time fill after learn dst");
+        // Still-unknown TEI stays bare; broadcast never looks up.
+        PacketEntry u;
+        u.accepted = true;
+        u.mpdu.net_id = 1;
+        u.msdu.present = false;
+        u.msdu.simple_head = false;
+        u.msdu.msdu_src_tei = -1;
+        u.msdu.msdu_dst_tei = -1;
+        u.msdu.orig_srcs.append({99, 0});
+        u.msdu.orig_dsts.append({0xFFF, 0});
+        modelE.append_packets(QVector<PacketEntry>{u});
+        check(modelE.data(modelE.index(2, PacketListModel::COL_ORIG_SRC), Qt::DisplayRole).toString()
+                  == QStringLiteral("STA-99"),
+              "draw-time fill unknown stays bare");
+        check(modelE.data(modelE.index(2, PacketListModel::COL_ORIG_DST), Qt::DisplayRole).toString()
+                  == QStringLiteral("BCAST"),
+              "draw-time fill broadcast never looks up");
+    }
+
+    // ---- F. Dir R: relay marker when orig source differs from hop sender ----
+    // Rule (user 2026-10-30): Dir adds R when Orig Src != current sender and
+    // Orig Src is non-empty; sender==0 means no comparison (not inconsistent);
+    // a CCO origin relayed by another node still gets R (downlink R).
+    // Direction unknown + relay shows "*R" (unknown direction, relayed).
+    {
+        PacketListModel modelF;
+        auto merged = [](int sender, QVector<TeiMacPair> srcs) {
+            PacketEntry e;
+            e.accepted = true;
+            e.msdu.present = false;
+            e.msdu.simple_head = false;
+            e.msdu.msdu_src_tei = -1;
+            e.msdu.orig_srcs = srcs;
+            e.mpdu.src_tei = (quint16)sender;
+            return e;
+        };
+        auto single = [](int src, int dst, int sender) {
+            PacketEntry e;
+            e.accepted = true;
+            e.msdu.present = true;
+            e.msdu.simple_head = false;
+            e.msdu.msdu_src_tei = src;
+            e.msdu.msdu_dst_tei = dst;
+            e.mpdu.src_tei = (quint16)sender;
+            return e;
+        };
+        PacketEntry b0 = single(5, 0xFFF, 3);  // bcast, direction unknown
+        b0.msdu.msdu_send_type = 1;
+        b0.msdu.broadcast_direction = 0xFF;
+        PacketEntry b1 = single(5, 0xFFF, 5);
+        b1.msdu.msdu_send_type = 1;
+        b1.msdu.broadcast_direction = 0xFF;
+        PacketEntry nw = single(5, 0xFFF, 3);  // NW reserved bdir 0
+        nw.protocol = kProtocolNw2026;
+        nw.msdu.msdu_send_type = 1;
+        nw.msdu.broadcast_direction = 0;
+        PacketEntry cas = single(-1, 1, 3);  // cascade-style: frame src <= 0
+        cas.msdu.orig_srcs.append({5, 0});
+        // Broadcast unknown-direction + relay + known hops: right-arrow RN→
+        // iff hops > 1; hops 0xFF is the unknown sentinel (cases 9/11 rely on
+        // the default 0xFF and stay *R); no relay means no arrow even with hops.
+        PacketEntry h3 = single(5, 0xFFF, 3);  // unknown bdir + relay + hops 3
+        h3.msdu.msdu_send_type = 1;
+        h3.msdu.broadcast_direction = 0xFF;
+        h3.msdu.route_hops_left = 3;
+        PacketEntry h1 = single(5, 0xFFF, 3);  // unknown bdir + relay + hops 1
+        h1.msdu.msdu_send_type = 1;
+        h1.msdu.broadcast_direction = 0xFF;
+        h1.msdu.route_hops_left = 1;
+        PacketEntry rs = single(5, 0xFFF, 3);  // reserved bdir + relay + hops 2
+        rs.msdu.msdu_send_type = 1;
+        rs.msdu.broadcast_direction = 5;
+        rs.msdu.route_hops_left = 2;
+        PacketEntry nw3 = single(5, 0xFFF, 3);  // NW reserved bdir 0 + relay + hops 3
+        nw3.protocol = kProtocolNw2026;
+        nw3.msdu.msdu_send_type = 1;
+        nw3.msdu.broadcast_direction = 0;
+        nw3.msdu.route_hops_left = 3;
+        PacketEntry dh = single(5, 0xFFF, 5);  // unknown bdir, direct, hops 3
+        dh.msdu.msdu_send_type = 1;
+        dh.msdu.broadcast_direction = 0xFF;
+        dh.msdu.route_hops_left = 3;
+        modelF.append_packets(QVector<PacketEntry>{
+            merged(3, {{11, 0}}),            // 0: merged relayed
+            merged(11, {{11, 0}}),           // 1: merged direct
+            merged(0, {{11, 0}}),            // 2: merged sender unknown
+            merged(3, {{1, 0}, {27, 0}}),    // 3: merged mixed origins
+            single(5, 7, 3),                // 4: P2P flag unset + relay
+            single(5, 7, 5),                // 5: P2P flag unset, direct
+            single(1, 7, 3),                // 6: CCO origin relayed
+            single(5, 1, 3),                // 7: uplink relay
+            cas,                            // 8: cascade relay feeds direction
+            b0,                             // 9: bcast unknown bdir + relay
+            b1,                             // 10: bcast unknown bdir, direct
+            nw,                             // 11: NW reserved bdir + relay
+            h3,                             // 12: bcast unknown + relay + hops 3
+            h1,                             // 13: bcast unknown + relay + hops 1
+            rs,                             // 14: bcast reserved + relay + hops 2
+            nw3,                            // 15: NW reserved + relay + hops 3
+            dh,                             // 16: bcast unknown, direct, hops 3
+        });
+        modelF.set_display_filter(QString());
+        const auto dirF = [&](int row) {
+            return modelF.data(modelF.index(row, PacketListModel::COL_DIR), Qt::DisplayRole).toString();
+        };
+        check(dirF(0) == QStringLiteral("*R"), "dir merged relay *R");
+        check(dirF(1) == QStringLiteral("*"), "dir merged direct no R");
+        check(dirF(2) == QStringLiteral("*"), "dir merged sender 0 no comparison");
+        check(dirF(3) == QStringLiteral("*R"), "dir merged mixed origins *R");
+        check(dirF(4) == QStringLiteral("*R"), "dir P2P flag unset relay *R");
+        check(dirF(5) == QStringLiteral("*"), "dir P2P flag unset direct no R");
+        check(dirF(6) == QStringLiteral("\u2193R"), "dir CCO origin relayed downlink R");
+        check(dirF(7) == QStringLiteral("\u2191R"), "dir uplink relay");
+        check(dirF(8) == QStringLiteral("\u2191R"), "dir cascade relay feeds direction");
+        check(dirF(9) == QStringLiteral("*R"), "dir bcast unknown bdir relay *R");
+        check(dirF(10) == QStringLiteral("*"), "dir bcast unknown bdir direct no R");
+        check(dirF(11) == QStringLiteral("*R"), "dir NW reserved bdir relay *R");
+        check(dirF(12) == QStringLiteral("R3\u2192"), "dir bcast unknown relay hops3 right arrow");
+        check(dirF(13) == QStringLiteral("*R"), "dir bcast unknown relay hops1 no arrow");
+        check(dirF(14) == QStringLiteral("R2\u2192"), "dir bcast reserved relay hops2 right arrow");
+        check(dirF(15) == QStringLiteral("R3\u2192"), "dir NW reserved relay hops3 right arrow");
+        check(dirF(16) == QStringLiteral("*"), "dir bcast unknown direct hops3 no arrow");
     }
 
     std::printf("RESULT: %s (%d failures)\n", g_fails == 0 ? "ALL PASS" : "FAIL", g_fails);

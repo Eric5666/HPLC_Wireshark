@@ -525,6 +525,8 @@ void GW_2026_TreeBuilder::build(QTreeWidgetItem* root, const PacketEntry& e) {
             rm.fch_size = 16;
             rm.header_len = 1;
             rm.body = e.mpdu.pb_size - 4;
+            // 序列号重排后拼接序≠raw 块序:用槽位表定位(国网 pb_head 低 6 位)
+            rm.slot_raw_offset = tree_slot_raw_offsets(e.mpdu, 16, 1, 0x3F);
             tree_apply_msdu_range(msdu, rm, 0, e.msdu.total_len, e.msdu_body);
             tree_add_item(msdu, "Length", QString::number(e.msdu_body.size()));
             tree_render_msdu(msdu, e.msdu.tree, rm, e.msdu_body);

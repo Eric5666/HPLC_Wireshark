@@ -286,6 +286,9 @@ GW_2026_Parser::Result GW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
         }
         // 多站点帧(OFDMA/TDA,HDC2.0 4-2 表10/11/12/13):各站 MSDU 只组装进 sof_stations,
         // 从未进通用解析;逐站解析仅合并学习(对 + 头对 + 首个 topo 事件),不改显示。
+        // 注意:sof_parser 只在**站内序列号落位成功**时才填 st.msdu(否则留空),
+        // 所以下面的 isEmpty() 门已同时覆盖「缺块/越界/重复冲突 → 不解析不学习」,
+        // 与南网 body_parseable 口径一致。
         for (const auto& st : r.mpdu.sof_stations) {
             if (st.msdu.isEmpty()) continue;
             // CRC 失败块不解析(用户 2026-10-29 定,NW 同款多块补定):
@@ -297,8 +300,8 @@ GW_2026_Parser::Result GW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
             bool all_ok = true;
             for (bool ok : st.pb_crc_oks) all_ok = all_ok && ok;
             if (!all_ok
-                && !gw_2026_sof::msdu_span_avoids_bad_blocks(st.msdu, st.pb_crc_oks,
-                                                            int(st.pb_size)))
+                && !gw_2026_sof::msdu_span_avoids_bad_blocks(
+                       st.msdu, st.pb_crc_oks, int(st.pb_size) - 4))   // 块体长度 = 块长 - 头1B - CRC3B
                 continue;
             merge_msdu_learn(r.msdu, GW_2026_MsduParser::parse(st.msdu));
         }

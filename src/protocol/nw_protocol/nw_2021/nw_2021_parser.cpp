@@ -27,6 +27,7 @@ struct I18nRegNw2021Parser {
         trl::register_en("HRF 链路被过滤", "HRF Link Filtered");
         trl::register_en("SNID 不在白名单: 0x%1", "SNID Not in Whitelist: 0x%1");
         trl::register_en("TEI 不在白名单", "TEI not in whitelist");
+        trl::register_en("PB 序号异常未解析", "PB Sequence Error, Not Parsed");
         trl::register_en("PB 块数超上限(band=%1 tmi=%2 ext=%3 num=%4 max=%5)",
                          "PB Count Over Limit (band=%1 tmi=%2 ext=%3 num=%4 max=%5)");
     }
@@ -236,32 +237,27 @@ NW_2021_Parser::Result NW_2021_Parser::parse_inner(const BplcFrame& in, MsduStat
             // 保留 0 块语义(pb_size=0 的合法 0 块路径不受影响)。门与循环不动。
             if (r.mpdu.pb_num == 0 && r.mpdu.pb_size > 8) r.mpdu.pb_num = 1;
         }
-        // PB 块重组 + CRC24 校验(南网:块 = PB头4B + 块体(pb_size-8) + 保留1B + CRC24 3B)
+        // PB 块重组 + CRC24 校验 + **帧内按序列号重排**
+        // (南网:块 = PB头4B + 块体(pb_size-8) + 保留1B + CRC24 3B;
+        //  序列号 = byte0 bit0-7 + byte1 bit0-7 = 16bit LE,BPLC 表133 / SPLC 表47)
         if (r.mpdu.pb_size > 8 && r.mpdu.pb_num > 0) {
+            pb_asm::PbLayout lay{/*head*/4, /*rsv*/1, /*crc*/3,
+                                 /*agg_byte*/-1, /*agg_bit*/-1,
+                                 /*base*/16};
+            lay.seq_byte = 0;
+            lay.seq_mask = 0xFFFF;
+            const pb_asm::AssembleResult res =
+                pb_asm::assemble_pb_blocks(r.payload_for_log, r.mpdu.pb_num,
+                                           r.mpdu.pb_size, lay);
             const int body_len = r.mpdu.pb_size - 8;
-            QByteArray msdu_body;
-            bool all_pb_ok = true;
-            for (int i = 0; i < r.mpdu.pb_num; ++i) {
-                const int block_start = 16 + i * r.mpdu.pb_size;
-                if (block_start + r.mpdu.pb_size > r.payload_for_log.size()) break;
-                // PB CRC24:覆盖 PB 头 + 块体 + 保留字节(块内前 pb_size-3 字节,表7)
-                const quint8* blk = reinterpret_cast<const quint8*>(
-                    r.payload_for_log.constData()) + block_start;
-// crc24_lsb 内部遍历 len-3 字节;此处传 pb_size(全长)即校验块头+块体+尾保留,
-// 末 3B 为本 CRC 自身(crc.h 约定,勿传 pb_size-3 否则少算 3B)
-                const quint32 calc = crc24_lsb(blk, r.mpdu.pb_size);
-                const quint32 rx = (quint32)blk[r.mpdu.pb_size - 3]
-                                 | ((quint32)blk[r.mpdu.pb_size - 2] << 8)
-                                 | ((quint32)blk[r.mpdu.pb_size - 1] << 16);
-                const bool ok = (calc == rx);
-                all_pb_ok = all_pb_ok && ok;
-                r.mpdu.pb_crc_oks.append(ok);
-                msdu_body += r.payload_for_log.mid(block_start + 4, body_len);
-            }
-            // 截断不空转:循环遇载荷不足 break 时,已校验块数 < 声明块数,
-            // 此时 all_pb_ok 仍为初值 true,必须以校验块数与声明块数相等为门,
-            // 否则未校验块会被报成 CRC 通过(归一帧截断、真多块帧截断同洞)。
-            r.mpdu.pb_crc_ok = all_pb_ok && (r.mpdu.pb_crc_oks.size() == r.mpdu.pb_num);
+            // 逐块头/CRC 按到达序存(UI 序列判定依赖线序;体流按 seq 序)
+            pb_asm::arrival_order_blocks(res, &r.mpdu.pb_heads, &r.mpdu.pb_crc_oks);
+            // 截断不空转:已校验块数必须等于声明块数,否则未校验块会被误报 CRC 通过。
+            // 帧级 CRC 口径再叠加序列号重排成功(缺块/越界/冲突 → false)。
+            r.mpdu.pb_crc_ok = res.all_crc_ok && !res.truncated
+                               && (r.mpdu.pb_crc_oks.size() == r.mpdu.pb_num)
+                               && res.reassembly_ok;
+            const QByteArray msdu_body = res.msdu_body;
             if (!msdu_body.isEmpty()) {
                 r.msdu_body = msdu_body;
                 // BPLC 表107:单跳帧协议(版本=2)载波不支持、仅无线信道支持
@@ -273,13 +269,18 @@ NW_2021_Parser::Result NW_2021_Parser::parse_inner(const BplcFrame& in, MsduStat
                 // CRC 失败块不解析(用户 2026-10-29 定,同 NW_2026 口径 +
                 // 多块补定:好块要解析):首帧 span 完整落在好块内即解析,
                 // 横跨坏块时整段不解析,仅留摘要说明。
-                if (r.mpdu.pb_crc_ok
-                    || pb_asm::msdu_span_avoids_bad_blocks(msdu_body, r.mpdu.pb_crc_oks,
-                                                           body_len)) {
+                // 先过统一判据 body_parseable(序号缺块/重复冲突/越界 → 不解析):
+                // msdu_span_avoids_bad_blocks 只看块 CRC,不看序号完整性。
+                if (pb_asm::body_parseable(res)
+                    && (r.mpdu.pb_crc_ok
+                        || pb_asm::msdu_span_avoids_bad_blocks(msdu_body, r.mpdu.pb_crc_oks,
+                                                               body_len))) {
                     r.msdu = NW_2021_MsduParser::parse(msdu_body);
                     r.msdu_raw_base = (r.mpdu.pb_num == 1) ? (16 + 4) : -1;
                 } else {
-                    r.msdu.summary = trl::L("块 CRC 失败未解析");
+                    r.msdu.summary = res.reassembly_ok
+                        ? trl::L("块 CRC 失败未解析")
+                        : trl::L("PB 序号异常未解析");
                 }
             }
         }

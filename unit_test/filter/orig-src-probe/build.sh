@@ -13,6 +13,7 @@ mkdir -p build
 "$QT/libexec/moc" "$R/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp
 g++ -std=c++17 -fPIC \
   -I$R/src -I$R/src/protocol -I$R/src/protocol/common \
+  -I$R/src/protocol/nw_protocol/nw_2026 -I$R/src/protocol/nw_protocol/nw_2021 \
   -I$R/src/protocol/gw_protocol/gw_2026 -I$R/src/protocol/gw_protocol/gw_2026/beacon \
   -I$R/src/protocol/gw_protocol/gw_2026/sof -I$R/src/protocol/gw_protocol/gw_2026/ack \
   -I$R/src/protocol/gw_protocol/gw_2026/coord \
@@ -43,6 +44,14 @@ g++ -std=c++17 -fPIC \
   $R/src/protocol/gw_protocol/gw_2022/ack/gw_2022_ack_parser.cpp \
   $R/src/protocol/gw_protocol/gw_2022/coord/gw_2022_coord_parser.cpp \
   $R/src/protocol/gw_protocol/gw_2022/gw_2022_tree.cpp \
+  $R/src/protocol/nw_protocol/nw_2026/nw_2026_parser.cpp \
+  $R/src/protocol/nw_protocol/nw_2026/nw_2026_msdu_parser.cpp \
+  $R/src/protocol/nw_protocol/nw_2026/nw_2026_beacon_parser.cpp \
+  $R/src/protocol/nw_protocol/nw_2026/nw_2026_tree.cpp \
+  $R/src/protocol/nw_protocol/nw_2021/nw_2021_parser.cpp \
+  $R/src/protocol/nw_protocol/nw_2021/nw_2021_msdu_parser.cpp \
+  $R/src/protocol/nw_protocol/nw_2021/nw_2021_beacon_parser.cpp \
+  $R/src/protocol/nw_protocol/nw_2021/nw_2021_tree.cpp \
   -L$QT/lib -L$HOME/workspace/build_deps/libfix \
   -lQt6Widgets -lQt6Gui -lQt6Core -lQt6Concurrent -lEGL -lGL -o "$OUT"
 chmod +x "$OUT"

@@ -85,6 +85,7 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
             }
             info.sof_stations.clear();
             int blk = 32;   // PB 起点:FCH 16B + eFC 16B(表11/13 固定 16 字节)
+            bool any_reassembly_bad = false;   // 任一站序列号落位失败(缺块/越界/冲突)
             for (int si = 0; si < n_sites; ++si) {
                 SofStationPb st;
                 quint8 copy_mode = 0;
@@ -115,22 +116,29 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
                 st.pb_size    = (quint16)sz;
                 st.block_base = blk;
 
-                // 逐块 CRC24(国网布局:PB 头 1B + 块体 + CRC24 3B,无聚合标志)
-                for (int j = 0; j < st_pb_num; ++j) {
-                    const int off = blk + j * sz;
-                    if (off + sz > body.size()) {
-                        info.sof_stations.append(st);
-                        return trl::L("多站点 PB 块超出帧长");
-                    }
-                    const quint8* bp = reinterpret_cast<const quint8*>(body.constData()) + off;
-                    st.pb_heads.append(bp[0]);
-                    const quint32 calc = crc24_lsb(bp, sz);
-                    const quint32 rx = (quint32)bp[sz-3] | ((quint32)bp[sz-2] << 8) | ((quint32)bp[sz-1] << 16);
-                    st.pb_crc_oks.append(calc == rx);
-                    st.msdu += body.mid(off + 1, sz - 4);   // 块体 = 头 1B 之后、CRC 3B 之前
-                }
-                blk += st_pb_num * sz;
+                // 逐站 PB 组装:CRC24 + **帧内按序列号落位重排**(公共 pb_assembler)。
+                // 国网布局:PB 头 1B(bit7=END / bit6=START / 低 6 位=序列号)+ 块体 + CRC24 3B。
+                // 旧实现按到达位置切片(off = blk + j*sz),站内乱序时体序错,却仍会在
+                // UI 显示「乱序已重排」并让学习解析错序体。
+                pb_asm::PbLayout layout{/*head*/1, /*rsv*/0, /*crc*/3,
+                                        /*agg_byte*/-1, /*agg_bit*/-1,
+                                        /*base*/blk};
+                layout.seq_byte  = 0;
+                layout.seq_mask  = 0x3F;
+                layout.start_bit = 6;
+                layout.end_bit   = 7;
+                const pb_asm::AssembleResult res =
+                    pb_asm::assemble_pb_blocks(body, st_pb_num, sz, layout);
+                // 逐块头/CRC 按**到达序**存(UI 的「乱序已重排」判定依赖线序;体流按 seq 序)
+                pb_asm::arrival_order_blocks(res, &st.pb_heads, &st.pb_crc_oks);
+                // 仅重组可信(编号到齐、无缺块/越界/冲突)时交付体流:
+                // 否则 st.msdu 留空 → 树不显示该站 MSDU、学习门自然跳过。
+                if (pb_asm::body_parseable(res))
+                    st.msdu = res.msdu_body;
+                if (!res.reassembly_ok) any_reassembly_bad = true;
                 info.sof_stations.append(st);
+                if (res.truncated) break;   // 后续站点已无字节可切,停止(已收站点保留)
+                blk += st_pb_num * sz;
             }
             // 汇总字段(供 Info 列/树顶层显示)
             info.pb_num   = 0;
@@ -141,6 +149,17 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
             // 单站点路径(info.pb_crc_oks 由组装段填)与此多站分支互斥,无 double-append。
             for (const auto& st : info.sof_stations)
                 for (bool ok : st.pb_crc_oks) info.pb_crc_oks.append(ok);
+            // 帧级 CRC 状态(多站):全部站点块到齐 + 各块 CRC 全过。
+            // 旧实现从不设 pb_crc_ok(恒 false),导致完整 OFDMA 帧被 UI 误报
+            // 「CRC 不完整(重组失败)」;现按逐站块数/CRC 汇总。
+            {
+                bool all_ok = true;
+                for (const auto& st : info.sof_stations) {
+                    if (st.pb_crc_oks.size() < int(st.pb_num)) all_ok = false;  // 本站缺块
+                    for (bool ok : st.pb_crc_oks) all_ok = all_ok && ok;
+                }
+                info.pb_crc_ok = all_ok && !any_reassembly_bad;
+            }
             // 多站点 PB 布局已通过协议仿真帧验证，尚未经实包确认。
             // 已验证(strong)：
             //   · 块边界 —— 帧长恰好等于 16(FCH) + 16(eFC) + Σ(站点块数 × 块长)：
@@ -219,62 +238,30 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
     info.pb_size = (quint16)pb_size;
 
     int block_offset = 16;
-    // 逐块 CRC24 + 块体提取(公共 pb_assembler;国网布局:pb_head 1B + 块体 +
-    // CRC24 3B,无聚合标志字段;序列号状态机重组逻辑保持原语义不变)
-    const pb_asm::PbLayout layout{/*head*/1, /*rsv*/0, /*crc*/3,
-                                  /*agg_byte*/-1, /*agg_bit*/-1,
-                                  /*base*/block_offset};
+    // 逐块 CRC24 + 块体提取 + **帧内按序列号重排**(公共 pb_assembler)。
+    // 国网布局:PB 头 1B(bit7=END / bit6=START / 低 6 位=序列号)+ 块体 + CRC24 3B,
+    // 无聚合标志字段。旧实现把单帧多块重组挂在会话级共享 MsduState 上(跨帧污染),
+    // 现改为帧内局部状态,不再读写调用方 MsduState。
+    Q_UNUSED(msdu);
+    pb_asm::PbLayout lay{/*head*/1, /*rsv*/0, /*crc*/3,
+                         /*agg_byte*/-1, /*agg_bit*/-1,
+                         /*base*/block_offset};
+    lay.seq_byte  = 0;      // PB 头 byte0 低 6 位 = 序列号(HDC SOF PB 头)
+    lay.seq_mask  = 0x3F;
+    lay.start_bit = 6;      // bit6 = START
+    lay.end_bit   = 7;      // bit7 = END
     const pb_asm::AssembleResult res =
-        pb_asm::assemble_pb_blocks(body, info.pb_num, info.pb_size, layout);
-    if (res.truncated) {
-        msdu = MsduState{};
+        pb_asm::assemble_pb_blocks(body, info.pb_num, info.pb_size, lay);
+    if (res.truncated)
         return trl::L("PB 块超出帧长");
-    }
-    const bool all_pb_ok = res.all_crc_ok;
-    int block_idx = 0;   // 块序(truncated 时仅完整块,但截断已提前报错,序号一致)
-    for (const auto& b : res.blocks) {
-        info.pb_heads.append(b.head_byte);
-        info.pb_crc_oks.append(b.crc_ok);
-        if (!b.crc_ok) {   // 失败块同样记录,供 UI 逐块展示(头仍可读,CRC 状态 FAIL)
-            ++block_idx;
-            continue;
-        }
-        const quint8 pb_head = b.head_byte;
-        const bool   is_start = (pb_head & 0x40) != 0;
-        const bool   is_end   = (pb_head & 0x80) != 0;
-        const quint8 seq      = pb_head & 0x3F;
-        // 保存首块(起始块)的 PB 头原始字节供 UI 显示;多块时后块不覆盖
-        if (block_idx == 0) info.pb_head = pb_head;
-        const int body_len = b.body_len;
-        const QByteArray pb_body = body.mid(b.body_raw_offset, body_len);
-        ++block_idx;
-        if (is_start && msdu.received_count == 0) {
-            msdu.expected_len = body_len;
-            msdu.buffer.resize(info.pb_num * body_len);
-            std::fill(msdu.buffer.begin(), msdu.buffer.end(), 0);
-            msdu.received_count = 1;
-            std::copy(pb_body.begin(), pb_body.end(), msdu.buffer.begin());
-        } else if (msdu.received_count > 0 && seq == (quint8)msdu.received_count) {
-            int dst = msdu.received_count * msdu.expected_len;
-            if (dst + pb_body.size() > msdu.buffer.size())
-                msdu.buffer.resize(dst + pb_body.size());
-            std::copy(pb_body.begin(), pb_body.end(), msdu.buffer.begin() + dst);
-            msdu.received_count++;
-        } else {
-            // 序乱:清重组状态,视为未完成(与原实现一致,不拒收整帧)
-            msdu = MsduState{};
-            return QString();
-        }
-
-        if (is_end) {
-            complete_msdu_body =
-                msdu.buffer.left(msdu.received_count * msdu.expected_len);
-            msdu = MsduState{};
-            info.pb_crc_ok = all_pb_ok;
-            return QString();
-        }
-    }
-    info.pb_crc_ok = all_pb_ok;
+    // 逐块头/CRC 按**到达序**存(UI 的「乱序已重排」判定依赖线序;体流按 seq 序)
+    pb_asm::arrival_order_blocks(res, &info.pb_heads, &info.pb_crc_oks);
+    if (!res.blocks.isEmpty()) info.pb_head = res.blocks.first().head_byte;
+    // 帧级 CRC 口径:全部声明块到齐 + CRC 全过 + 序列号重排成功(缺块/越界/冲突→false)
+    info.pb_crc_ok = res.all_crc_ok && !res.truncated && res.reassembly_ok;
+    // 统一判据(与 GW/NW 其余三处一致):仅重组可信时才交付完整 MSDU 体
+    if (pb_asm::body_parseable(res))
+        complete_msdu_body = res.msdu_body;
     return QString();
 }
 
@@ -287,7 +274,6 @@ struct I18nRegSof {
         trl::register_en("PB 块超出帧长", "PB block exceeds frame length");
         trl::register_en("OFDMA/TDA 站点数为保留值 0(表10/表12 仅定义 1-3)",
                          "OFDMA/TDA Station Count Is Reserved Value 0 (Tables 10/12 Define 1-3 Only)");
-        trl::register_en("多站点 PB 块超出帧长", "Multi-Station PB Block Exceeds Frame Length");
         trl::register_en("帧子类型为保留值(表7 仅定义 0-3)",
                          "Frame Subtype Is Reserved Value (Table 7 Defines 0-3 Only)");
         trl::register_en("OFDMA PB 大小越界(copy_mode=%1 → %2B，协议限 72/136)",

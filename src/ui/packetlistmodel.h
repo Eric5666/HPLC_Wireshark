@@ -120,9 +120,12 @@ private:
     QString block_path(int idx) const;
     void touch_lru(int idx) const;
     /// @brief 更新 TEI→MAC 映射表(按 NID 分表;取自 MSDU 头 MACAddrFlag 扩展字段)
-    void update_tei_mac(const PacketEntry& e);
+    /// @return 本条目是否新增或改写了映射
+    bool update_tei_mac(const PacketEntry& e);
     /// @brief 学习一对 TEI↔MAC(正反两表同步;TEI 易主时清旧 MAC 的反向条目)
-    void learn_tei_mac(quint32 nid, quint16 tei, quint64 mac);
+    bool learn_tei_mac(quint32 nid, quint16 tei, quint64 mac);
+    /// @brief 通知当前视图重新绘制依赖 TEI→MAC 的列;不加载/扫描历史条目
+    void notify_mac_mapping_changed();
     /// @brief 查 TEI 对应 MAC(48-bit;无记录返回 0)
     quint64 lookup_mac(quint32 nid, quint16 tei) const;
     /// @brief 反查 MAC 对应 TEI(48-bit;无记录返回 0)
