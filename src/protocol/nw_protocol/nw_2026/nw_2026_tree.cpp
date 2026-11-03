@@ -570,9 +570,10 @@ void NW_2026_TreeBuilder::build(QTreeWidgetItem* root, const PacketEntry& e) {
             } else if (e.mpdu.pb_num <= 0 || e.mpdu.pb_size <= 0) {
                 // 无数据物理块情形，先按 pb_num 区分「合法无块」与「查表失败」，再按 multi/train 区分帧型
                 // (byte4 bit1 在多站点帧里是 OFDMA 帧类型 bit0,不是训练帧标识!)
-                const bool multi = (e.mpdu.version == 2) && !e.meta.is_rf
-                                   && (raw_sz > 4) && ((d[4] & 0x01) != 0);
-                const bool train = (!multi) && (e.mpdu.version == 2) && !e.meta.is_rf
+                // 结构化判据(与 UI 同口径,不再依赖 version):多站 = parser 已解析出站点列表;
+                // 训练帧 = 非多站 + 表24/25 byte4 bit1。
+                const bool multi = !e.mpdu.sof_stations.isEmpty();
+                const bool train = (!multi) && !e.meta.is_rf
                                    && (raw_sz > 4) && ((d[4] & 0x02) != 0);
                 QString why;
                 if (e.mpdu.pb_size <= 0 && e.mpdu.pb_num > 0) {
@@ -600,7 +601,8 @@ void NW_2026_TreeBuilder::build(QTreeWidgetItem* root, const PacketEntry& e) {
             } else {
             const int pb_num     = e.mpdu.pb_num;
             // DL-OFDMA 帧 PB 块自 32 起(FCH 16 + eFC 16B);普通帧自 16 起
-            const bool ofdma_pb = (e.mpdu.version == 2) && (raw_sz > 4) && ((d[4] & 0x01) != 0);
+            // 结构化判据:多站(DL-OFDMA)PB 自 32 起;单站帧 sof_stations 为空 → 16
+            const bool ofdma_pb = !e.mpdu.sof_stations.isEmpty();
             int pb_received = 0;   // 完整容纳块数(截断提示"实收"依据)
             for (int bi = 0; bi < pb_num; ++bi) {
                 const int blk_off = (ofdma_pb ? 32 : 16) + bi * e.mpdu.pb_size;
@@ -743,6 +745,8 @@ void NW_2026_TreeBuilder::build(QTreeWidgetItem* root, const PacketEntry& e) {
             rm.fch_size = 16;
             rm.header_len = 4;
             rm.body = e.mpdu.pb_size - 8;
+            // 序列号重排后拼接序≠raw 块序:用槽位表定位(SPLC 表47 序列号)
+            rm.slot_raw_offset = tree_slot_raw_offsets(e.mpdu, 16, 4, 0xFF);
             tree_apply_msdu_range(msdu, rm, 0, e.msdu.total_len, e.msdu_body);
             // 聚合:级联体流长度(级联记录流有效长度,非单个 MSDU 长度语义);
             // 非聚合保持 Length;两类长度节点同组节点口径挂高亮区间(rel 0..len)
@@ -769,6 +773,8 @@ void NW_2026_TreeBuilder::build(QTreeWidgetItem* root, const PacketEntry& e) {
             rm.fch_size = 16;
             rm.header_len = 4;
             rm.body = e.mpdu.pb_size - 8;
+            // 序列号重排后拼接序≠raw 块序:用槽位表定位(SPLC 表47 序列号)
+            rm.slot_raw_offset = tree_slot_raw_offsets(e.mpdu, 16, 4, 0xFF);
             auto* msdu = tree_add_item(root, "MSDU (Reassembled)",
                 QStringLiteral("%1 B").arg(e.msdu_body.size()));
             tree_apply_msdu_range(msdu, rm, 0, e.msdu_body.size(), e.msdu_body);

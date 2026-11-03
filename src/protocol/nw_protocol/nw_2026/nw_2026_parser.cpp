@@ -132,6 +132,7 @@ struct I18nReg {
         trl::register_en("聚合帧(%1 个级联 MAC 帧)", "Aggregated Frame (%1 cascade MAC frames)");
         trl::register_en("（%1 段因块 CRC 失败未解析）", "(%1 segments skipped: block CRC failed)");
         trl::register_en("块 CRC 失败未解析", "Block CRC failed, not parsed");
+        trl::register_en("PB 序号异常未解析", "PB Sequence Error, Not Parsed");
         trl::register_en("聚合帧(%1 帧: %2)", "Aggregated Frame (%1 frames: %2)");
         trl::register_en("聚合帧(%1 帧: %2 ×%3)", "Aggregated Frame (%1 frames: %2 x%3)");
         trl::register_en(", ", ", ");
@@ -441,18 +442,24 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
             }
         }
         if (r.mpdu.pb_size > 8 && r.mpdu.pb_num > 0) {
-            const pb_asm::PbLayout layout{/*head*/4, /*rsv*/1, /*crc*/3,
-                                          /*agg_byte*/2, /*agg_bit*/0,
-                                          /*base*/pb_base};
+            pb_asm::PbLayout layout{/*head*/4, /*rsv*/1, /*crc*/3,
+                                    /*agg_byte*/2, /*agg_bit*/0,
+                                    /*base*/pb_base};
+            // 序列号:SPLC 表47 byte0 bit0-7 + byte1 bit0-7 = 16bit LE(帧内重排)
+            layout.seq_byte = 0;
+            layout.seq_mask = 0xFFFF;
             const pb_asm::AssembleResult res =
                 pb_asm::assemble_pb_blocks(r.payload_for_log, r.mpdu.pb_num,
                                            r.mpdu.pb_size, layout);
-            for (const auto& b : res.blocks) r.mpdu.pb_crc_oks.append(b.crc_ok);
+            // 逐块头/CRC 按到达序存(UI 序列判定依赖线序;体流按 seq 序)
+            pb_asm::arrival_order_blocks(res, &r.mpdu.pb_heads, &r.mpdu.pb_crc_oks);
             // pb_crc_ok 语义:全部声明块都已收到且 CRC24 通过(不只是已收块全过);
             // 截断帧即使已收块全过也为 false,与红行谓词“含截断”意图一致;
             // NW_2021 同款口径(pb_crc_oks.size()==pb_num),GW 侧截断直接拒收。
-            r.mpdu.pb_crc_ok = res.all_crc_ok && !res.truncated;
-            if (res.any_aggregated) {
+            r.mpdu.pb_crc_ok = res.all_crc_ok && !res.truncated && res.reassembly_ok;
+            // 聚合级联拆分必须先过统一判据:序号缺块/越界/冲突时体流字节序不确定,
+            // 拆出的级联 MAC 帧列表会指向错误内容,只保留 msdu_body 供高亮映射。
+            if (res.any_aggregated && pb_asm::body_parseable(res)) {
                 // 聚合帧(SPLC 图11 多块聚合,用户决策:不参与 MSDU 拼接):级联 MAC 帧
                 // 逐帧独立解析展示——级联记录可跨 PB 体边界(实测锚点:4 条记录
                 // [2d 10]/[2d 00]/[2d 00]/[2d 20],首记录 Start=1、末记录 End=1)
@@ -527,16 +534,22 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
                 // 首帧 MSDU 完整落在好块内即解析(坏块在 span 之外不影响);
                 // span 横跨坏块时仍整段不解析,仅留摘要说明(缺失字节会使
                 // 体流错位成错误数据);pb_crc_ok=false 已标 FAIL/红行。
-                if (res.all_crc_ok
-                    || pb_asm::msdu_span_avoids_bad_blocks(res.msdu_body, res.blocks,
-                                                           layout.body_len(r.mpdu.pb_size))) {
+                // 先过统一判据 body_parseable(序号缺块/重复冲突/越界 → 不解析),
+                // 因为 msdu_span_avoids_bad_blocks 只看块 CRC、不看序号完整性。
+                if (pb_asm::body_parseable(res)
+                    && (res.all_crc_ok
+                        || pb_asm::msdu_span_avoids_bad_blocks(
+                               res.msdu_body, res.blocks,
+                               layout.body_len(r.mpdu.pb_size)))) {
                     r.msdu = NW_2026_MsduParser::parse(res.msdu_body);
                     // 高亮:单块连续 = 首块块体起点(块体在 raw_bytes 中的绝对偏移);
                     // 多块重组时各块体被 PB 头/保留/CRC 隔断,不连续 → -1(沿用国网约定)
                     r.msdu_raw_base = (r.mpdu.pb_num == 1 && !res.blocks.isEmpty())
                                           ? res.blocks.first().body_raw_offset : -1;
                 } else {
-                    r.msdu.summary = trl::L("块 CRC 失败未解析");
+                    r.msdu.summary = res.reassembly_ok
+                        ? trl::L("块 CRC 失败未解析")
+                        : trl::L("PB 序号异常未解析");
                 }
             }
             // 截断提示(用户需求):声明块数 vs 实收块数,聚合/非聚合都标;FCH 声明 pb_num,
@@ -564,16 +577,23 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
                     // 尺寸非法则后续站点基址无法定位,整站停止(继续按错偏移解析会产垃圾对)
                     if (psz <= 8 || pnum <= 0) break;
                     if (base >= r.payload_for_log.size()) break;
-                    const pb_asm::PbLayout layout{/*head*/4, /*rsv*/1, /*crc*/3,
-                                                  /*agg_byte*/2, /*agg_bit*/0, base};
+                    pb_asm::PbLayout layout{/*head*/4, /*rsv*/1, /*crc*/3,
+                                            /*agg_byte*/2, /*agg_bit*/0, base};
+                    layout.seq_byte = 0;       // SPLC 表47 序列号 16bit LE
+                    layout.seq_mask = 0xFFFF;
                     const pb_asm::AssembleResult ar =
                         pb_asm::assemble_pb_blocks(r.payload_for_log, pnum, psz, layout);
                     base += pnum * psz;
                     if (ar.msdu_body.isEmpty()) continue;
+                    // 序列号缺块/越界/冲突(重排失败)→ 体流不可信,不参与学习;
+                    // 块 CRC 状态照常记录(红行与 Info 粒度展示用)。
+                    const bool learnable = ar.reassembly_ok;
                     if (ar.any_aggregated) {
-                        for (const auto& c : ar.cascade) {
-                            const MsduInfo cm = NW_2026_MsduParser::parse(c.mac);
-                            merge_msdu_learn(r.msdu, cm);
+                        if (learnable) {
+                            for (const auto& c : ar.cascade) {
+                                const MsduInfo cm = NW_2026_MsduParser::parse(c.mac);
+                                merge_msdu_learn(r.msdu, cm);
+                            }
                         }
                         // 记录聚合块的 CRC 状态
                         for (const auto& b : ar.blocks) {
@@ -584,9 +604,10 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
                         // 本站 PB 全好或 MSDU 完整落在好块内才解析学习;坏块
                         // 字节会使体流错位成错误数据,解析出的 MAC/TEI 对不可信。
                         // (聚合分支已由组装器剔除与坏块相交的记录,无需再验。)
-                        if (ar.all_crc_ok
-                            || pb_asm::msdu_span_avoids_bad_blocks(ar.msdu_body, ar.blocks,
-                                                                   layout.body_len(psz))) {
+                        if (learnable
+                            && (ar.all_crc_ok
+                                || pb_asm::msdu_span_avoids_bad_blocks(
+                                       ar.msdu_body, ar.blocks, layout.body_len(psz)))) {
                             const MsduInfo cm = NW_2026_MsduParser::parse(ar.msdu_body);
                             merge_msdu_learn(r.msdu, cm);
                         }
@@ -756,28 +777,34 @@ void NW_2026_Parser::parse_ofdma_type1(Result& r, const quint8* p, int raw_sz) {
                 st.pb_size    = ts.pb_size;
                 st.block_base = base;
                 if (ts.pb_size > 8 && ts.pb_num > 0) {
-                    const pb_asm::PbLayout layout{/*head*/4, /*rsv*/1, /*crc*/3,
-                                                  /*agg*/2, /*agg_bit*/0, base};
+                    pb_asm::PbLayout layout{/*head*/4, /*rsv*/1, /*crc*/3,
+                                            /*agg*/2, /*agg_bit*/0, base};
+                    layout.seq_byte = 0;       // SPLC 表47 序列号 16bit LE
+                    layout.seq_mask = 0xFFFF;
                     const pb_asm::AssembleResult res =
                         pb_asm::assemble_pb_blocks(r.payload_for_log, ts.pb_num, ts.pb_size, layout);
-                    for (const auto& b : res.blocks) {
-                        st.pb_heads.append(b.head_byte);
-                        st.pb_crc_oks.append(b.crc_ok);
-                    }
-                    st.msdu = res.msdu_body;
+                    // 逐块头/CRC 按到达序存(UI 序列判定依赖线序;体流按 seq 序)
+                    pb_asm::arrival_order_blocks(res, &st.pb_heads, &st.pb_crc_oks);
+                    // 重组不可信(序号缺块/重复冲突/越界)时不把体流交给树层解析,
+                    // 否则字段树显示的是错序体的内容(帧已按 pb_crc_ok=false 标红)
+                    st.msdu = pb_asm::body_parseable(res) ? res.msdu_body : QByteArray();
                     // 学习:逐站 MSDU 解析并合并(头对+管理对进 tei_mac_pairs;topo 首站优先;头对字段见 SPLC 第4部分 表1/表7)。
                     // 注:r.msdu.present 保持 false(显示不变);对循环消费不以 present 为门,学习仍生效。
                     if (!st.msdu.isEmpty()) {
+                        const bool learnable = res.reassembly_ok;   // 序列号缺块/越界/冲突则不学习
                         if (res.any_aggregated) {
                             // 级联记录已由 assembler 按 CRC 过滤,仅好块记录进合并
-                            for (const auto& c : res.cascade) {
-                                const MsduInfo cm = NW_2026_MsduParser::parse(c.mac);
-                                merge_msdu_learn(r.msdu, cm);
+                            if (learnable) {
+                                for (const auto& c : res.cascade) {
+                                    const MsduInfo cm = NW_2026_MsduParser::parse(c.mac);
+                                    merge_msdu_learn(r.msdu, cm);
+                                }
                             }
-                        } else if (res.all_crc_ok
-                                   || pb_asm::msdu_span_avoids_bad_blocks(
-                                          st.msdu, res.blocks,
-                                          layout.body_len(ts.pb_size))) {
+                        } else if (learnable
+                                   && (res.all_crc_ok
+                                       || pb_asm::msdu_span_avoids_bad_blocks(
+                                              st.msdu, res.blocks,
+                                              layout.body_len(ts.pb_size)))) {
                             // 非级联整段:span 完整落在好块内即解析学习,横跨坏块
                             // 则不解析不学习(用户 2026-10-29 定 + 多块补定)
                             const MsduInfo cm = NW_2026_MsduParser::parse(st.msdu);

@@ -2,6 +2,29 @@
 /// @brief 协议树公共渲染工具实现(加节点/位域节点/MSDU 字段树渲染)
 #include "protocol_tree_builder.h"
 
+/// 拼接序第 b 块的块体 raw 起点:优先用序列号槽位表,否则按到达位置推算。
+static int block_raw_base(const MsduRawMap& m, int b) {
+    if (b >= 0 && b < m.slot_raw_offset.size()) return m.slot_raw_offset[b];
+    return m.fch_size + b * m.pb_size + m.header_len;
+}
+
+QVector<int> tree_slot_raw_offsets(const MpduInfo& mpdu, int fch_size,
+                                   int header_len, quint8 seq_mask) {
+    QVector<int> out;
+    if (mpdu.pb_num < 2 || mpdu.pb_size <= 4) return out;      // 单块/无块:旧路径
+    if (mpdu.pb_heads.size() < mpdu.pb_num) return out;        // 截断/缺块:旧路径
+    const int npb = int(mpdu.pb_num);
+    // 注意:变量名不可用 slots(Qt 关键字宏),否则会被预处理掉
+    QVector<int> slot_tbl(npb, -1);
+    for (int i = 0; i < npb; ++i) {
+        const int seq = int(quint8(mpdu.pb_heads[i]) & seq_mask);
+        if (seq < 0 || seq >= npb) return QVector<int>();      // 越界:旧路径
+        if (slot_tbl[seq] >= 0) return QVector<int>();         // 重复/全同兜底
+        slot_tbl[seq] = fch_size + i * int(mpdu.pb_size) + header_len;
+    }
+    return slot_tbl;
+}
+
 /// 把相对重组 buffer 的 [rel_start,rel_start+rel_len) 映射到 raw 偏移;
 /// 跨块且字段越块边界(或越界)返回 -1(无法高亮)。
 int tree_msdu_raw_of(const MsduRawMap& m, int rel_start, int rel_len) {
@@ -12,7 +35,7 @@ int tree_msdu_raw_of(const MsduRawMap& m, int rel_start, int rel_len) {
     const int b0  = rel_start / m.body;
     const int b1  = (end - 1) / m.body;
     if (b0 != b1 || b0 >= m.pb_num) return -1;  // 跨块或越界 → 不可映射
-    return m.fch_size + b0 * m.pb_size + m.header_len + (rel_start - b0 * m.body);
+    return block_raw_base(m, b0) + (rel_start - b0 * m.body);
 }
 
 /// 把相对重组 buffer 的 [rel_start,rel_start+rel_len) 映射为 raw 里的高亮片段列表;
@@ -34,8 +57,7 @@ QList<QPair<int, int>> tree_msdu_raw_ranges(const MsduRawMap& m,
         const int seg_start = qMax(rel_start, b * m.body);
         const int seg_end   = qMin(end, (b + 1) * m.body);
         if (seg_end <= seg_start) continue;
-        const int raw_off = m.fch_size + b * m.pb_size + m.header_len
-                          + (seg_start - b * m.body);
+        const int raw_off = block_raw_base(m, b) + (seg_start - b * m.body);
         out.append(qMakePair(raw_off, seg_end - seg_start));
     }
     return out;

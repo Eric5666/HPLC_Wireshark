@@ -519,9 +519,11 @@ int main(int argc, char** argv) {
         l.msdu.tei_mac_pairs.append({11, sta11Mac});
         l.msdu.tei_mac_pairs.append({0xFFF, mac6(0xff, 0xff, 0xff, 0xff, 0xff, 0xff)});
         modelE.append_packets(QVector<PacketEntry>{l});
-        check(srcE() == QStringLiteral("CCO [00:11:22:33:44:55],STA-11 [aa:bb:cc:dd:ee:0b]"),
+        // 第 2 批起:绘制时回填的 MAC 来自"当前映射",用 [MAC*:..] 标注,
+        // 与解析时快照的 [..] 区分(避免 TEI 易主后无法辨别来源)。
+        check(srcE() == QStringLiteral("CCO [MAC*:00:11:22:33:44:55],STA-11 [MAC*:aa:bb:cc:dd:ee:0b]"),
               "draw-time fill after learn src");
-        check(dstE() == QStringLiteral("CCO [00:11:22:33:44:55],STA-11 [aa:bb:cc:dd:ee:0b]"),
+        check(dstE() == QStringLiteral("CCO [MAC*:00:11:22:33:44:55],STA-11 [MAC*:aa:bb:cc:dd:ee:0b]"),
               "draw-time fill after learn dst");
         // Still-unknown TEI stays bare; broadcast never looks up.
         PacketEntry u;

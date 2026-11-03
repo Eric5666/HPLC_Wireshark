@@ -11,6 +11,7 @@
 #include "common/protocolvariant.h"
 #include <QTreeWidget>
 #include <QColor>
+#include <QVector>
 #include <memory>
 
 // ── 公共渲染工具(协议无关) ───────────────────────────────
@@ -33,7 +34,20 @@ struct MsduRawMap {
     int fch_size;    ///< 控制头长度(16)
     int header_len;  ///< PB 头长度(国网 1 / 南网 4)
     int body;        ///< 每块数据字节数(国网 pb_size-4 / 南网 pb_size-8)
+    QVector<int> slot_raw_offset; ///< 拼接序(序列号序)→ 各块块体 raw 起点;
+                                  ///< 空=退回按到达位置推算(单块/无序列号/重排失败)
 };
+
+/// 由 PB 到达序头字节推导「拼接序(序列号序)→ 块体 raw 起点」槽位表。
+/// @details 帧内按序列号重排后,拼接序 ≠ raw 块序,旧的 rel/body 推块号会指错块。
+///          不新增持久化字段:pb_heads 已按到达序持久化块头原始字节,重排后的块序
+///          可据此重建,保证会话文件重载后高亮映射一致。
+/// @param seq_mask 国网 0x3F(pb_head 低 6 位,bit7=END/bit6=START)/
+///                 南网 0xFF(byte0 全 8 位;16bit 序列号低字节)
+/// @return 拼接序→raw 块体起点;任一序列号越界/重复(含"全同"兜底)返回空表,
+///         调用方退回按到达位置映射。
+QVector<int> tree_slot_raw_offsets(const MpduInfo& mpdu, int fch_size,
+                                   int header_len, quint8 seq_mask);
 
 // QTreeWidgetItem 的 UserRole 数据角色(树渲染工具统一约定):
 //   0: 主高亮区间起点 start(单块/向后兼容;跨块取首片段起点,-1=无映射)

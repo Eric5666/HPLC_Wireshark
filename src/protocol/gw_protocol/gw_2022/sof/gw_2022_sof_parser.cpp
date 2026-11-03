@@ -5,6 +5,7 @@
 ///          (PB 头 START/END/seq 语义)。公共位域/CRC 工具见 fieldspec.h。
 #include "gw_2022_sof_parser.h"
 #include "gw_2022_pb_table.h"
+#include "pb_assembler.h"
 #include "crc.h"
 #include "i18n.h"
 #include "fieldtools.h"
@@ -76,68 +77,31 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
     }
     info.pb_size = (quint16)pb_size;
 
-    int block_offset = 16;
-    bool all_pb_ok = true;
-    for (int i = 0; i < info.pb_num; ++i) {
-        int block_start = block_offset + i * info.pb_size;
-        if (block_start + info.pb_size > body.size()) {
-            msdu = MsduState{};
-            return trl::L("PB 块超出帧长");
-        }
-        const quint8* blk =
-            reinterpret_cast<const quint8*>(body.constData()) + block_start;
-// crc24_lsb 内部遍历 len-3 字节;此处传 pb_size(全长)即校验块头+块体+尾保留,
-// 末 3B 为本 CRC 自身(crc.h 约定,勿传 pb_size-3 否则少算 3B)
-        quint32 calc = crc24_lsb(blk, info.pb_size);
-        quint32 rx   = (quint32)blk[info.pb_size - 3]
-                     | ((quint32)blk[info.pb_size - 2] << 8)
-                     | ((quint32)blk[info.pb_size - 1] << 16);
-        if (calc != rx) {
-            all_pb_ok = false;
-            // 失败块同样记录,供 UI 逐块展示(头仍可读,CRC 状态 FAIL)
-            info.pb_heads.append(blk[0]);
-            info.pb_crc_oks.append(false);
-            continue;
-        }
-        quint8 pb_head = blk[0];
-        bool   is_start = (pb_head & 0x40) != 0;
-        bool   is_end   = (pb_head & 0x80) != 0;
-        quint8 seq     = pb_head & 0x3F;
-        // 保存首块(起始块)的 PB 头原始字节供 UI 显示;多块时后块不覆盖
-        if (i == 0) info.pb_head = pb_head;
-        info.pb_heads.append(pb_head);       // 按块序保存(UI 逐块展示)
-        info.pb_crc_oks.append(true);        // 各块 CRC24 结果(此处已通过)
-
-        int body_len = info.pb_size - 4;
-        QByteArray pb_body(reinterpret_cast<const char*>(blk + 1), body_len);
-
-        if (is_start && msdu.received_count == 0) {
-            msdu.expected_len = body_len;
-            msdu.buffer.resize(info.pb_num * body_len);
-            std::fill(msdu.buffer.begin(), msdu.buffer.end(), 0);
-            msdu.received_count = 1;
-            std::copy(pb_body.begin(), pb_body.end(), msdu.buffer.begin());
-        } else if (msdu.received_count > 0 && seq == (quint8)msdu.received_count) {
-            int dst = msdu.received_count * msdu.expected_len;
-            if (dst + pb_body.size() > msdu.buffer.size())
-                msdu.buffer.resize(dst + pb_body.size());
-            std::copy(pb_body.begin(), pb_body.end(), msdu.buffer.begin() + dst);
-            msdu.received_count++;
-        } else {
-            // 序乱:清重组状态,视为未完成(与原实现一致,不拒收整帧)
-            msdu = MsduState{};
-            return QString();
-        }
-
-        if (is_end) {
-            complete_msdu_body =
-                msdu.buffer.left(msdu.received_count * msdu.expected_len);
-            msdu = MsduState{};
-            info.pb_crc_ok = all_pb_ok;
-            return QString();
-        }
-    }
-    info.pb_crc_ok = all_pb_ok;
+    // 逐块 CRC24 + 块体提取 + **帧内按序列号重排**(公共 pb_assembler)。
+    // 国网布局:PB 头 1B(bit7=END / bit6=START / 低 6 位=序列号)+ 块体 + CRC24 3B。
+    // 旧实现把"单帧多块重组"挂在会话级共享 MsduState(见 framedispatcher.h:33)上,
+    // 会跨帧污染:一个缺 END 的异常帧之后,正常帧被判"序乱"整帧丢弃。
+    // 现改为帧内局部状态,不再读写调用方 MsduState。
+    Q_UNUSED(msdu);
+    pb_asm::PbLayout lay{/*head*/1, /*rsv*/0, /*crc*/3,
+                         /*agg_byte*/-1, /*agg_bit*/-1,
+                         /*base*/16};
+    lay.seq_byte  = 0;      // PB 头 byte0 低 6 位 = 序列号(HDC SOF PB 头)
+    lay.seq_mask  = 0x3F;
+    lay.start_bit = 6;      // bit6 = START
+    lay.end_bit   = 7;      // bit7 = END
+    const pb_asm::AssembleResult res =
+        pb_asm::assemble_pb_blocks(body, info.pb_num, info.pb_size, lay);
+    if (res.truncated)
+        return trl::L("PB 块超出帧长");
+    // 逐块头/CRC 按**到达序**存(UI 的「乱序已重排」判定依赖线序;体流按 seq 序)
+    pb_asm::arrival_order_blocks(res, &info.pb_heads, &info.pb_crc_oks);
+    if (!res.blocks.isEmpty()) info.pb_head = res.blocks.first().head_byte;
+    // 帧级 CRC 口径:全部声明块到齐 + CRC 全过 + 序列号重排成功(缺块/越界/冲突→false)
+    info.pb_crc_ok = res.all_crc_ok && !res.truncated && res.reassembly_ok;
+    // 统一判据(与 GW/NW 其余三处一致):仅重组可信时才交付完整 MSDU 体
+    if (pb_asm::body_parseable(res))
+        complete_msdu_body = res.msdu_body;
     return QString();
 }
 
