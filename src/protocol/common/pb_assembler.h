@@ -354,6 +354,16 @@ inline bool msdu_span_avoids_bad_blocks(const QByteArray& body,
     return msdu_span_avoids_bad_blocks(body, crc_oks, body_len);
 }
 
+/// @brief 重组体流是否可安全交付给 MSDU 解析器。
+/// @details 先要求序列号重组完整，再要求首个 MSDU 的有效 span 不与坏 CRC 块相交。
+///          块序必须与 msdu_body 的重组序一致；此函数不改变逐块 CRC 状态，
+///          因而 UI 仍可按原始 CRC 结果将整帧标红。
+inline bool body_parseable_with_good_msdu_span(const AssembleResult& r,
+                                                int body_len) {
+    return body_parseable(r)
+        && msdu_span_avoids_bad_blocks(r.msdu_body, r.blocks, body_len);
+}
+
 }  // namespace pb_asm
 
 #endif  // PROTOCOL_PB_ASSEMBLER_H

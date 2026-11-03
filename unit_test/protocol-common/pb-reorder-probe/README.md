@@ -37,6 +37,7 @@ QT=C:/Qt/6.11.2/mingw_64 ./build.sh          # Windows
 | 聚合帧乱序 `seq 1,0` | 重排后 `cascade[0]='A'(seq0)`、`cascade[1]='B'(seq1)` |
 | 聚合帧坏块 | 翻转 seq=1 块 CRC → `cascade_crc_skipped==1`，只保留 `'A'` 记录 |
 | GW2022/GW2026 乱序 4 块 | 解析器经 `assemble()` 输出体 272B、体序 `0 1 2 3`、`pb_crc_ok` |
+| GW2022/GW2026 单站坏 CRC | 坏块与首 MSDU span 相交时不交付解析；坏块在 span 后时仍交付首 MSDU；CRC 状态保留以供标红 |
 | 跨帧污染回归 | 无 END 帧之后紧跟完整帧（同一 `MsduState`）仍正常重组 272B |
 
 ## 说明

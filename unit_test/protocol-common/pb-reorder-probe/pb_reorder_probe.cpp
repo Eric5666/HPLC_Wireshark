@@ -356,6 +356,45 @@ static void test_parser_2026() {
     check("gw26: pb_crc_ok true", info.pb_crc_ok);
 }
 
+static void test_single_bad_crc_span_gate() {
+    const int seqs[2] = {0, 1};
+    const int pb_size = 72;
+    const int body_len = pb_size - 1 - 3;
+    const auto make_frame = [&](bool gw2026, int bad_block) {
+        QByteArray f = gw2026 ? gw2026_frame(seqs, 2)
+                              : gw2022_frame(seqs, 2, true);
+        quint8* p = reinterpret_cast<quint8*>(f.data());
+        quint8* body = p + 16 + 1;
+        // Valid version-2 MSDU header; length 8 gives a 16-byte span wholly in PB0.
+        body[0] = 0x04;
+        body[1] = 0;
+        body[2] = 8;
+        body[3] = 0;
+        for (int i = 0; i < 2; ++i)
+            put_crc24(p + 16 + i * pb_size, pb_size);
+        p[16 + bad_block * pb_size + pb_size - 1] ^= 0x01;
+        return f;
+    };
+    const auto run_case = [&](bool gw2026, int bad_block, bool expect_delivery,
+                              const char* label) {
+        MpduInfo info; MsduState msdu; QByteArray complete;
+        const QByteArray f = make_frame(gw2026, bad_block);
+        const QString err = gw2026
+            ? gw_2026_sof::assemble(f, info, msdu, complete, 0, false)
+            : gw_2022_sof::assemble(f, info, msdu, complete, 0, false);
+        check(QString("%1: assemble succeeds").arg(label).toUtf8().constData(), err.isEmpty());
+        check(QString("%1: bad CRC still marks frame").arg(label).toUtf8().constData(),
+              !info.pb_crc_ok && info.pb_crc_oks.size() == 2
+              && !info.pb_crc_oks[bad_block]);
+        check(QString("%1: delivery follows good-span gate").arg(label).toUtf8().constData(),
+              expect_delivery ? complete.size() == 2 * body_len : complete.isEmpty());
+    };
+    run_case(false, 0, false, "gw22: bad CRC intersects MSDU");
+    run_case(false, 1, true,  "gw22: bad CRC after MSDU span");
+    run_case(true,  0, false, "gw26: bad CRC intersects MSDU");
+    run_case(true,  1, true,  "gw26: bad CRC after MSDU span");
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     test_reorder_core();
@@ -366,6 +405,7 @@ int main(int argc, char** argv) {
     test_aggregate();
     test_parsers();
     test_parser_2026();
+    test_single_bad_crc_span_gate();
     std::printf("\nRESULT: %s (%d failures)\n",
                 g_fails ? "FAILURES" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;

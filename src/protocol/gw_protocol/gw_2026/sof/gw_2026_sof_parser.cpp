@@ -259,8 +259,10 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
     if (!res.blocks.isEmpty()) info.pb_head = res.blocks.first().head_byte;
     // 帧级 CRC 口径:全部声明块到齐 + CRC 全过 + 序列号重排成功(缺块/越界/冲突→false)
     info.pb_crc_ok = res.all_crc_ok && !res.truncated && res.reassembly_ok;
-    // 统一判据(与 GW/NW 其余三处一致):仅重组可信时才交付完整 MSDU 体
-    if (pb_asm::body_parseable(res))
+    // 仅交付完整重组且首个 MSDU span 完全避开坏 CRC 块的体流；
+    // pb_crc_oks 保留原始逐块结果，帧仍会因坏块在 UI 标红。
+    if (pb_asm::body_parseable_with_good_msdu_span(
+            res, pb_size - 4))
         complete_msdu_body = res.msdu_body;
     return QString();
 }
