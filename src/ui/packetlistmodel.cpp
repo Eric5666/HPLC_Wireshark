@@ -957,16 +957,18 @@ void PacketListModel::append_packets(QVector<PacketEntry> entries) {
     QVector<int> new_visible;
     new_visible.reserve(entries.size());
     const int first_new = m_visible.size();
+    bool mac_mapping_changed = false;
     for (PacketEntry& e : entries) {
         if (e.search_text.isEmpty())          // 兜底:非 make_entry 路径(测试等)补生成
             e.search_text = make_search_text(e);
         const int g = int(m_total);
         ++m_total;
         m_hot.append(std::move(e));           // move 进热缓存,避免深拷贝
-        update_tei_mac(m_hot.last());
+        mac_mapping_changed |= update_tei_mac(m_hot.last());
         if (passes_filter(m_hot.last())) new_visible.append(g);
         if (m_hot.size() >= kBlockSize) flush_hot_block();
     }
+    if (mac_mapping_changed) notify_mac_mapping_changed();
     if (new_visible.isEmpty()) return;
     beginInsertRows(QModelIndex(), first_new, first_new + new_visible.size() - 1);
     m_visible += new_visible;
@@ -1022,8 +1024,8 @@ bool PacketListModel::learn_tei_mac(quint32 nid, quint16 tei, quint64 mac) {
     return true;
 }
 
-void PacketListModel::update_tei_mac(const PacketEntry& e) {
-    if (!e.accepted) return;
+bool PacketListModel::update_tei_mac(const PacketEntry& e) {
+    if (!e.accepted) return false;
     const quint32 nid = e.mpdu.net_id;
     bool changed = false;
     // BEACON 帧:CCO 的 MAC(TEI=1),供 COORD 等 CCO 发出(src_tei 未解析),用 NID 查表
@@ -1041,7 +1043,7 @@ void PacketListModel::update_tei_mac(const PacketEntry& e) {
         if (e.msdu.msdu_dst_tei > 0 && e.msdu.msdu_dst_mac)
             changed |= learn_tei_mac(nid, quint16(e.msdu.msdu_dst_tei), e.msdu.msdu_dst_mac);
     }
-    if (changed) notify_mac_mapping_changed();
+    return changed;
 }
 
 void PacketListModel::notify_mac_mapping_changed() {
