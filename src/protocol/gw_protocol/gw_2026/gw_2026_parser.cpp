@@ -291,18 +291,13 @@ GW_2026_Parser::Result GW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
         // 与南网 body_parseable 口径一致。
         for (const auto& st : r.mpdu.sof_stations) {
             if (st.msdu.isEmpty()) continue;
-            // CRC 失败块不解析(用户 2026-10-29 定,NW 同款多块补定):
-            // 本站全好,或本站 MSDU span 避开坏块,才解析合并;否则该站
-            // 不解析不学习,坏块字节不进 tei_mac_pairs/orig/topology。
-            // 本站 MSDU 只用于学习,故无需摘要附注;块 CRC 失败仍由
-            // pb_crc_oks/红行可见。单站点已由 assemble 的 seq 链等价
-            // 覆盖(任一坏块即无完整 MSDU),此处不另设门。
-            bool all_ok = true;
-            for (bool ok : st.pb_crc_oks) all_ok = all_ok && ok;
-            if (!all_ok
-                && !gw_2026_sof::msdu_span_avoids_bad_blocks(
-                       st.msdu, st.pb_crc_oks, int(st.pb_size)))   // 形参是 PB 块长,内部减 4
-                continue;
+            // CRC 失败块不解析(用户 2026-10-29 定,NW 同款多块补定):本站全好,
+            // 或本站 MSDU span 避开坏块,才解析合并;否则该站不解析不学习,坏块字节
+            // 不进 tei_mac_pairs/orig/topology。本站 MSDU 只用于学习,故无需摘要附注;
+            // 块 CRC 失败仍由 pb_crc_oks/红行可见。
+            // ⚠ 配对口径收在 station_msdu_parseable 里:st.pb_crc_oks 是**到达序**、
+            //   st.msdu 是**seq 序**,这里不能自己按下标配对(乱序时两向都会错)。
+            if (!gw_2026_sof::station_msdu_parseable(st)) continue;
             merge_msdu_learn(r.msdu, GW_2026_MsduParser::parse(st.msdu));
         }
     } else if (ft == GW_2026_FrameType::BEACON) {

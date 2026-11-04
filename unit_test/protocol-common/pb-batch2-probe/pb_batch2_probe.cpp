@@ -38,8 +38,9 @@ static quint64 mac6(quint8 a, quint8 b, quint8 c, quint8 d, quint8 e, quint8 f) 
 
 // 逐站序列号可控的多站帧(块体填充 = 序列号,便于验证体序)
 // cut_last=true 时把最后一站的最后一块从帧里截掉(真截断)
-static QByteArray gw_ofdma_seq(const QVector<QVector<int>>& seqs, bool cut_last) {
-    const int sz = 72;
+static QByteArray gw_ofdma_seq(const QVector<QVector<int>>& seqs, bool cut_last,
+                               int copy_mode = 3) {
+    const int sz = (copy_mode == 2) ? 136 : 72;   // 表18:2→136B,3→72B
     int total = 0;
     for (const auto& s : seqs) total += s.size();
     QByteArray f(32 + total * sz, 0);
@@ -50,11 +51,11 @@ static QByteArray gw_ofdma_seq(const QVector<QVector<int>>& seqs, bool cut_last)
     set_bits(p, 7, 3, 2, seqs.size() - 1);  // 站点数编码(表10 (7,3,2))
     set_bits(p, 8, 0, 12, 100);        // 帧长
     set_bits(p, 11, 2, 1, seqs[0].size() - 1);   // 站0 PB 个数(表10 (11,2,1))
-    set_bits(p, 11, 3, 5, 3);                    // 站0 分集拷贝模式 3 → 72B(表18)
+    set_bits(p, 11, 3, 5, copy_mode);            // 站0 分集拷贝模式(表18)
     quint8* e = p + 16;                          // eFC(表11)
     if (seqs.size() > 1) {
         set_bits(e, 0, 0, 12, 42);               // 站1 TEI(表11 (16,0,12))
-        set_bits(e, 2, 0, 5, 3);                 // 站1 分集拷贝模式
+        set_bits(e, 2, 0, 5, copy_mode);         // 站1 分集拷贝模式
         set_bits(e, 2, 5, 1, seqs[1].size() - 1);// 站1 PB 个数
     }
     int off = 32;
@@ -676,6 +677,90 @@ static void test_gw_span_caliber() {
     }
 }
 
+// ── ⑬ GW 多站学习门:到达序 CRC × seq 序体流**配对**回归 ──
+// st.pb_heads/st.pb_crc_oks 是到达序(UI 依赖),st.msdu 是 seq 序体流;
+// 直接拿到达序下标当 seq 号去判 span,乱序时两向都错:
+//   坏块在 seq 前段 → 误放行(坏块字节进 tei_mac_pairs/orig/topology)
+//   坏块在 seq 后段 → 误拒
+static void test_gw_multi_station_pairing() {
+    const int sz = 136;                    // 分集拷贝模式 2 → 136B(表18)
+    // 站0 = 2 块 ×136B,到达序 seq1(0x81) → seq0(0x40);站1 = 1 块全好
+    const auto make_frame = [&](bool bad_seq0) {
+        QByteArray f = gw_ofdma_seq(QVector<QVector<int>>{{1, 0}, {0}}, false, 2);
+        quint8* p = reinterpret_cast<quint8*>(f.data());
+        quint8* body_seq1 = p + 32 + 0 * sz + 1;   // 到达序第 1 块 = seq1
+        quint8* body_seq0 = p + 32 + 1 * sz + 1;   // 到达序第 2 块 = seq0
+        std::memset(body_seq1, 0xB0, size_t(sz - 4));
+        std::memset(body_seq0, 0xA0, size_t(sz - 4));
+        // MSDU 简头放在 **seq0** 块体起点:len=60 → 真实 span = 4+60+4 = 68
+        // 68 ≤ 块体 132 ⇒ 只覆盖 seq0 块,不触及 seq1
+        body_seq0[0] = 0x01;
+        body_seq0[1] = 0;
+        body_seq0[2] = 60;
+        body_seq0[3] = 0;
+        put_crc24(p + 32 + 0 * sz, sz);
+        put_crc24(p + 32 + 1 * sz, sz);
+        // 坏块:seq0 → 到达序下标 1;seq1 → 到达序下标 0
+        const int bad_arrival = bad_seq0 ? 1 : 0;
+        p[32 + bad_arrival * sz + sz - 1]
+            = quint8(p[32 + bad_arrival * sz + sz - 1] ^ 0xFF);
+        return f;
+    };
+    const auto run = [&](bool bad_seq0, bool want_parseable, const char* label) {
+        const QByteArray raw = make_frame(bad_seq0);
+        MpduInfo info;
+        MsduState msdu;
+        QByteArray cp;
+        const QString err = gw_2026_sof::assemble(raw, info, msdu, cp, 0, false);
+        const QByteArray lbl(label);
+        check((lbl + ": assemble ok").constData(), err.isEmpty());
+        check((lbl + ": 2 stations").constData(), info.sof_stations.size() == 2);
+        if (info.sof_stations.size() != 2) return;
+        const SofStationPb st0 = info.sof_stations.value(0);
+        // 体流必须按 seq 序:首字节是 seq0 的 0x01(简头)、次字节 0xA0(seq0 填充);
+        // 若按到达序拼接,首字节会是 seq1 的 0xB0
+        check((lbl + ": st.msdu is seq order (seq0 block first)").constData(),
+              st0.msdu.size() == 2 * (sz - 4)
+              && quint8(st0.msdu[0]) == 0x01    // seq0 块体的简头首字节
+              && quint8(st0.msdu[4]) == 0xA0    // 简头 4B 之后是 seq0 的填充
+              && quint8(st0.msdu[sz - 4]) == 0xB0);   // 第二块 = seq1 的填充
+        // 块头与 CRC 必须留在到达序(UI「乱序已重排」与逐块 CRC 显示依赖)
+        check((lbl + ": pb_heads stay arrival order (0x81,0x40)").constData(),
+              st0.pb_heads.size() == 2
+              && quint8(st0.pb_heads[0]) == 0x81 && quint8(st0.pb_heads[1]) == 0x40);
+        check((lbl + ": pb_crc_oks stay arrival order").constData(),
+              st0.pb_crc_oks.size() == 2
+              && st0.pb_crc_oks[bad_seq0 ? 1 : 0] == false
+              && st0.pb_crc_oks[bad_seq0 ? 0 : 1] == true);
+        // 核心断言:seq 归位后 span(68)只覆盖 seq0 块
+        check((lbl + (want_parseable ? ": station_msdu_parseable == true (learn)"
+                                     : ": station_msdu_parseable == false (no learn)")).constData(),
+              gw_2026_sof::station_msdu_parseable(st0) == want_parseable);
+        // 反证:旧实现拿**到达序** CRC 直接配对,结论与现在相反 ——
+        // 证明本用例确实能抓到该缺陷(A 误放行 / B 误拒),不是自证。
+        const bool old_verdict = pb_asm::msdu_span_avoids_bad_blocks(
+            st0.msdu, st0.pb_crc_oks, sz - 4, pb_asm::SpanLayout::Gw);
+        check((lbl + ": old arrival-order pairing gives the opposite verdict").constData(),
+              old_verdict != want_parseable);
+        // 站1 单块全好 → 始终可学
+        check((lbl + ": station1 (all good) parseable").constData(),
+              gw_2026_sof::station_msdu_parseable(info.sof_stations.value(1)));
+    };
+    run(true,  false, "pairing/bad=seq0");
+    run(false, true,  "pairing/bad=seq1");
+    // 单站点路径别动:全好时也走同一判据(全好直接放行)
+    {
+        MpduInfo info;
+        MsduState msdu;
+        QByteArray cp;
+        gw_2026_sof::assemble(gw_ofdma_seq(QVector<QVector<int>>{{0, 1}, {0}}, false, 2),
+                              info, msdu, cp, 0, false);
+        check("pairing/all-good station parseable",
+              info.sof_stations.size() == 2
+              && gw_2026_sof::station_msdu_parseable(info.sof_stations.value(0)));
+    }
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     {
@@ -693,6 +778,7 @@ int main(int argc, char** argv) {
     test_nw_parse_gate();
     test_gw_multi_reorder();
     test_gw_span_caliber();
+    test_gw_multi_station_pairing();
     std::printf("\nRESULT: %s (%d failures)\n",
                 g_fails ? "FAILURES" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;

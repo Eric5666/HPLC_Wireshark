@@ -145,7 +145,11 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
             info.pb_size  = 0;
             info.pb_num_field = sn_code;
             // 逐站 CRC 进帧级 pb_crc_oks(用户 2026-10-30 定,仅 PB 块 CRC):
-            // 各站 st.pb_crc_oks 皆为上循环逐块 CRC24 结果(calc==rx),站序即块序;
+            // 各站 st.pb_crc_oks 为**站内到达序**逐块 CRC24 结果(与 st.pb_heads 同序,
+            // 供 UI 逐块显示与「乱序已重排」判定);st.msdu 是**序列号重排后的 seq 序**
+            // 体流 —— 两者序不同,做 span/坏块判定前必须按 seq 归位
+            // (见 gw_2026_sof::station_msdu_parseable)。
+            // 此处仅按站序把各站 CRC 拼成帧级列表(整帧统计用)。
             // 单站点路径(info.pb_crc_oks 由组装段填)与此多站分支互斥,无 double-append。
             for (const auto& st : info.sof_stations)
                 for (bool ok : st.pb_crc_oks) info.pb_crc_oks.append(ok);

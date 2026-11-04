@@ -148,6 +148,34 @@ GW2026（4 条，含 28B 头）与 GW2022（4 条）各一份，共 9 条断言�
 > 实现已收口到 `pb_asm::msdu_span_avoids_bad_blocks(body, crc_oks, block_body_len,
 > SpanLayout{Nw,Gw})`；3 参版本是南网口径的兼容入口，注释里写明「国网禁用」。
 
+### ⑬ GW 多站学习门的「到达序 CRC × seq 序体流」配对（实质缺陷）
+
+`st.pb_heads` / `st.pb_crc_oks` 是**到达序**（UI 的 `analyze_pb_seq_heads` 与逐块 CRC
+成对显示依赖它），而 `st.msdu` 是**序列号重排后的 seq 序**体流。旧实现直接把到达序
+CRC 的下标当 seq 号去和 seq 序体流的偏移比较，站内乱序时**两向都错**：
+
+| 站0 两块 136B，到达序 seq1(0x81)→seq0(0x40)，MSDU 简头在 seq0 块体起点 len=60（span=68） | 旧行为 | 应有行为 |
+|---|---|---|
+| 坏块 = **seq0**（到达序 `crc={1,0}`） | 解析 → **误放行**（坏块字节进 `tei_mac_pairs`/orig/topology） | 不解析 |
+| 坏块 = **seq1**（到达序 `crc={0,1}`） | 不解析 → **误拒** | 解析 |
+
+修法：把配对收进 `gw_2026_sof::station_msdu_parseable(st, seq_mask=0x3F)` ——
+按 `seq = st.pb_heads[i] & mask` 把到达序 CRC 归位成 **seq 序数组**，再用国网口径
+（`SpanLayout::Gw`，块体长 = `pb_size-4`）算 span；`pb_heads`/`pb_crc_oks` 仍留到达序。
+`gw_2026_parser.cpp` 的学习门改为只调这一个函数（不再自己按下标配对）。
+
+> 序列号**全同**（设备未填，`pb_asm` 走 `seq_uniform_fallback` 按位置拼接）时，
+> 体流序 == 到达序，此时直接用到达序 CRC —— 否则会把 1..n-1 号槽全当坏块，反过来
+> 把正常帧判死。这条兜底与 `pb_asm` 的分支判断完全同口径。
+
+| 断言（15 条） | 内容 |
+|---|---|
+| `st.msdu` 序 | 264B，`[0]=0x01`（seq0 简头）、`[4]=0xA0`（seq0 填充）、`[132]=0xB0`（seq1 填充） |
+| `pb_heads` 序 | 仍是到达序 `0x81,0x40` |
+| `pb_crc_oks` 序 | 仍是到达序（A: `{1,0}`；B: `{0,1}`） |
+| 核心 | A `station_msdu_parseable==false`（不学习）；B `==true`（学习） |
+| 回归 | 站1（单块全好）恒可学；全好站点直接放行 |
+
 ## 说明
 
 - 标注符 `MAC*` / `STA-N*` 只用 ASCII `*`，本身不翻译；图例说明文案已
