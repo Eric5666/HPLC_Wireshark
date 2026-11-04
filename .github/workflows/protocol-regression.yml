@@ -24,6 +24,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y g++ make qt6-base-dev libqt6serialport6-dev
 
+      - name: Hard-only source convention checks
+        run: |
+          python3 tools/check_i18n.py
+          python3 tools/check_title_case.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+
+          guards = {}
+          for header in Path("src").rglob("*.h"):
+              guard = None
+              for line in header.read_text(encoding="utf-8", errors="ignore").splitlines():
+                  if line.startswith("#ifndef "):
+                      guard = line.split(maxsplit=1)[1]
+                      break
+              if guard:
+                  guards.setdefault(guard, []).append(str(header))
+          duplicates = {guard: paths for guard, paths in guards.items() if len(paths) > 1}
+          if duplicates:
+              for guard, paths in sorted(duplicates.items()):
+                  print(f"duplicate include guard {guard}:")
+                  for path in paths:
+                      print(f"  {path}")
+              sys.exit(1)
+          print(f"include guard uniqueness: PASS ({len(guards)} guards)")
+          PY
+
       - name: NW MSDU Debug regression (ASan/UBSan)
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -61,3 +88,28 @@ jobs:
           make -j2
           cd "$GITHUB_WORKSPACE"
           ./unit_test/ci/nw2026-type1-test/build/type1/nw2026_type1_test
+
+      - name: PB reassembly / multi-station pairing / TEI-MAC regression probes
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          ln -s "$(qmake6 -query QT_HOST_BINS)" "$QT_ROOT/bin"
+          ln -s "$(qmake6 -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          ln -s "$(qmake6 -query QT_INSTALL_HEADERS)" "$QT_ROOT/include"
+          ln -s "$(qmake6 -query QT_INSTALL_LIBS)" "$QT_ROOT/lib"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          (cd unit_test/protocol-common/pb-reorder-probe && bash build.sh)
+          (cd unit_test/protocol-common/pb-batch2-probe && bash build.sh)
+          (cd unit_test/filter/info-crc-probe && bash build.sh)
+          (cd unit_test/filter/orig-src-probe && bash build.sh)
+
+          unit_test/protocol-common/pb-reorder-probe/build/pb_reorder_probe/pb_reorder_probe
+          unit_test/protocol-common/pb-batch2-probe/build/pb_batch2_probe/pb_batch2_probe
+          unit_test/filter/info-crc-probe/build/info_crc_probe
+          unit_test/filter/orig-src-probe/build/orig_src_probe \
+            "$GITHUB_WORKSPACE/unit_test/protocol-gw/gw-topo-merge-probe/gw_topo_merge.bin"

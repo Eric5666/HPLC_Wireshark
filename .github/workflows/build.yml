@@ -38,7 +38,8 @@ jobs:
         shell: bash
         run: |
           V="${{ steps.ver.outputs.version }}"
-          PRO_VER=$(grep -oP '^VERSION\s*=\s*\K[0-9.]+' BPLC_STA_Monitor.pro)
+          PRO_VER=$(sed -n 's/^VERSION[[:space:]]*=[[:space:]]*\([0-9.]*\).*/\1/p' BPLC_STA_Monitor.pro | head -1)
+          [ -n "$PRO_VER" ] || { echo "::error::解析 .pro VERSION 失败"; exit 1; }
           if [ "$PRO_VER" != "$V" ]; then
             echo "::error::tag v$V 与 .pro VERSION=$PRO_VER 不一致,请先改版本号再打 tag"
             exit 1
