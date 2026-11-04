@@ -14,6 +14,7 @@
 #include "bplcframe.h"
 #include "packetlistmodel.h"
 #include "gw_2026_sof_parser.h"
+#include "gw_2022_sof_parser.h"
 #include "nw_2021_parser.h"
 #include "fieldtools.h"
 #include "crc.h"
@@ -526,6 +527,155 @@ static void test_gw_multi_reorder() {
     }
 }
 
+// ── 国网单站 SOF 构帧(2 块 × 72B,PB 头 1B + 体 68B + CRC24 3B) ──
+// bad0/bad1 = 破坏对应块 CRC(翻转 CRC 末字节),用于验证 span 门
+static QByteArray gw_single_fill(quint8* f, int sz, int n, const QByteArray* bs,
+                                 const bool* bads) {
+    int off = 16;
+    for (int i = 0; i < n; ++i) {
+        quint8* b = f + off;
+        quint8 h = quint8(i & 0x3F);
+        if (i == 0) h |= 0x40;              // START
+        if (i == n - 1) h |= 0x80;          // END
+        b[0] = h;
+        std::memcpy(b + 1, bs[i].constData(), size_t(qMin(bs[i].size(), sz - 4)));
+        put_crc24(b, sz);
+        if (bads[i]) b[sz - 1] = quint8(b[sz - 1] ^ 0xFF);
+        off += sz;
+    }
+    return QByteArray();
+}
+
+// GW2026 单站数据帧(表7 子类型=0,分集拷贝模式 3 → 72B,band0,2 块)
+static QByteArray gw_single_2blk_2026(const QByteArray& b0, bool bad0,
+                                      const QByteArray& b1, bool bad1) {
+    const int sz = 72, n = 2;
+    QByteArray f(16 + n * sz, 0);
+    quint8* p = reinterpret_cast<quint8*>(f.data());
+    set_bits(p, 4, 0, 12, 1);          // src TEI
+    set_bits(p, 5, 4, 12, 27);         // dst TEI
+    set_bits(p, 7, 0, 3, 0);           // 帧子类型 0 = 数据帧(表7)
+    set_bits(p, 8, 0, 12, 100);        // 帧长
+    set_bits(p, 10, 1, 1, 0);          // 调制方式 0 = 分集拷贝
+    set_bits(p, 10, 2, 5, 3);          // 分集拷贝模式 3 → 72B(表18)
+    set_bits(p, 10, 7, 1, 1);          // PB 个数 2b 跨字节:(10,7)=1、(11,0)=0 → 2 块
+    set_bits(p, 11, 0, 1, 0);
+    set_bits(p, 11, 4, 3, 0);          // band 0(gw_2026_pb_num_table[0][3]=4)
+    const QByteArray bs[2] = {b0, b1};
+    const bool bads[2] = {bad0, bad1};
+    gw_single_fill(p, sz, n, bs, bads);
+    return f;
+}
+
+// GW2022 单站载波 SOF(表19:PB 个数(9,4,4)、TMI(11,4,4)=13 → 72B,band0,2 块)
+static QByteArray gw_single_2blk_2022(const QByteArray& b0, bool bad0,
+                                      const QByteArray& b1, bool bad1) {
+    const int sz = 72, n = 2;
+    QByteArray f(16 + n * sz, 0);
+    quint8* p = reinterpret_cast<quint8*>(f.data());
+    set_bits(p, 4, 0, 12, 1);          // src TEI
+    set_bits(p, 5, 4, 12, 27);         // dst TEI
+    set_bits(p, 7, 0, 8, 5);           // 链路标识符
+    set_bits(p, 8, 0, 12, 100);        // 帧长
+    set_bits(p, 9, 4, 4, 2);           // 物理块个数 = 2
+    set_bits(p, 11, 4, 4, 13);         // TMI 13 → 72B
+    set_bits(p, 12, 0, 4, 0);          // TMI_EXT = 0
+    const QByteArray bs[2] = {b0, b1};
+    const bool bads[2] = {bad0, bad1};
+    gw_single_fill(p, sz, n, bs, bads);
+    return f;
+}
+
+// ── ⑫ 国网 MSDU span 口径回归(P1) ──
+// 曾误用南网公式(长度取体[2..3] 16bit LE、标准头 32B/12B),两向都错:
+//   简头帧 span 被算长 → 误拒;标准头帧拿体[2..3] 垃圾当长度 → 误放行坏块字节。
+// 用例一律用**国网头布局**构造(83d3efc 用南网布局造体流,所以错口径也全 PASS)。
+static void test_gw_span_caliber() {
+    // 国网简头:体[0] 低 nibble = 0x01,len 在体[2..3] 低 11bit
+    auto simple = [](int len) {
+        QByteArray b(68, 0);
+        b[0] = 0x01;
+        b[2] = char(len & 0xFF);
+        b[3] = char((len >> 8) & 0x07);
+        return b;
+    };
+    // 国网标准头:len 在体[8..9] 低 11bit;体[11] bit3 = MACAddrFlag(0→16B,1→28B)
+    auto std_hdr = [](int len, bool flag28) {
+        QByteArray b(68, 0);
+        b[0] = 0x02;                       // 低 nibble != 0x01 → 标准头
+        b[8] = char(len & 0xFF);
+        b[9] = char((len >> 8) & 0x07);
+        b[11] = char(flag28 ? 0x08 : 0x00);
+        return b;
+    };
+    {   // GW2026
+        QByteArray out;
+        MpduInfo info;
+        MsduState msdu;
+        // A. 简头 len=60 → span 4+60+4=68,正好落在块0(68B)内,坏块在块1 → 必须解析
+        out.clear();
+        info = MpduInfo();
+        gw_2026_sof::assemble(gw_single_2blk_2026(simple(60), false, simple(0), true),
+                              info, msdu, out, 0, false);
+        check("gw-span26/A simple-head span 68 in good blk0 -> parsed",
+              out.size() == 136 && info.pb_crc_oks.size() == 2 && !info.pb_crc_ok);
+        // A'. 同上但坏块换成块0 → span 68 > 0 → 必须不解析
+        out.clear();
+        info = MpduInfo();
+        gw_2026_sof::assemble(gw_single_2blk_2026(simple(60), true, simple(0), false),
+                              info, msdu, out, 0, false);
+        check("gw-span26/A' simple-head span into bad blk0 -> not parsed", out.isEmpty());
+        // B. 标准头 len=60 → span 16+60+4=80 > 68 → 跨入坏块1 → 必须不解析
+        out.clear();
+        info = MpduInfo();
+        gw_2026_sof::assemble(gw_single_2blk_2026(std_hdr(60, false), false,
+                                                  std_hdr(0, false), true),
+                              info, msdu, out, 0, false);
+        check("gw-span26/B std-head span 80 into bad blk1 -> not parsed", out.isEmpty());
+        // B'. 标准头 len=20 → span 40 ≤ 68 → 落在块0 → 必须解析
+        out.clear();
+        info = MpduInfo();
+        gw_2026_sof::assemble(gw_single_2blk_2026(std_hdr(20, false), false,
+                                                  std_hdr(0, false), true),
+                              info, msdu, out, 0, false);
+        check("gw-span26/B' std-head span 40 in good blk0 -> parsed", out.size() == 136);
+        // C. 28B 头 + len=40 → span 28+40+4=72 > 68 → 跨入坏块1 → 不解析
+        out.clear();
+        info = MpduInfo();
+        gw_2026_sof::assemble(gw_single_2blk_2026(std_hdr(40, true), false,
+                                                  std_hdr(0, true), true),
+                              info, msdu, out, 0, false);
+        check("gw-span26/C std-head28 span 72 into bad blk1 -> not parsed", out.isEmpty());
+    }
+    {   // GW2022(同款口径)
+        QByteArray out;
+        MpduInfo info;
+        MsduState msdu;
+        out.clear();
+        info = MpduInfo();
+        gw_2022_sof::assemble(gw_single_2blk_2022(simple(60), false, simple(0), true),
+                              info, msdu, out, 0, false);
+        check("gw-span22/A simple-head span 68 in good blk0 -> parsed", out.size() == 136);
+        out.clear();
+        info = MpduInfo();
+        gw_2022_sof::assemble(gw_single_2blk_2022(simple(60), true, simple(0), false),
+                              info, msdu, out, 0, false);
+        check("gw-span22/A' simple-head span into bad blk0 -> not parsed", out.isEmpty());
+        out.clear();
+        info = MpduInfo();
+        gw_2022_sof::assemble(gw_single_2blk_2022(std_hdr(60, false), false,
+                                                  std_hdr(0, false), true),
+                              info, msdu, out, 0, false);
+        check("gw-span22/B std-head span 80 into bad blk1 -> not parsed", out.isEmpty());
+        out.clear();
+        info = MpduInfo();
+        gw_2022_sof::assemble(gw_single_2blk_2022(std_hdr(20, false), false,
+                                                  std_hdr(0, false), true),
+                              info, msdu, out, 0, false);
+        check("gw-span22/B' std-head span 40 in good blk0 -> parsed", out.size() == 136);
+    }
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     {
@@ -542,6 +692,7 @@ int main(int argc, char** argv) {
     test_flush_reload();
     test_nw_parse_gate();
     test_gw_multi_reorder();
+    test_gw_span_caliber();
     std::printf("\nRESULT: %s (%d failures)\n",
                 g_fails ? "FAILURES" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;

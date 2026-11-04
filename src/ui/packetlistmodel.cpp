@@ -28,7 +28,7 @@ struct I18nReg {
         trl::register_en("MAC* = 由当前 TEI↔MAC 映射推断，TEI 易主后会变化；STA-N* 中的 * 同理",
                          "MAC* = inferred from the current TEI↔MAC mapping and follows TEI "
                          "reassignment; same for * in STA-N*");
-        trl::register_en("UL-OFDMA 数据帧 (需 trigger)", "UL-OFDMA Data Frame (needs trigger)");
+        trl::register_en("UL-OFDMA 数据帧（需触发）", "UL-OFDMA Data Frame (Needs Trigger)");
     }
 };
 const I18nReg g_i18n_reg_pktlist;
@@ -535,7 +535,7 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
                             else if (!sts.isEmpty())
                                 kind = trl::L("UL-OFDMA 数据帧");
                             else
-                                kind = trl::L("UL-OFDMA 数据帧 (需 trigger)");
+                                kind = trl::L("UL-OFDMA 数据帧（需触发）");
                             break;
                           }
                           case 2: kind = trl::L("UL-OFDMA trigger"); break;

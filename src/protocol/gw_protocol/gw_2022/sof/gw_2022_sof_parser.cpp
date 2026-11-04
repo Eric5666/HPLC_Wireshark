@@ -101,8 +101,9 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
     info.pb_crc_ok = res.all_crc_ok && !res.truncated && res.reassembly_ok;
     // 仅交付完整重组且首个 MSDU span 完全避开坏 CRC 块的体流；
     // pb_crc_oks 保留原始逐块结果，帧仍会因坏块在 UI 标红。
+    // 口径必须用**国网**(SpanLayout::Gw):南网公式在国网头上两向都错。
     if (pb_asm::body_parseable_with_good_msdu_span(
-            res, pb_size - 4))
+            res, pb_size - 4, pb_asm::SpanLayout::Gw))
         complete_msdu_body = res.msdu_body;
     return QString();
 }

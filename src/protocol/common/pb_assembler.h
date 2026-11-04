@@ -314,54 +314,93 @@ inline void arrival_order_blocks(const AssembleResult& r,
     if (oks) *oks = k;
 }
 
-/// @brief 首帧 MSDU span 是否避开全部 CRC 失败块(用户 2026-10-29 补定:
-/// 多块帧中好块要解析——只要首帧 MSDU 完整落在好块内即解析,坏块在
-/// span 之外时不影响;span 横跨坏块时仍不解析,因缺失字节会使体流
-/// 错位成错误数据,而非“部分正确”)。
-/// @details span 口径与 MSDU 解析器一致(nw_2026_msdu_parser.cpp):
-/// msdu_len 在体[2..3]LE;版本(体[0] bit1-2)==2 为单跳帧 span=4+len+4,
-/// 否则标准头 span=mac_hdr_len(体[0] bit0:0=32B/1=12B)+len+4(帧尾 CRC32)。
-/// span 自体流 0 起,故与坏块 [i*body_len,(i+1)*body_len) 相交当且仅当
-/// span > i*body_len。体 <4B 或 body_len<=0 时无法判定,返回 false。
+/// @brief MSDU span 计算的协议族口径。国网与南网的 MSDU 头布局不同,**不能共用公式**。
+/// @details 实测两族差异(2026-11):
+///          南网(`nw_2026_msdu_parser.cpp`):简头判据 `(p[0]>>1)&0x03 == 2`;
+///            长度一律 `p[2] | (p[3]<<8)`(16bit LE);标准头 32B/12B(`p[0]` bit0)。
+///          国网(`gw_2026_msdu_parser.cpp` / `gw_2022_msdu_parser.cpp`):
+///            简头判据 `(p[0] & 0x0F) == 0x01`;简头长度 `p[2] | ((p[3]&0x07)<<8)`;
+///            标准头长度 `p[8] | ((p[9]&0x07)<<8)`;标准头 16B/28B(`p[11]` bit3 MACAddrFlag)。
+///          用错口径两向都会错:简头帧按南网算会把 span 算长 → 误拒;
+///          标准头帧按南网算会用体[2..3] 的垃圾当长度 → 误放行坏块字节。
+enum class SpanLayout {
+    Nw,   ///< 南网 BPLC(2021)/SPLC(2026)
+    Gw,   ///< 国网 HDC1.0(2022)/HDC2.0(2026)
+};
+
+/// @brief 首帧 MSDU span 是否避开全部 CRC 失败块(带协议族口径)。
+/// @param block_body_len 单块**块体**字节数(不含 PB 头与 CRC),国网 = pb_size-4,
+///        南网 = pb_size-8(PB 头 4B + 保留 1B + CRC24 3B)。
 inline bool msdu_span_avoids_bad_blocks(const QByteArray& body,
                                         const QVector<bool>& crc_oks,
-                                        int body_len) {
-    if (body.size() < 4 || body_len <= 0) return false;
+                                        int block_body_len,
+                                        SpanLayout layout) {
+    if (body.size() < 4 || block_body_len <= 0) return false;
     const quint8* p = reinterpret_cast<const quint8*>(body.constData());
-    const quint16 msdu_len = (quint16)p[2] | ((quint16)p[3] << 8);
     int span = 0;
-    if (((p[0] >> 1) & 0x03) == 2) {
-        span = 4 + msdu_len + 4;
+    if (layout == SpanLayout::Gw) {
+        if ((p[0] & 0x0F) == 0x01) {
+            const int len = (int)p[2] | (((int)p[3] & 0x07) << 8);
+            span = 4 + len + 4;
+        } else {
+            if (body.size() < 12) return false;
+            const int head = ((p[11] >> 3) & 0x01) ? 28 : 16;   // MACAddrFlag
+            const int len = (int)p[8] | (((int)p[9] & 0x07) << 8);
+            span = head + len + 4;
+        }
     } else {
-        if (body.size() < 12) return false;
-        const int mac_hdr_len = ((p[0] & 0x01) == 0) ? 32 : 12;
-        span = mac_hdr_len + msdu_len + 4;
+        const quint16 msdu_len = (quint16)p[2] | ((quint16)p[3] << 8);
+        if (((p[0] >> 1) & 0x03) == 2) {
+            span = 4 + msdu_len + 4;
+        } else {
+            if (body.size() < 12) return false;
+            const int mac_hdr_len = ((p[0] & 0x01) == 0) ? 32 : 12;
+            span = mac_hdr_len + msdu_len + 4;
+        }
     }
     for (int i = 0; i < crc_oks.size(); ++i) {
         if (crc_oks[i]) continue;
-        if (span > i * body_len) return false;
+        if (span > i * block_body_len) return false;
     }
     return true;
+}
+
+/// @brief 南网口径的兼容入口。**国网禁用**(用错口径会两向误判)——
+///        国网请调 4 参版本并传 `SpanLayout::Gw`。
+inline bool msdu_span_avoids_bad_blocks(const QByteArray& body,
+                                        const QVector<bool>& crc_oks,
+                                        int body_len) {
+    return msdu_span_avoids_bad_blocks(body, crc_oks, body_len, SpanLayout::Nw);
 }
 
 /// @brief 上述判定的 PbBlock 容器版(块序与体流拼接序一致)。
 inline bool msdu_span_avoids_bad_blocks(const QByteArray& body,
                                         const QVector<PbBlock>& blocks,
-                                        int body_len) {
+                                        int body_len,
+                                        SpanLayout layout) {
     QVector<bool> crc_oks;
     crc_oks.reserve(blocks.size());
     for (const PbBlock& b : blocks) crc_oks.append(b.crc_ok);
-    return msdu_span_avoids_bad_blocks(body, crc_oks, body_len);
+    return msdu_span_avoids_bad_blocks(body, crc_oks, body_len, layout);
+}
+
+/// @brief 南网口径的 PbBlock 容器版兼容入口。**国网禁用**(同 3 参标量版本)。
+inline bool msdu_span_avoids_bad_blocks(const QByteArray& body,
+                                        const QVector<PbBlock>& blocks,
+                                        int body_len) {
+    return msdu_span_avoids_bad_blocks(body, blocks, body_len, SpanLayout::Nw);
 }
 
 /// @brief 重组体流是否可安全交付给 MSDU 解析器。
 /// @details 先要求序列号重组完整，再要求首个 MSDU 的有效 span 不与坏 CRC 块相交。
 ///          块序必须与 msdu_body 的重组序一致；此函数不改变逐块 CRC 状态，
 ///          因而 UI 仍可按原始 CRC 结果将整帧标红。
+/// @param layout **必须**与调用方协议族一致(国网 Gw / 南网 Nw)。
 inline bool body_parseable_with_good_msdu_span(const AssembleResult& r,
-                                                int body_len) {
+                                                int block_body_len,
+                                                SpanLayout layout) {
     return body_parseable(r)
-        && msdu_span_avoids_bad_blocks(r.msdu_body, r.blocks, body_len);
+        && msdu_span_avoids_bad_blocks(r.msdu_body, r.blocks, block_body_len, layout);
 }
 
 }  // namespace pb_asm

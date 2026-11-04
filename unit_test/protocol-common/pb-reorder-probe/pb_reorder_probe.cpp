@@ -365,8 +365,11 @@ static void test_single_bad_crc_span_gate() {
                               : gw2022_frame(seqs, 2, true);
         quint8* p = reinterpret_cast<quint8*>(f.data());
         quint8* body = p + 16 + 1;
-        // Valid version-2 MSDU header; length 8 gives a 16-byte span wholly in PB0.
-        body[0] = 0x04;
+        // 国网简头(体[0] 低 nibble = 0x01):len 在体[2..3] 低 11bit;
+        // len=8 → span = 4+8+4 = 16B,完整落在 PB0 内的好块区间。
+        // 注:这里必须用**国网**布局造体流——国网 span 门按国网口径算,
+        // 用南网布局(0x04 + 16bit len)构造会两向都判错(见 pb-batch2-probe ⑫)。
+        body[0] = 0x01;
         body[1] = 0;
         body[2] = 8;
         body[3] = 0;
@@ -406,8 +409,9 @@ static void test_out_of_order_bad_crc_span() {
                               : gw2022_frame(seqs, 2, true);
         quint8* p = reinterpret_cast<quint8*>(f.data());
         quint8* body = p + 16 + seq0_arrival * pb_size + 1;
+        // 国网简头(体[0] 低 nibble = 0x01):len 在体[2..3] 低 11bit。
         // len=8 的 span 为 16B；len=68 的 76B span 跨入逻辑 seq1 块。
-        body[0] = 0x04;
+        body[0] = 0x01;
         body[1] = 0;
         body[2] = quint8(msdu_len & 0xFF);
         body[3] = quint8((msdu_len >> 8) & 0x07);
@@ -447,7 +451,7 @@ static void test_multiple_msdu_bad_crc_boundary() {
     const int seqs2[2] = {1, 0};          // seq1 先到，seq0 后到
     const int seqs3[3] = {2, 0, 1};       // 先 seq2，后 seq0、seq1
     const auto set_short_header = [](quint8* body, int off, int len) {
-        body[off] = 0x04;                 // version=2，使用 span 门的 4B 头
+        body[off] = 0x01;                 // 国网简头:低 nibble = 0x01 → span = 4+len+4
         body[off + 1] = 0;
         body[off + 2] = quint8(len & 0xFF);
         body[off + 3] = quint8((len >> 8) & 0x07);

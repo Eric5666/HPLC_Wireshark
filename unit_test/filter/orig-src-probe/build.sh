@@ -1,17 +1,68 @@
 #!/bin/bash
 # Build orig_src_probe against the parser + model sources in the repo root.
-# Usage: ./build.sh [out-binary [repo-dir]]
-# Run: ./build/orig_src_probe ../../protocol-gw/gw-topo-merge-probe/gw_topo_merge.bin
+#
+# 用法: bash build.sh [out-binary [repo-dir]]
+# 运行: ./build/orig_src_probe ../../protocol-gw/gw-topo-merge-probe/gw_topo_merge.bin \
+#                              ../../protocol-gw/gw-topo-merge-probe/gw_topo_merge_multi.bin
+#
+# Qt 查找顺序: $QT_ROOT → $QT → C:/Qt/6.11.2/mingw_64 → $HOME/qt/6.11.2/gcc_64
+# Windows(git-bash/MinGW)自动去掉 -lEGL -lGL 与 Linux 专有的 libfix 库路径。
 set -e
 cd "$(dirname "$0")"
+
+# 传给 g++/moc 的路径必须是**原生**形式(C:/… 或 MSYS 的 /d/… 混合式);
+# bash 习惯的 /c/… 会被原生程序静默忽略(表现为“找不到头文件”)。
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
+# Windows:Qt 自带的 MinGW 工具链(g++.exe)通常不在 PATH 上 → g++: command not found
+for tb in /c/Qt/Tools/mingw*/bin /c/Qt/Tools/*/bin; do
+    if [ -d "$tb" ]; then
+        PATH="$tb:$PATH"; export PATH
+        break
+    fi
+done
+
 REPO_ROOT="$(cd "../../.." && pwd)"
 OUT="${1:-./build/orig_src_probe}"
-R="${2:-$REPO_ROOT}"
-QT="$HOME/qt/6.11.2/gcc_64"
+R="$(native_path "${2:-$REPO_ROOT}")"
+
+QT="${QT_ROOT:-${QT:-}}"
+if [ -z "$QT" ]; then
+    for cand in "C:/Qt/6.11.2/mingw_64" "$HOME/qt/6.11.2/gcc_64" "/c/Qt/6.11.2/mingw_64"; do
+        if [ -d "$cand" ]; then QT="$cand"; break; fi
+    done
+fi
+[ -n "$QT" ] || { echo "未找到 Qt,请用 QT_ROOT= 指定" >&2; exit 1; }
+QT="$(native_path "$QT")"
+
+# moc:Windows 版 Qt 装在 bin/(无 libexec/),Linux 版在 libexec/
+MOC="$QT/bin/moc.exe"
+[ -x "$MOC" ] || MOC="$QT/libexec/moc"
+[ -x "$MOC" ] || { echo "未找到 moc: $QT/bin、$QT/libexec" >&2; exit 1; }
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) WINDOWS=1 ;;
+    *)                     WINDOWS=0 ;;
+esac
+
+CXXFLAGS="-std=c++17"
+LIBS="-L$QT/lib -lQt6Widgets -lQt6Gui -lQt6Core -lQt6Concurrent"
+if [ "$WINDOWS" = "1" ]; then
+    echo "build: Windows/MinGW, Qt=$QT"
+else
+    CXXFLAGS="$CXXFLAGS -fPIC"
+    LIBS="$LIBS -lEGL -lGL"
+    [ -d "$HOME/workspace/build_deps/libfix" ] && LIBS="-L$HOME/workspace/build_deps/libfix $LIBS"
+    echo "build: Linux/gcc, Qt=$QT"
+fi
+
 mkdir -p build
-"$QT/libexec/moc" "$R/src/ui/packetlistmodel.h" -o build/moc_packetlistmodel.cpp
-"$QT/libexec/moc" "$R/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp
-g++ -std=c++17 -fPIC \
+"$MOC" "$R/src/ui/packetlistmodel.h" -o build/moc_packetlistmodel.cpp
+"$MOC" "$R/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp
+
+g++ $CXXFLAGS \
   -I$R/src -I$R/src/protocol -I$R/src/protocol/common \
   -I$R/src/protocol/nw_protocol/nw_2026 -I$R/src/protocol/nw_protocol/nw_2021 \
   -I$R/src/protocol/gw_protocol/gw_2026 -I$R/src/protocol/gw_protocol/gw_2026/beacon \
@@ -52,7 +103,5 @@ g++ -std=c++17 -fPIC \
   $R/src/protocol/nw_protocol/nw_2021/nw_2021_msdu_parser.cpp \
   $R/src/protocol/nw_protocol/nw_2021/nw_2021_beacon_parser.cpp \
   $R/src/protocol/nw_protocol/nw_2021/nw_2021_tree.cpp \
-  -L$QT/lib -L$HOME/workspace/build_deps/libfix \
-  -lQt6Widgets -lQt6Gui -lQt6Core -lQt6Concurrent -lEGL -lGL -o "$OUT"
-chmod +x "$OUT"
+  $LIBS -o "$OUT"
 echo "built $OUT"

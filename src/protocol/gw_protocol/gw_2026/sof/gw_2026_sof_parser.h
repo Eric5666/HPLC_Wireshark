@@ -4,10 +4,11 @@
 ///          TF/调制方式…、无线表19 载荷PB大小/MCS…)与多 PB 块的 MSDU 跨帧
 ///          重组(与 Python MPDU_Class 重组逻辑一致)。
 ///          重组状态 MsduState 定义于 bplcframe.h(由调用方持有,跨帧保活)。
-#ifndef SOFPARSER_H
-#define SOFPARSER_H
+#ifndef GW_2026_SOFPARSER_H
+#define GW_2026_SOFPARSER_H
 
 #include "bplcframe.h"
+#include "pb_assembler.h"   // pb_asm::SpanLayout / msdu_span_avoids_bad_blocks
 
 namespace gw_2026_sof {
 
@@ -36,29 +37,17 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
 /// span=头+len+4。站体流为各块体依序拼接,坏块 j 区间为
 /// [j*(pb_size-4),(j+1)*(pb_size-4));span 自 0 起,相交当且仅当
 /// span > j*(pb_size-4)。体 <4B 或 pb_size<=4 时无法判定,返回 false。
+/// @details span 口径 = **国网**口径(`pb_asm::SpanLayout::Gw`),实现在
+/// `pb_assembler.h::msdu_span_avoids_bad_blocks`——国网/南网头部布局不同,
+/// 曾因复用南网公式导致两向误判(简头帧误拒、标准头帧误放行),勿再各自实现。
 inline bool msdu_span_avoids_bad_blocks(const QByteArray& body,
                                         const QVector<bool>& crc_oks,
                                         int pb_size) {
     const int body_len = pb_size - 4;  // PB 头 1B + CRC24 3B
-    if (body.size() < 4 || body_len <= 0) return false;
-    const quint8* p = reinterpret_cast<const quint8*>(body.constData());
-    int span = 0;
-    if ((p[0] & 0x0F) == 0x01) {
-        const int len = (int)p[2] | (((int)p[3] & 0x07) << 8);
-        span = 4 + len + 4;
-    } else {
-        if (body.size() < 12) return false;
-        const int head = ((p[11] >> 3) & 0x01) ? 28 : 16;
-        const int len = (int)p[8] | (((int)p[9] & 0x07) << 8);
-        span = head + len + 4;
-    }
-    for (int j = 0; j < crc_oks.size(); ++j) {
-        if (crc_oks[j]) continue;
-        if (span > j * body_len) return false;
-    }
-    return true;
+    return pb_asm::msdu_span_avoids_bad_blocks(body, crc_oks, body_len,
+                                               pb_asm::SpanLayout::Gw);
 }
 
 }  // namespace gw_2026_sof
 
-#endif // SOFPARSER_H
+#endif // GW_2026_SOFPARSER_H

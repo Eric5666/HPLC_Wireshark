@@ -3,8 +3,8 @@
 /// @details 负责 SOF 帧 FCH 内业务字段(源/目的 TEI、LinkID、PBNum、TMI…)
 ///          与多 PB 块的 MSDU 跨帧重组(与 Python MPDU_Class 重组逻辑一致)。
 ///          重组状态 MsduState 定义于 bplcframe.h(由调用方持有,跨帧保活)。
-#ifndef SOFPARSER_H
-#define SOFPARSER_H
+#ifndef GW_2022_SOFPARSER_H
+#define GW_2022_SOFPARSER_H
 
 #include "bplcframe.h"
 
@@ -27,4 +27,4 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
 
 }  // namespace gw_2022_sof
 
-#endif // SOFPARSER_H
+#endif // GW_2022_SOFPARSER_H

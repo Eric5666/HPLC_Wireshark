@@ -301,7 +301,7 @@ GW_2026_Parser::Result GW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
             for (bool ok : st.pb_crc_oks) all_ok = all_ok && ok;
             if (!all_ok
                 && !gw_2026_sof::msdu_span_avoids_bad_blocks(
-                       st.msdu, st.pb_crc_oks, int(st.pb_size) - 4))   // 块体长度 = 块长 - 头1B - CRC3B
+                       st.msdu, st.pb_crc_oks, int(st.pb_size)))   // 形参是 PB 块长,内部减 4
                 continue;
             merge_msdu_learn(r.msdu, GW_2026_MsduParser::parse(st.msdu));
         }

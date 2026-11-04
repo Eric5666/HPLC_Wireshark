@@ -210,6 +210,33 @@ packet-gw_2022.lua
 
 **新文件统一 `snake_case`**（与 `src/protocol/` 下的既有主体一致）。
 
+#### （10）头文件 include guard 必须全库唯一
+
+```cpp
+// ✓ 对：把「目录路径」压进 guard，天然不会撞
+// src/protocol/gw_protocol/gw_2026/sof/gw_2026_sof_parser.h
+#ifndef GW_2026_SOFPARSER_H
+#define GW_2026_SOFPARSER_H
+...
+#endif  // GW_2026_SOFPARSER_H
+
+// ✗ 错：只用文件名去重 —— 两个同名的 sof_parser.h 会拿到同一个 guard
+// gw_2022_sof_parser.h 与 gw_2026_sof_parser.h 都写 SOFPARSER_H
+#ifndef SOFPARSER_H
+#define SOFPARSER_H
+```
+
+**规则**：
+
+1. guard 名 = **大写下划线化的路径关键段**，从 `src/` 下一级目录开始带上族/版本/模块，
+   例如 `NW_2026_MSDU_PARSER_H`、`GW_2022_SOFPARSER_H`、`PROTOCOL_COMMON_PB_ASSEMBLER_H`。
+2. **不许只用 `文件名大写 + _H`**：`sof_parser.h` / `parser.h` / `tree.h` 这类通用名在不同族里必然重名。
+3. 一个 TU 里同时 `#include` 多个同族头是**正常需求**（探针、聚合解析器、跨族对照探针都会这么干）。
+   guard 撞名的后果是第二个头被**整体静默吃掉**（不报错、不警告，只是类型"不存在"），
+   症状往往是 `'gw_2026_sof' has not been declared` 这类**看起来像漏了 `-I` 的假象**。
+4. `#endif` 后面写注释回指 guard 名，便于审查时一眼看出边界。
+5. 全仓统一规则，**不要混用 `#pragma once`**（目前仅 3 个历史文件用，新文件一律 `#ifndef` 守卫）。
+
 ### 1.3 自查
 
 ```bash
@@ -224,6 +251,17 @@ grep -rnE '^\s+(bool|quint(8|16|32|64)|int|double|QString|QByteArray)\s+[a-z][a-
 
 # ④ 匈牙利前缀（应为 0）
 grep -rnE '\b(n[A-Z][a-z]+\w*|str[A-Z]\w*|p[A-Z]\w*|b[A-Z]\w*)\b' src/ --include='*.h' | grep -v '^\s*//'
+
+# ⑤ include guard 重复（应无输出；排除 release/debug/build 等生成目录）
+#    只扫 src/：3rdparty/ 里的 vendored 副本天然重复（crashpad 同时存在于
+#    3rdparty/install/crashpad/include/ 与 3rdparty/sentry-native/external/crashpad/），
+#    那是上游原样代码，不适用本规则，扫进来只会得到上百条噪音。
+HDRS=$(find src -name '*.h' -not -path '*/release/*' -not -path '*/debug/*' -not -path '*/build/*' -not -path '*/build_*/*')
+for f in $HDRS; do awk '/^#ifndef /{print $2; exit}' "$f" | sed "s|^|$f |"; done \
+  | awk '{c[$2]++; p[$2]=p[$2]" "$1} END{for(k in c) if(c[k]>1) print "重复 "k":"p[k]}'
+
+# ⑥ 缺守卫的头（应无输出；同样排除生成目录）
+for f in $HDRS; do grep -qE '^#(ifndef|pragma once)' "$f" || echo "无守卫: $f"; done
 ```
 
 ---
@@ -738,7 +776,31 @@ info.sof_multi_site_verified = true;
 // ⚠ 循环论证风险：真帧到位后应复核 weak 项
 ```
 
-**规则**：凡是「用构造数据验证」的结论，注释里必须列出 `已验证(strong)` / `未验证(weak)` 两栏，并注明数据来源是仿真是实测。
+**规则**：凡是「用构造数据验证」的结论，注释里必须列出 `已验证(strong)` / `未验证(weak)` 两栏，并注明数据来源是仿真实测。
+
+### 12.4 `src/updater/updater.pri` 的 `QSU_INCLUDE_MOC` 保持原样，不要改
+
+`src/updater/` 是 QSimpleUpdater 上游原样代码（见该 `.pri` 文件头说明与 `LICENSE.md`），
+`updater.pri:24` 的 `DEFINES += QSU_INCLUDE_MOC=1` 让各 `.cpp` 在文件尾部 `#include "moc_*.cpp"`，
+moc 符号直接编进对应的 `.o`。**这是既定方案，属于第三方模块的自包含约束，不要"优化"它。**
+
+```text
+# ✗ 不要做：改 QSU_INCLUDE_MOC=0 / 把头从 HEADERS 移出 / 加 QMAKE_MOC_SKIP /
+#           手写 moc 规则把产物落进 src/updater/ / 改写上游源码
+# ✓ 要做：重新编译（干净重编）
+```
+
+遇到下列症状时的正确处置是**重新编译**，不是改 `updater.pri`：
+
+| 症状 | 处置 |
+|---|---|
+| 改 `.pro`（含只改 `VERSION`）后首次全量重建报 `multiple definition of AuthenticateDialog::metaObject()` | 删掉构建产物重新编译 |
+| 全新/复制出来的构建目录报 `fatal error: moc_Updater.cpp: No such file or directory`（`-j4` 与串行都会） | 在既有构建目录里重编，或在 Qt Creator 里重新构建 |
+| `git worktree` 出来的树跑 qmake 卡住 | 该树会在 qmake 阶段联网克隆 `3rdparty/sentry-native`，不是本项目问题；别用 worktree 做构建验证 |
+
+**理由**：`src/updater/` 是上游原样代码，本地只允许两处改动（`Updater.cpp` 的 `clipped_changelog` 裁剪与
+`downloadUrl` 镜像前缀，均有「本地修改」标注）。为构建便利去改它的 moc 方案，会让下一次同步上游时冲突面扩大，
+且历史上已出现过"改回去→干净构建链接失败→再改回来"的反复（`c281e27`）。**构建产物问题用重编解决，不要动第三方配置。**
 
 ---
 

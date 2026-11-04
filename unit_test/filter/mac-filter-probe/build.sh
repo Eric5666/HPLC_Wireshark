@@ -4,27 +4,76 @@
 # (never committed). NOTE: the MAC-filter feature was merged into main
 # (12d1cbc); against main sources the probe passes 47/47
 # (RESULT: 0 failures). Before the merge, main sources gave 28/47.
-# Usage: ./build.sh   (produces ./build/mac_filter_probe)
+#
+# 用法: bash build.sh   (produces ./build/mac_filter_probe)
+#
+# Qt 查找顺序: $QT_ROOT → $QT → C:/Qt/6.11.2/mingw_64 → $HOME/qt/6.11.2/gcc_64
+# Windows(git-bash/MinGW)自动去掉 -lEGL -lGL 与 Linux 专有的 libfix 库路径。
 set -e
 cd "$(dirname "$0")"
+
+# 传给 g++/moc 的路径必须是**原生**形式(C:/… 或 MSYS 的 /d/… 混合式);
+# bash 习惯的 /c/… 会被原生程序静默忽略(表现为“找不到头文件”)。
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
+# Windows:Qt 自带的 MinGW 工具链(g++.exe)通常不在 PATH 上 → g++: command not found
+for tb in /c/Qt/Tools/mingw*/bin /c/Qt/Tools/*/bin; do
+    if [ -d "$tb" ]; then
+        PATH="$tb:$PATH"; export PATH
+        break
+    fi
+done
+
 REPO_ROOT="$(cd "../../.." && pwd)"
-QT="$HOME/qt/6.11.2/gcc_64"
-LIBFIX="$HOME/workspace/build_deps/libfix"
+R="$(native_path "$REPO_ROOT")"
+
+QT="${QT_ROOT:-${QT:-}}"
+if [ -z "$QT" ]; then
+    for cand in "C:/Qt/6.11.2/mingw_64" "$HOME/qt/6.11.2/gcc_64" "/c/Qt/6.11.2/mingw_64"; do
+        if [ -d "$cand" ]; then QT="$cand"; break; fi
+    done
+fi
+[ -n "$QT" ] || { echo "未找到 Qt,请用 QT_ROOT= 指定" >&2; exit 1; }
+QT="$(native_path "$QT")"
+
+# moc:Windows 版 Qt 装在 bin/(无 libexec/),Linux 版在 libexec/
+MOC="$QT/bin/moc.exe"
+[ -x "$MOC" ] || MOC="$QT/libexec/moc"
+[ -x "$MOC" ] || { echo "未找到 moc: $QT/bin、$QT/libexec" >&2; exit 1; }
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) WINDOWS=1 ;;
+    *)                     WINDOWS=0 ;;
+esac
+
+CXXFLAGS="-std=c++17"
+LIBS="-L$QT/lib -lQt6Widgets -lQt6Gui -lQt6Core -lQt6Concurrent"
+if [ "$WINDOWS" = "1" ]; then
+    echo "build: Windows/MinGW, Qt=$QT"
+else
+    CXXFLAGS="$CXXFLAGS -fPIC"
+    LIBS="$LIBS -lEGL -lGL"
+    [ -d "$HOME/workspace/build_deps/libfix" ] && LIBS="-L$HOME/workspace/build_deps/libfix $LIBS"
+    echo "build: Linux/gcc, Qt=$QT"
+fi
+
 mkdir -p build
-"$QT/libexec/moc" "$REPO_ROOT/src/ui/packetlistmodel.h" -o build/moc_packetlistmodel.cpp
-"$QT/libexec/moc" "$REPO_ROOT/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp
-g++ -std=c++17 -fPIC \
-  -I"$REPO_ROOT/src" -I"$REPO_ROOT/src/ui" -I"$REPO_ROOT/src/common" \
-  -I"$REPO_ROOT/3rdparty/qslog" \
+"$MOC" "$R/src/ui/packetlistmodel.h" -o build/moc_packetlistmodel.cpp
+"$MOC" "$R/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp
+
+g++ $CXXFLAGS \
+  -I"$R/src" -I"$R/src/ui" -I"$R/src/common" \
+  -I"$R/src/protocol" -I"$R/src/protocol/common" -I"$R/src/topo" \
+  -I"$R/3rdparty/qslog" \
   -I"$QT/include" -I"$QT/include/QtCore" -I"$QT/include/QtGui" -I"$QT/include/QtWidgets" \
   -I"$QT/include/QtConcurrent" \
   mac_filter_probe.cpp build/moc_packetlistmodel.cpp build/moc_QsLogDestFunctor.cpp \
-  "$REPO_ROOT/src/ui/packetlistmodel.cpp" \
-  "$REPO_ROOT/src/common/i18n.cpp" \
-  "$REPO_ROOT/3rdparty/qslog/QsLog.cpp" "$REPO_ROOT/3rdparty/qslog/QsLogDest.cpp" \
-  "$REPO_ROOT/3rdparty/qslog/QsLogDestConsole.cpp" "$REPO_ROOT/3rdparty/qslog/QsLogDestFile.cpp" \
-  "$REPO_ROOT/3rdparty/qslog/QsLogDestFunctor.cpp" \
-  -L"$QT/lib" -L"$LIBFIX" -lQt6Widgets -lQt6Gui -lQt6Core -lQt6Concurrent -lEGL -lGL \
-  -o build/mac_filter_probe
-chmod +x build/mac_filter_probe
+  "$R/src/ui/packetlistmodel.cpp" \
+  "$R/src/common/i18n.cpp" \
+  "$R/3rdparty/qslog/QsLog.cpp" "$R/3rdparty/qslog/QsLogDest.cpp" \
+  "$R/3rdparty/qslog/QsLogDestConsole.cpp" "$R/3rdparty/qslog/QsLogDestFile.cpp" \
+  "$R/3rdparty/qslog/QsLogDestFunctor.cpp" \
+  $LIBS -o build/mac_filter_probe
 echo "built build/mac_filter_probe"
