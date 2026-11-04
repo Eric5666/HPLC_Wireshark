@@ -23,11 +23,11 @@ struct I18nReg {
         trl::register_en("CRC 不完整（截断）", "CRC incomplete (truncated)");
         trl::register_en("CRC 不完整（重组失败）", "CRC incomplete (reassembly failed)");
         trl::register_en("CRC OK（乱序已重排）", "CRC OK (reordered)");
+        trl::register_en("CRC FAIL(%1/%2)", "CRC FAIL(%1/%2)");
+        trl::register_en("CRC OK", "CRC OK");
         trl::register_en("CRC 不完整（缺块 %1）", "CRC incomplete (missing PB %1)");
         trl::register_en("PB 序号异常", "PB Sequence Error");
-        trl::register_en("MAC* = 由当前 TEI↔MAC 映射推断，TEI 易主后会变化；STA-N* 中的 * 同理",
-                         "MAC* = inferred from the current TEI↔MAC mapping and follows TEI "
-                         "reassignment; same for * in STA-N*");
+        trl::register_en("MAC* = 由当前 TEI↔MAC 映射推断，TEI 易主后会变化；STA-N* 中的 * 同理", "MAC* = inferred from the current TEI↔MAC mapping and follows TEI reassignment; same for * in STA-N*");
         trl::register_en("UL-OFDMA 数据帧（需触发）", "UL-OFDMA Data Frame (Needs Trigger)");
     }
 };

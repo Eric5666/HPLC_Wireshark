@@ -33,7 +33,6 @@ void register_plugin_panel_i18n() {
     trl::register_en("告警", "Alarm");
     trl::register_en("值", "Value");
     trl::register_en("等待插件数据...", "Waiting for plugin data...");
-    trl::register_en("图形渲染失败", "Render failed");
     trl::register_en("插件加载失败", "Plugin load failed");
 }
 

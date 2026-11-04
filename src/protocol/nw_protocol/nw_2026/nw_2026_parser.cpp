@@ -124,7 +124,6 @@ namespace {
 struct I18nReg {
     I18nReg() {
         trl::register_en("训练帧（MIMO训练帧）", "Training Frame (MIMO)");
-        trl::register_en("SNID 不在白名单: 0x%1", "SNID Not in Whitelist: 0x%1");
         trl::register_en("PB 块数超上限(band=%1 tmi=%2 num=%3 max=%4)",
                          "PB Count Over Limit (band=%1 tmi=%2 num=%3 max=%4)");
         trl::register_en(" (截断: PB 块不完整, 声明 %1 块仅收到 %2 块)", " (truncated: %1 PB declared, %2 received)");

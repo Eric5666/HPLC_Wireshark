@@ -23,10 +23,6 @@ struct I18nRegNw2021Parser {
         trl::register_en("帧长过短", "Frame Too Short");
         trl::register_en("剥头后载荷过短(<4B)", "Payload Too Short After Strip (<4B)");
         trl::register_en("剥头后空载荷", "Empty Payload After Strip");
-        trl::register_en("HPLC 链路被过滤", "HPLC Link Filtered");
-        trl::register_en("HRF 链路被过滤", "HRF Link Filtered");
-        trl::register_en("SNID 不在白名单: 0x%1", "SNID Not in Whitelist: 0x%1");
-        trl::register_en("TEI 不在白名单", "TEI not in whitelist");
         trl::register_en("PB 序号异常未解析", "PB Sequence Error, Not Parsed");
         trl::register_en("PB 块数超上限(band=%1 tmi=%2 ext=%3 num=%4 max=%5)",
                          "PB Count Over Limit (band=%1 tmi=%2 ext=%3 num=%4 max=%5)");

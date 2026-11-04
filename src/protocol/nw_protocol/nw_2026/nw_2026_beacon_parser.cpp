@@ -693,7 +693,6 @@ struct I18nReg {
         trl::register_en("万年历同步条目", "Calendar Sync Item");
         trl::register_en("集中信标机制", "Central beacon mechanism");
         trl::register_en("分散信标机制", "Distributed beacon mechanism");
-        trl::register_en("ProxyTEI[%1]", "ProxyTEI[%1]");
         trl::register_en(" 周期", " cycle(s)");
         trl::register_en("无线路由参数条目", "RF Route Parameter Item");
         trl::register_en("无线信道变更条目", "RF Channel Change Item");

@@ -180,7 +180,6 @@ struct I18nRegTopoWindow {
         trl::register_en("代理 TEI", "Proxy TEI");
         trl::register_en("本站点的代理 (PCO)", "This STA's proxy (PCO)");
         trl::register_en("STA TEI=%1 的邻居表", "Neighbors of STA TEI=%1");
-        trl::register_en("发现列表报文数", "Discover count");
         trl::register_en("在线", "Online");
         trl::register_en("入网中", "Joining");
         trl::register_en("离线", "Offline");
@@ -217,7 +216,6 @@ struct I18nRegTopoWindow {
         trl::register_en("适应视图", "Fit view");
         trl::register_en("缩放并居中显示整张拓扑图", "Zoom to fit and center the whole topology");
         // 邻居明细表(载波+无线混合,含可靠度评分)
-        trl::register_en("链路", "Link");
         trl::register_en("信号强度 (dBm)", "Signal Strength (dBm)");
         trl::register_en("上行成功率%（对方→我）", "Uplink % (peer→me)");
         trl::register_en("下行成功率%（我→对方）", "Downlink % (me→peer)");

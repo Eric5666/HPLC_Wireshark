@@ -51,6 +51,13 @@ jobs:
           print(f"include guard uniqueness: PASS ({len(guards)} guards)")
           PY
 
+      - name: Non-blocking full i18n/title-case report
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 tools/check_i18n.py --strict || true
+          python3 tools/check_title_case.py --strict || true
+
       - name: NW MSDU Debug regression (ASan/UBSan)
         env:
           ASAN_OPTIONS: detect_leaks=1

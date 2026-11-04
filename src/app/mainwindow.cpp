@@ -1347,7 +1347,6 @@ struct I18nRegMainWindow {
         trl::register_en("应用", "Apply");
         trl::register_en("继续", "Resume");
         trl::register_en("作者邮箱", "Author email");
-        trl::register_en("导出为回放文件", "Export as replay file");
         trl::register_en("导出为文件", "Export to file");
         trl::register_en("裸 hex 文本 (*.txt)", "Raw hex text (*.txt)");
         trl::register_en("回放文件 (*.bin)", "Replay files (*.bin)");
