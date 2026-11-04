@@ -790,17 +790,24 @@ moc 符号直接编进对应的 `.o`。**这是既定方案，属于第三方模
 # ✓ 要做：重新编译（干净重编）
 ```
 
-遇到下列症状时的正确处置是**重新编译**，不是改 `updater.pri`：
+遇到下列症状时的正确处置是**清掉构建目录里的生成物后重新 qmake + 编译**，不是改 `updater.pri`：
 
 | 症状 | 处置 |
 |---|---|
-| 改 `.pro`（含只改 `VERSION`）后首次全量重建报 `multiple definition of AuthenticateDialog::metaObject()` | 删掉构建产物重新编译 |
-| 全新/复制出来的构建目录报 `fatal error: moc_Updater.cpp: No such file or directory`（`-j4` 与串行都会） | 在既有构建目录里重编，或在 Qt Creator 里重新构建 |
-| `git worktree` 出来的树跑 qmake 卡住 | 该树会在 qmake 阶段联网克隆 `3rdparty/sentry-native`，不是本项目问题；别用 worktree 做构建验证 |
+| 链接报 `multiple definition of AuthenticateDialog::metaObject()` / `QSimpleUpdater::staticMetaObject` 等（实测 32 条，4 个类 × 8 个符号） | 删掉构建目录里的生成物（`Makefile*`、`mocinclude.opt`、`debug/`、`release/`、`ui_*.h`、`*_resource.rc`）→ 重新 `qmake` → 全量编译 |
+| 全新/复制出来的构建目录报 `fatal error: moc_Updater.cpp: No such file or directory`（`-j4` 与串行都会） | 同上：在既有构建目录里清掉生成物并重跑 qmake；不要靠 `git worktree`（它会在 qmake 阶段联网克隆 `3rdparty/sentry-native` 卡住） |
+
+**机理（2026-11 实测更正，勿再沿用"配置自相矛盾"的旧说法）**：`updater.pri` 本身是自洽的 ——
+qmake 的 mocinclude 探测（产物是构建目录里的 `mocinclude.opt`）**能够识别**源码里
+`#if QSU_INCLUDE_MOC → #include "moc_*.cpp"` 的写法，并把对应的 `moc_X.o` 从 `OBJECTS` 里剔除，
+于是"内联 moc 的 `X.o`"是唯一提供符号者，不会重复。实测：清空生成物重新 qmake 后
+`grep -c 'debug/moc_QSimpleUpdater\.o' Makefile.Debug` = **0**，而 `-DQSU_INCLUDE_MOC=1` 仍在。
+只有当构建目录里残留**上一轮的 `moc_*.cpp`/`moc_*.o`** 时，探测结果被污染，`X.o` 与 `moc_X.o`
+同时进链接才会撞 32 条 `multiple definition`。
 
 **理由**：`src/updater/` 是上游原样代码，本地只允许两处改动（`Updater.cpp` 的 `clipped_changelog` 裁剪与
 `downloadUrl` 镜像前缀，均有「本地修改」标注）。为构建便利去改它的 moc 方案，会让下一次同步上游时冲突面扩大，
-且历史上已出现过"改回去→干净构建链接失败→再改回来"的反复（`c281e27`）。**构建产物问题用重编解决，不要动第三方配置。**
+且历史上已出现过"改回去→干净构建链接失败→再改回来"的反复（`c281e27`）。**构建产物问题用"清生成物 + 重跑 qmake"解决，不要动第三方配置。**
 
 ---
 
