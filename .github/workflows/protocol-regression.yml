@@ -31,7 +31,7 @@ jobs:
         run: |
           mkdir -p build/nw-debug
           cd build/nw-debug
-          qmake6 ../../samples/nw_mme_test.pro CONFIG+=debug CONFIG-=release SANITIZERS=address,undefined 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
+          qmake6 ../../unit_test/ci/nw-mme-test/nw_mme_test.pro CONFIG+=debug CONFIG-=release SANITIZERS=address,undefined 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
           make -j2
           ./nw_mme_test
 
@@ -39,7 +39,7 @@ jobs:
         run: |
           mkdir -p build/nw-release
           cd build/nw-release
-          qmake6 ../../samples/nw_mme_test.pro CONFIG+=release CONFIG-=debug 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
+          qmake6 ../../unit_test/ci/nw-mme-test/nw_mme_test.pro CONFIG+=release CONFIG-=debug 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
           make -j2
           ./nw_mme_test
 
@@ -47,15 +47,17 @@ jobs:
         run: |
           mkdir -p build/roundtrip
           cd build/roundtrip
-          qmake6 ../../samples/roundtrip/roundtrip.pro CONFIG+=release CONFIG-=debug
+          qmake6 ../../unit_test/ci/roundtrip/roundtrip.pro CONFIG+=release CONFIG-=debug
           make -j2
-          ./roundtrip "$GITHUB_WORKSPACE/samples/roundtrip/roundtrip_test.bin" "$GITHUB_WORKSPACE/samples/roundtrip/roundtrip_test.txt"
+          ./roundtrip "$GITHUB_WORKSPACE/unit_test/ci/roundtrip/roundtrip_test.bin" "$GITHUB_WORKSPACE/unit_test/ci/roundtrip/roundtrip_test.txt"
 
       - name: NW2026 OFDMA type1 regression
         run: |
           python3 wireshark_support_plugins/build_nw2026_ul_ofdma.py
-          cd samples && mkdir -p build_type1_build && cd build_type1_build
-          qmake6 ../nw2026_type1_test.pro CONFIG+=release CONFIG-=debug 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
+          cd unit_test/ci/nw2026-type1-test
+          mkdir -p build/type1
+          cd build/type1
+          qmake6 ../../nw2026_type1_test.pro CONFIG+=release CONFIG-=debug 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
           make -j2
           cd "$GITHUB_WORKSPACE"
-          ./samples/build_type1_build/nw2026_type1_test
+          ./unit_test/ci/nw2026-type1-test/build/type1/nw2026_type1_test

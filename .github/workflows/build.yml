@@ -100,7 +100,7 @@ jobs:
       - name: round-trip 无损验证(bin↔裸hex 往返一致)
         shell: bash
         run: |
-          cd samples/roundtrip
+          cd unit_test/ci/roundtrip
           qmake roundtrip.pro
           mingw32-make -j"$(nproc)"
           ./release/roundtrip.exe roundtrip_test.bin roundtrip_test.txt
@@ -108,8 +108,8 @@ jobs:
       - name: NW MMe 截断边界回归
         shell: bash
         run: |
-          mkdir -p samples/nw_mme_build
-          cd samples/nw_mme_build
+          mkdir -p unit_test/ci/nw-mme-test/build
+          cd unit_test/ci/nw-mme-test/build
           qmake ../nw_mme_test.pro CONFIG+=release CONFIG-=debug
           mingw32-make -j"$(nproc)"
           ./release/nw_mme_test.exe

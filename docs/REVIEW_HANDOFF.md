@@ -12,8 +12,8 @@
 | 2 | `docs/TEST_FRAME_CROSSREF.md` | **跨协议帧类型对照表** — 13 类横跨四协议，每格给 表号+取值+归属章节 | 15,385 B | 183 | `75f6b8bddcbbdc2bed6839cb369fc4f741e2c958241f0887224b44a294e618e9` |
 | 3 | `docs/TEST_FRAME_ROWSPAN_AUDIT.md` | **⚠rowspan 矛盾筛查** — 回源核对前的机器预筛：(A)262 (B)67 (C)0 (C2)79 | 34,880 B | 335 | `e7edc6e0c5286456f5c92810ca6466944d46d87c83ef0cd40ab8869a6f111119` |
 | 4 | `docs/TEST_TIER3_FRAME_MATRIX.md` | **3 级帧型矩阵** — 34 项 MMe 语义 × 层级 × 方向 × 四协议表号标识符 | 29,651 B | 325 | `d328818d5bf3c9fb15ca113451114743e3279963982362ae6cbe87ae9c3bd385` |
-| 5 | `samples/hdc2_0_test_frames.md` | **构造帧 9 帧 + 逐字节说明** — 含 16bit/32bit 小端专节、同名表归属、源表核验 | 15,954 B | 282 | `4d5bea64aa17b367101d6091279ddd4b93cf2151481db1317d40d61cd583a1c0` |
-| 6 | `samples/hdc2_0_build_frames.py` | **帧生成脚本（带运行时自校验）** — 9 帧全打印 + 4 个多字节整数字段小端 assert | 12,219 B | 281 | `0c8cc2c61a3f376d041f64184b70eb22755c4f0cd8417ce474a5da49be8ab9d8` |
+| 5 | `unit_test/manual/hdc2_0_test_frames.md` | **构造帧 9 帧 + 逐字节说明** — 含 16bit/32bit 小端专节、同名表归属、源表核验 | 15,954 B | 282 | `4d5bea64aa17b367101d6091279ddd4b93cf2151481db1317d40d61cd583a1c0` |
+| 6 | `unit_test/manual/hdc2_0_build_frames.py` | **帧生成脚本（带运行时自校验）** — 9 帧全打印 + 4 个多字节整数字段小端 assert | 12,219 B | 281 | `0c8cc2c61a3f376d041f64184b70eb22755c4f0cd8417ce474a5da49be8ab9d8` |
 | 7 | `tools/gen_frame_catalog.py` | **四协议目录生成器** — rowspan/colspan 网格展开 + 固定头长度 + 跨字节标注 | 11,568 B | 263 | `c6effc39dc21a595da8ce55426810ea2b5391ceef5281ec61c43caef8f86d980` |
 | 8 | `tools/gen_frame_crossref.py` | **对照表生成器** — | 3,831 B | 101 | `327f94a64477797ceb6475df176d64de5a1152ba4579fb77292e398d25ca80a6` |
 | 9 | `tools/gen_tier3_matrix.py` | **3 级矩阵生成器** — | 15,053 B | 252 | `91ac834782c568baf01e686f0f6974a4e53fd48a1d8d2b692789475db2b4b0ea` |
@@ -86,7 +86,7 @@
 
 ## 六、构造帧自校验状态
 
-- `samples/hdc2_0_build_frames.py` 运行即 assert 4 个多字节整数字段的小端读值
+- `unit_test/manual/hdc2_0_build_frames.py` 运行即 assert 4 个多字节整数字段的小端读值
 - **md ↔ 脚本同源校验 9/9**，md 中陈旧 hex 孤儿 0 个
 - 帧A/HDC1.0帧1 byte9=78 byte10=90 byte11=60；帧B byte12=78 byte13=90 byte16=60；帧3/4 link_type=1/0 —— @code-review-bot 已逐字节验证通过
 
@@ -99,8 +99,8 @@
 | **帧集指纹旧值** | `cdbd0981e70c973d65e4e3a1f2341b09ed48816f2490caffbe4f1f183fe209b8`（89423fc 前大端/清零版，勿用） |
 | **帧集指纹作废值** | `556cb263a53f5f33a077cdf48899b319176a2ae1f0796a15ee9b9d7344ab0aa6`（939efe1 帧序重排前小写正文 join 的中间态产物，office-review-bot 终裁 2026-10-24：作废勿用；v2.3.3 台账口径由其登记） |
 | **帧数** | 9 |
-| **生成脚本** | `samples/hdc2_0_build_frames.py` sha256 `0c8cc2c61a3f376d041f64184b70eb22755c4f0cd8417ce474a5da49be8ab9d8` |
-| **帧文档** | `samples/hdc2_0_test_frames.md` sha256 `4d5bea64aa17b367101d6091279ddd4b93cf2151481db1317d40d61cd583a1c0`（15,954 B） |
+| **生成脚本** | `unit_test/manual/hdc2_0_build_frames.py` sha256 `0c8cc2c61a3f376d041f64184b70eb22755c4f0cd8417ce474a5da49be8ab9d8` |
+| **帧文档** | `unit_test/manual/hdc2_0_test_frames.md` sha256 `4d5bea64aa17b367101d6091279ddd4b93cf2151481db1317d40d61cd583a1c0`（15,954 B） |
 
 **帧集指纹算法**：`sha256("".join(九帧的连续 hex))` —— 重跑生成脚本即可复算比对。
 > 这是**唯一的版本锚点**。任何副本（含聊天消息里贴的 hex）若与此指纹不符，即为旧版，勿用。
@@ -110,14 +110,14 @@
 ## 七、状态（2026-10-24 23:0x 更新 · 含口径终裁）
 
 - **本批已全部提交并同步**（提交链：`939efe1` office-bot 修 4 处 → `15c9a3c` 台账订正 → `610865b/13a8dfc` bin_to_pcap 注释等；@git-release-bot 以 merge commit `3ef3cfd` 线性化早期 amend 分叉，base = `88296eb` = origin，0/0）。
-- **数据集入库口径终裁（用户裁定，`88296eb` + `bbe1db8`）**：三个数据集 bin（`nw_bplc_3frames.bin` / `test_topology_nw.bin` / `test_topology_nw_p2.bin`）、两个 manifest json（`test_topology_nw.json` / `test_topology_nw_p2.json`，`bbe1db8` 移出）与 pcap **均不入库**（工作区文件保留，由 `gen_nw_bplc_*.py` 生成器确定性重建）；唯一保留在库的 `.bin` 是 CI 夹具 `samples/roundtrip/roundtrip_test.bin`。第八节版本锚点（帧集指纹 / 生成脚本 / 帧文档 md）不受此口径影响。
+- **数据集入库口径终裁（用户裁定，`88296eb` + `bbe1db8`）**：三个数据集 bin（`nw_bplc_3frames.bin` / `test_topology_nw.bin` / `test_topology_nw_p2.bin`）、两个 manifest json（`test_topology_nw.json` / `test_topology_nw_p2.json`，`bbe1db8` 移出）与 pcap **均不入库**（工作区文件保留，由 `gen_nw_bplc_*.py` 生成器确定性重建）；唯一保留在库的 `.bin` 是 CI 夹具 `unit_test/ci/roundtrip/roundtrip_test.bin`。第八节版本锚点（帧集指纹 / 生成脚本 / 帧文档 md）不受此口径影响。
 - **office-review-bot 裁定「修 4 处」已全部落地**（`939efe1` + 本提交）：
   ① 5 个过期 pretty 块（帧2/3/4/帧B/帧3′）已按脚本重生成，删 1 条陈旧「连续：」双行残留；
   ② md 头部 L10 指纹算法改「连续：`HEX`（NNB）」格式 + 说明与 python 复核片段；
   ③ 帧集指纹 = `a6ff3079…`（9 条、文档序 = 脚本序），旧值 `cdbd0981…` 已注记勿用；
   ④ P2 位图字节：`docs/TEST_TOPOLOGY_NW_BPLC.md` 早已 `80 03`/`E0`（无 `c0 01` 残留），无需再改。
-- **复核方一次性核验（office-bot 已做，结果在此）**：重跑 `py samples/hdc2_0_build_frames.py`（rc=0、15 项自校验全过）→ 9 条 CONT 与 md「连续：」行逐条相等 ✓；md 9 个 pretty hex 块 == 脚本逐帧输出 ✓；第八节帧集指纹 == `sha256(9 条 hex 文档序)` = `a6ff3079…` ✓；py sha = `0c8cc2c6…` ✓。
-- **vibe-coding 的 `docs/TOPO_NEIGHBOR_SCORE.md` 与 `samples/gw26_rfdl_probe.*` 仍不属本批**。
+- **复核方一次性核验（office-bot 已做，结果在此）**：重跑 `py unit_test/manual/hdc2_0_build_frames.py`（rc=0、15 项自校验全过）→ 9 条 CONT 与 md「连续：」行逐条相等 ✓；md 9 个 pretty hex 块 == 脚本逐帧输出 ✓；第八节帧集指纹 == `sha256(9 条 hex 文档序)` = `a6ff3079…` ✓；py sha = `0c8cc2c6…` ✓。
+- **vibe-coding 的 `docs/TOPO_NEIGHBOR_SCORE.md` 与 `unit_test/manual/gw26_rfdl_probe.*` 仍不属本批**。
 
 ## 九、v2.3.3 微补丁登记（office-bot 侧 · 2026-10-24）
 

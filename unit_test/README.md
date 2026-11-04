@@ -17,6 +17,15 @@
   `./build_probe.sh`）；g++ 直编用例的构建脚本会现场用
   `$QT/libexec/moc` 生成 moc 文件，**绝不提交 `moc_*.cpp`**。
 
+## 0. CI 与人工测试分区
+
+从 `samples/` 迁入的可执行测试已经按用途分区：
+
+- `unit_test/ci/`：GitHub Actions 直接执行的稳定回归门禁，必须可在干净环境中无交互构建和运行；详见 [`unit_test/ci/README.md`](ci/README.md)。
+- `unit_test/manual/`：开发探针、问题复现和需要人工准备输入的测试，不作为 CI 门禁；详见 [`unit_test/manual/README.md`](manual/README.md)。
+
+`samples/` 仅保留示例数据、格式转换工具和数据集生成脚本，不再放置 Qt/C++ 测试程序。
+
 ## 1. 分类规则
 
 按**被测子系统**分一级目录；一个用例只属于一个主责分类，

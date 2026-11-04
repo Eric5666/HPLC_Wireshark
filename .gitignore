@@ -21,8 +21,8 @@ samples/*.bin
 samples/test_topology_nw.json
 samples/test_topology_nw_p2.json
 # 数据集 bin 一律不入库(用户终裁): 由 samples/gen_*.py 确定性重建,
-# 例外 samples/roundtrip/roundtrip_test.bin —— CI 直接引用, 必须保留
-!samples/roundtrip/roundtrip_test.bin
+# 例外 unit_test/ci/roundtrip/roundtrip_test.bin —— CI 直接引用, 必须保留
+!unit_test/ci/roundtrip/roundtrip_test.bin
 samples/*.png
 samples/*.txt
 samples/updcheck_dbg/

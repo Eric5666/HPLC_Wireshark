@@ -1,7 +1,7 @@
 # round-trip 测试样本:裸hex 文本强制 LF,避免 git autocrlf 检出成 CRLF 导致比对失败
-samples/roundtrip/roundtrip_test.txt text eol=lf
+unit_test/ci/roundtrip/roundtrip_test.txt text eol=lf
 # bin 样本按二进制处理,不做换行/编码转换
-samples/roundtrip/roundtrip_test.bin -text
+unit_test/ci/roundtrip/roundtrip_test.bin -text
 # NSIS 安装脚本必须保持 LF: 脚本含 UTF-8 BOM + 中文注释,
 # NSIS 3.09 读到 CRLF 会把脚本判成 ACP 并报 'Bad text encoding ... on line 1' 而中止打包
 *.nsi text eol=lf

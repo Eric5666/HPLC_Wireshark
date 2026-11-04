@@ -133,4 +133,4 @@ py -3 bin2pcap.py samples/test_topology_nw.bin x.pcap --nw    # 33 帧 0 跳过
 - **回归流程**：先跑三个生成器再验证 ——
   `py -3 samples/gen_nw_bplc_frames.py` / `gen_nw_bplc_topology.py` / `gen_nw_bplc_p2.py`
   三个脚本确定性产出，重跑后 blob hash 恒定（实测：`e8824ba4` / `c8057b32` / `67e089ae`），与移出前逐字节一致
-- 唯一入库的 `.bin` 是 `samples/roundtrip/roundtrip_test.bin`（+ `.txt`）：**CI 直接引用的测试夹具**（`.github/workflows/build.yml:106`、`protocol-regression.yml:52`），不可由脚本重建，必须保留
+- 唯一入库的 `.bin` 是 `unit_test/ci/roundtrip/roundtrip_test.bin`（+ `.txt`）：**CI 直接引用的测试夹具**（`.github/workflows/build.yml:106`、`protocol-regression.yml:52`），不可由脚本重建，必须保留
