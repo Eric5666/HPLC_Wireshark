@@ -172,11 +172,11 @@ jobs:
 
           # 已编译的探针全部执行(成本≈0,不做"编了却不跑"):
           # A 同一 MAC 多 TEI / B 同一 TEI 多 MAC / C 重启次数往返振荡 / D 两链路计数不同
-          # diversity_probe 排除:其期望表与 9cc3a44(gw_2026_pb_table.h 频段越界统一查表)不一致,
-          # 修好前运行必然红,另开工单处理。
+          # diversity_probe:期望矩阵按 gw_2026_pb_num_table(用户 2026-11 核对确认,权威)逐格抄写
           cd unit_test/topo/topo-restart-probe/build
           for p in cpc37_probe cpc_auth_probe dual_probe m2_probe m2m7_probe \
-                   m6beacon_probe main_probe module_probe pb0_gate_probe model_probe anomaly_probe; do
+                   m6beacon_probe main_probe module_probe pb0_gate_probe model_probe \
+                   anomaly_probe diversity_probe; do
             echo "== $p =="
             "./$p"
           done
