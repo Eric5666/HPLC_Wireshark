@@ -27,8 +27,8 @@ samples/*.png
 samples/*.txt
 samples/updcheck_dbg/
 samples/upd_e2e/
-samples/viewtest/release/
-samples/headless_build/release/
+# 下面两条与第 2 行的 release/ 重复(无前导斜杠 = 任意层级匹配);
+# samples/headless_build/ 整个目录又已被 samples/*_build/ 覆盖 ⇒ 删除重复规则,避免维护两遍。
 
 # ---- 打包工具与产物 ----
 tools/nsis*
