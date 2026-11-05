@@ -3,6 +3,7 @@
 ///   A/B/C 既有口径(sender_mac==0 回落主体 MAC、中继按发送方建基线、无键静默跳过)
 ///   D     方案 B 新增:CCO/STA 非白名单帧、NID 隔离、MAC 隔离、TEI=1 归 CCO、
 ///         逐帧采样路径(note_restart_origin)、同帧不重复报、无变化不报
+///   D13   身份记忆按 (NID, MAC) 分键:同 MAC 在不同 NID 下 CCO/STA 身份互不串
 /// 用法:./probe ; exit 0 = 全部断言通过
 #include "topo_state.h"
 #include <QCoreApplication>
@@ -270,6 +271,28 @@ int main(int argc, char** argv) {
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1
               && count_restart_events(st) == 0,
               "D12b 身份记忆生效:缺 cco_mac 仍归 CCO,不漂移成 STA");
+    }
+    // D13:身份记忆按 (NID, MAC) 分键 —— 同一 MAC 在 NID 0x0E 是 CCO,在 NID 0x14 是 STA,互不串
+    //     (逐帧侧不经过 mac_to_tei 学习,本用例只测 m_cco_macs 本身;旧 MAC-only 记忆会把
+    //      NID 0x14 的同一 MAC 也判成 CCO ⇒ D13f 失败)
+    {
+        TopoState st;
+        const quint64 MAC_X = 0x0A0B0C0D0E0FULL;
+        // NID 0x0E:逐帧侧 src_tei==1 认出 CCO,写入 (0x0E, MAC_X) 身份记忆
+        CHECK(!st.note_restart_origin(0x0E, kTeiCco, MAC_X, 2, 1001, 1, false, true),
+              "D13a NID 0x0E 首帧建 CCO 基线不报");
+        CHECK(st.note_restart_origin(0x0E, kTeiCco, MAC_X, 3, 1002, 2, false, true),
+              "D13b NID 0x0E 计数 2→3 报 CcoRestart");
+        CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1,
+              "D13c NID 0x0E 共 1 条 CcoRestart");
+        // NID 0x14:同一 MAC、无 CCO 证据 ⇒ 判 STA
+        CHECK(!st.note_restart_origin(0x14, 5, MAC_X, 5, 1003, 3, false, true),
+              "D13d NID 0x14 首帧建 STA 基线不报");
+        CHECK(st.note_restart_origin(0x14, 5, MAC_X, 6, 1004, 4, false, true),
+              "D13e NID 0x14 计数 5→6 报 StaRestart");
+        CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1
+              && count_restart_events(st) == 1,
+              "D13f 两 NID 各 1 条、互不串(CCO 1 + STA 1)");
     }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);

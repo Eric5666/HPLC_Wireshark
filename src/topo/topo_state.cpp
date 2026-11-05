@@ -250,10 +250,10 @@ quint64 TopoState::restart_base_key(quint32 net_id, quint64 mac) {
     return (quint64(net_id & 0xFFFFu) << 48) | (mac & 0xFFFFFFFFFFFFULL);
 }
 
-bool TopoState::resolve_is_cco(quint16 src_tei, quint64 mac, const TopoEvent* ev) {
+bool TopoState::resolve_is_cco(quint32 net_id, quint16 src_tei, quint64 mac, const TopoEvent* ev) {
     bool cco = false;
     if (src_tei == kTeiCco) cco = true;                                     // 1. TEI 固定为 1
-    if (!cco && mac && m_cco_macs.contains(mac)) cco = true;                // 2. 身份记忆
+    if (!cco && mac && m_cco_macs.contains(restart_base_key(net_id, mac))) cco = true;  // 2. 身份记忆(NID, MAC)
     if (!cco && ev && mac && ev->cco_mac && ev->cco_mac == mac) cco = true; // 3. 本帧 CCO MAC
     if (!cco && ev && mac) {                                                // 4. 本帧 nodes 的 TEI=1 条目
         for (const TeiMacPair& p : ev->nodes)
@@ -263,7 +263,7 @@ bool TopoState::resolve_is_cco(quint16 src_tei, quint64 mac, const TopoEvent* ev
     // 6. 发现列表是 CCO 广播:缺源 MAC 时按 CCO 归属
     //    (否则会走 nodes 首条回落,把 CCO 重启记到发现列表里第一个 STA 头上 —— 实测缺陷 M2)
     if (!cco && !mac && ev && ev->kind == TopoEventKind::DiscoverList) cco = true;
-    if (cco && mac) m_cco_macs.insert(mac);   // 身份记忆:防后续 cco_mac 缺失时漂移成 STA
+    if (cco && mac) m_cco_macs.insert(restart_base_key(net_id, mac));  // 身份记忆(NID, MAC):防后续 cco_mac 缺失时漂移成 STA
     return cco;
 }
 
@@ -299,7 +299,7 @@ bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src
                                     bool is_rf, bool is_rf_known) {
     if (rc < 0 || rc == kRestartCountInvalid) return false;   // 无该字段(单跳简头等)不采样
     // 身份判定统一走 resolve_is_cco(TEI 固定 1 / 身份记忆 / cco_mac / mac_to_tei)
-    const bool is_cco = resolve_is_cco(src_tei, src_mac, nullptr);
+    const bool is_cco = resolve_is_cco(net_id, src_tei, src_mac, nullptr);
     // STA 必须有 MAC 才能定位主体;唯一例外:CCO 帧缺源 MAC ⇒ 归本 NID 的 CCO 基线(subject=0)
     if (!src_mac && !is_cco) return false;
     TopoEvent proto;
@@ -369,18 +369,18 @@ void TopoState::apply(const TopoEvent& e) {
         bool is_cco = false;
         if (subject) {
             // 有源 MAC:身份判定统一走 resolve_is_cco(事件侧无 TEI 信息 ⇒ 传 0)
-            is_cco = resolve_is_cco(quint16(0), subject, &e);
+            is_cco = resolve_is_cco(e.nid, quint16(0), subject, &e);
         } else {
             // 无源 MAC:先看能否按"无 MAC 的 CCO"归属(发现列表 = CCO 广播,实测缺陷 M2:
             // 旧实现直接回落 nodes 首条,把 CCO 的重启次数记到发现列表里第一个 STA 头上)
-            is_cco = resolve_is_cco(quint16(0), 0, &e);
+            is_cco = resolve_is_cco(e.nid, quint16(0), 0, &e);
             if (!is_cco) {
                 // 既有口径保留(AssocReq 等:直接关联时主体即发送方):回落本事件 nodes 首条,
                 // 再对该主体做一次身份判定(它可能就是 CCO 条目)
                 for (const TeiMacPair& p : e.nodes) {
                     if (p.mac) { subject = p.mac; break; }
                 }
-                if (subject) is_cco = resolve_is_cco(quint16(0), subject, &e);
+                if (subject) is_cco = resolve_is_cco(e.nid, quint16(0), subject, &e);
             }
         }
         if (subject || is_cco) {

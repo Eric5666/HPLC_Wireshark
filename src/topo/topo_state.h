@@ -190,6 +190,8 @@ private:
     /// @details 两个哈希都不能省 NID:
     ///          - CCO 旧实现是**单一全局值**(m_last_restart_count,已删除),多 NID 同时抓包时互相踩;
     ///          - STA 旧实现只有 MAC,不同 NID 下同 MAC 会串(用户 2026-11 口径:先分 NID,再分 MAC)。
+    ///          身份记忆 m_cco_macs 同样按 (NID, MAC) 分键(键 = restart_base_key),同 MAC 在
+    ///          不同 NID 下的 CCO 身份互不串。
     QHash<quint64, int> m_cco_restart_count;  ///< CCO 主体基线
     QHash<quint64, int> m_sta_restart_count;  ///< STA 主体基线
 
@@ -202,7 +204,7 @@ private:
     /// @details 依据(任一成立即 CCO):
     ///   1. src_tei == kTeiCco —— 南网规约 / HDC 2.0 5.3.3.1:CCO 的 TEI 固定为 1
     ///      (事件侧拿不到 TEI 时传 0,表示"该路径没有 TEI 信息");
-    ///   2. mac 非 0 且已在 m_cco_macs 身份记忆里;
+    ///   2. (NID, mac) 已在 m_cco_macs 身份记忆里(键 = restart_base_key(NID, MAC),先分 NID 再分 MAC);
     ///   3. 本帧 cco_mac == mac;
     ///   4. 本帧 nodes 含 (kTeiCco, mac);
     ///   5. mac 已映射到 TEI=1(mac_to_tei);
@@ -210,11 +212,12 @@ private:
     ///      (否则会回落到 nodes 首条,把 CCO 重启记到无关 STA 头上)。
     ///   另:拓扑事件里 discover_src_tei 记的是路由/位图条目的 STA TEI,不是发送方 TEI,故**不用**它判 CCO。
     /// 判定为 CCO 且 mac 非 0 时写入 m_cco_macs 身份记忆,防同一主体后续因 cco_mac 缺失而漂移成 STA。
+    /// @param[in] net_id 事件/NID(身份记忆按 (NID, MAC) 分键)
     /// @param[in] ev 事件上下文(可为 nullptr:逐帧路径没有 TopoEvent)
     /// @return true=CCO 主体
-    bool resolve_is_cco(quint16 src_tei, quint64 mac, const TopoEvent* ev);
+    bool resolve_is_cco(quint32 net_id, quint16 src_tei, quint64 mac, const TopoEvent* ev);
 
-    QSet<quint64> m_cco_macs;   ///< CCO 身份记忆(判定为 CCO 的 MAC;防归属漂移)
+    QSet<quint64> m_cco_macs;   ///< CCO 身份记忆(键 = restart_base_key(NID, MAC),先分 NID 再分 MAC;防归属漂移)
 
     /// @brief 重启变化记录(CCO/STA 共用实现):比较基线、变化即生成重启事件并更新基线
     /// @param[in] proto 事件模板(沿用其 nid/is_rf/来源信息),只有 kind/desc/restart_count/主体被改写
