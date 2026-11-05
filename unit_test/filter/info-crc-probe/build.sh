@@ -55,7 +55,14 @@ if [ "$WINDOWS" = "1" ]; then
     echo "build: Windows/MinGW, Qt=$QT"
 else
     CXXFLAGS="$CXXFLAGS -fPIC"
-    LIBS="$LIBS -lEGL -lGL"
+    # -lEGL -lGL 只有开发机(自定义 Qt 构建)才需要;CI 的 qt6-base-dev 不装
+    # libegl1-mesa-dev,裸加 -lEGL 会 "cannot find -lEGL" 直接挂。故探测到
+    # 开发用符号链接 libEGL.so 才追加。libfix 路径同理,已按目录存在与否判断。
+    EGL_OK=0
+    for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /usr/local/lib; do
+        [ -e "$d/libEGL.so" ] && { EGL_OK=1; break; }
+    done
+    [ "$EGL_OK" = "1" ] && LIBS="$LIBS -lEGL -lGL"
     [ -d "$HOME/workspace/build_deps/libfix" ] && LIBS="-L$HOME/workspace/build_deps/libfix $LIBS"
     echo "build: Linux/gcc, Qt=$QT"
 fi
