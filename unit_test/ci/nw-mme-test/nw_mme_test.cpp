@@ -200,10 +200,13 @@ static void check_vlan(bool short_head, quint32 vlan, quint16 type, bool english
     check(crc && crc->value.endsWith("OK"), "VLAN display preserves CRC parsing");
     // 分发用 VLAN+MSDU类型 双条件(表98/8.2.13):仅 VLAN=0x8100 且 类型=0x88E1 走 MMe
     const bool is_mme = !short_head && vlan == 0x8100 && type == 0x88e1;
-    // 摘要已双语:en "APP ..."/"MMe ..." / zh "应用报文 ..."/"MMe ..."(english 由外层循环切换)
-    const bool ok_sum = english
-        ? info.summary.startsWith(is_mme ? "MMe" : "APP")
-        : info.summary.startsWith(is_mme ? "MMe" : "应用报文");
+    // 摘要是双语的:en "MMe ..." / "APP ..." 现改为 "Application Layer Packet ...";
+    // zh "MMe ..." / "应用报文 ..." 现改为 "应用层报文 ..."(表9 批次统一了应用层文案)。
+    // 本断言只关心"分发到 APP 而不是 MMe",文案前缀不是被测契约 ⇒ 新旧前缀都接受。
+    const bool app_sum = english
+        ? (info.summary.startsWith("APP") || info.summary.startsWith("Application Layer Packet"))
+        : (info.summary.startsWith("应用报文") || info.summary.startsWith("应用层报文"));
+    const bool ok_sum = is_mme ? info.summary.startsWith("MMe") : app_sum;
     check(ok_sum, "VLAN+type double condition controls payload dispatch (表98)");
 }
 
