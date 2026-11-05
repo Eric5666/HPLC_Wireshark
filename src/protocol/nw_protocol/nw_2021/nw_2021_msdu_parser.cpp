@@ -12,7 +12,11 @@
 #include "common/crc.h"
 #include "i18n.h"
 #include "parse_anomaly.h"
-#include "nw_app_bid.h"
+// 用相对路径包含:表9 释义在 src/protocol/common/ 下,而消费者(主程序/CI 探针/
+// unit_test 各 build.sh)的 INCLUDEPATH 未必含该目录 —— 裸 "nw_app_bid.h"
+// 会让 nw_mme_test.pro / roundtrip.pro 这类工程直接 fatal error(CI 实测)。
+// 相对路径按包含者所在目录解析,零构建文件改动即可被所有消费者编进来。
+#include "../../common/nw_app_bid.h"
 
 namespace {
 

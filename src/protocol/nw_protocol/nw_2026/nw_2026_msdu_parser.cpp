@@ -11,7 +11,7 @@
 #include "common/crc.h"
 #include "i18n.h"
 #include "parse_anomaly.h"
-#include "nw_app_bid.h"
+#include "../../common/nw_app_bid.h"   // 表9/表8 释义(相对包含:消费者 INCLUDEPATH 未必含 common/)
 
 namespace {
 

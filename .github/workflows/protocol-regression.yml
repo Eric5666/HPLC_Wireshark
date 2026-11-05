@@ -198,4 +198,13 @@ jobs:
 
           (cd unit_test/protocol-nw/nw-app-bid-probe && bash build.sh)
           # 表9 四组合 + 端口不匹配的保留组合 + 表8 方向箭头 + 载荷不拆解;nw_2026/nw_2021 各一遍
-          unit_test/protocol-nw/nw-app-bid-probe/build/nw_app_bid_probe/release/nw_app_bid_probe
+          # 产物路径随平台不同:Windows(Qt 默认 debug_and_release)在 release/ 子目录,
+          # Linux 单配置直接落在 build/<name>/ 下 ⇒ 逐个试,取第一个可执行的
+          BIN=unit_test/protocol-nw/nw-app-bid-probe/build/nw_app_bid_probe/release/nw_app_bid_probe
+          [ -x "$BIN" ] || BIN=unit_test/protocol-nw/nw-app-bid-probe/build/nw_app_bid_probe/nw_app_bid_probe
+          if [ ! -x "$BIN" ]; then
+            echo "::error::未找到 nw_app_bid_probe 可执行文件(检查 build.sh 产物路径)"
+            find unit_test/protocol-nw/nw-app-bid-probe/build -maxdepth 3 -type f | head -20
+            exit 1
+          fi
+          "$BIN"
