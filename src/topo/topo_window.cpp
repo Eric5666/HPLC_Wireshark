@@ -24,6 +24,7 @@
 #include <QSet>
 #include <QStandardItemModel>
 #include <QTableView>
+#include <QTabWidget>
 #include <QTimer>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -157,6 +158,23 @@ QString event_kind_name(TopoEventKind k) {
     }
 }
 
+/// @brief 异常/冲突类别名(异常页签"类别"列)
+QString anomaly_kind_name(TopoAnomalyKind k) {
+    switch (k) {
+        case TopoAnomalyKind::MacMultipleTei:          return trl::L("同一 MAC 多 TEI");
+        case TopoAnomalyKind::TeiMultipleMac:          return trl::L("同一 TEI 多 MAC");
+        case TopoAnomalyKind::RestartCountOscillation: return trl::L("重启次数振荡");
+        case TopoAnomalyKind::LinkCountMismatch:       return trl::L("两链路计数不同");
+    }
+    return trl::L("其他");
+}
+
+/// @brief 异常/冲突表列号:双击行为按列区分(首次帧/首次时间 → 首次,其余 → 最近一次)
+enum {
+    kAnomColFirstFrame = 0,   ///< 首次帧
+    kAnomColFirstTime  = 7,   ///< 首次时间
+};
+
 /// @brief 中→英注册(文件级,仅新增条目;重复注册无害)
 struct I18nRegTopoWindow {
     I18nRegTopoWindow() {
@@ -169,6 +187,29 @@ struct I18nRegTopoWindow {
                          "Route change log (assoc conf / assoc ind / gather ind / proxy change req / proxy change / discover list / leave ind / CCO reboot / STA reboot)");
         trl::register_en("CCO重启", "CCO reboot");
         trl::register_en("STA重启", "STA reboot");
+        // 异常/冲突页签(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)
+        trl::register_en("路由变更", "Route Change");
+        trl::register_en("异常/冲突", "Anomaly / Conflict");
+        trl::register_en("异常/冲突记录(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)", "Anomaly / conflict log (one MAC many TEIs / one TEI many MACs / restart-count oscillation)");
+        trl::register_en("同一 MAC 多 TEI", "One MAC, Many TEIs");
+        trl::register_en("同一 TEI 多 MAC", "One TEI, Many MACs");
+        trl::register_en("重启次数振荡", "Restart-Count Oscillation");
+        trl::register_en("两链路计数不同", "Link Count Mismatch");
+        trl::register_en("载波 / 无线", "PLC / RF");
+        trl::register_en("次数", "Occurrences");
+        // "次数"列分类型语义(A/B 冲突次数 / C 往返次数 / D 差异组合数)
+        trl::register_en("冲突次数：同一主体反复冲突的累计次数", "Conflict Count: Cumulative Conflicts of the Same Subject");
+        trl::register_en("往返次数：回到出现过的取值才计，首次出现新值不计", "Round Trips: Counted Only When Returning to a Seen Value, the First Sighting of a New Value Is Not Counted");
+        trl::register_en("%1(组合)", "%1 (combinations)");
+        trl::register_en("差异组合数：每个不同的 (载波,无线) 取值组合各计一次", "Distinct Combinations: Each Different (PLC, RF) Value Pair Counted Once");
+        trl::register_en("类别", "Category");
+        trl::register_en("最近变化", "Latest Change");
+        trl::register_en("首次时间", "First Seen");
+        trl::register_en("最近时间", "Last Seen");
+        trl::register_en("首次帧", "First Frame");
+        trl::register_en("最近帧", "Last Frame");
+        trl::register_en("介质", "Medium");
+        trl::register_en("双击「首次帧」跳到首次出现的帧，双击「最近帧」跳到最近一次的帧", "Double-Click 'First Frame' to Jump to That Frame; Double-Click 'Last Frame' to Jump to the Latest");
         trl::register_en("序号", "Seq");
         trl::register_en("首次", "First seen");
         trl::register_en("时间点", "Time");
@@ -214,7 +255,7 @@ struct I18nRegTopoWindow {
         trl::register_en("回到实时", "Back to Live");
         trl::register_en("已暂停", "Paused");
         trl::register_en("适应视图", "Fit view");
-        trl::register_en("缩放并居中显示整张拓扑图", "Zoom to fit and center the whole topology");
+        trl::register_en("缩放并居中显示整张拓扑图，并让本窗口各表列宽按内容重新适配", "Zoom to fit and center the whole topology, and refit this window's table columns to contents");
         // 邻居明细表(载波+无线混合,含可靠度评分)
         trl::register_en("信号强度 (dBm)", "Signal Strength (dBm)");
         trl::register_en("上行成功率%（对方→我）", "Uplink % (peer→me)");
@@ -684,6 +725,41 @@ TopoWindow::TopoWindow(QWidget* parent) : QWidget(parent) {
     routes_lay->addWidget(m_routes_filter);
     routes_lay->addWidget(m_routes_table, 1);
 
+    // 底部另一页签:异常/冲突(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)
+    // 与路由变更事件分离:这些不是拓扑演进,而是数据自相矛盾的嫌疑(重复组网等)
+    m_anom_model = new QStandardItemModel(this);
+    m_anom_table = new QTableView(this);
+    m_anom_table->setModel(m_anom_model);
+    m_anom_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_anom_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_anom_table->horizontalHeader()->setStretchLastSection(true);
+    m_anom_table->verticalHeader()->setVisible(false);
+    enable_table_copy(m_anom_table);
+    m_anom_table->setToolTip(trl::L("双击「首次帧」跳到首次出现的帧，双击「最近帧」跳到最近一次的帧"));
+    // 双击 → 追溯到帧:双击「首次帧」列跳首次出现的帧,双击「最近帧」(或其它列)跳最近一次的帧
+    connect(m_anom_table, &QTableView::doubleClicked, this, [this](const QModelIndex& idx) {
+        if (!idx.isValid() || !m_anom_model) return;
+        auto* it = m_anom_model->item(idx.row(), kAnomColFirstFrame);
+        if (!it) return;
+        // 首次:第 0 列「首次帧」或第 7 列「首次时间」;其余列一律按"最近一次"处理
+        const bool to_first = (idx.column() == kAnomColFirstFrame
+                            || idx.column() == kAnomColFirstTime);
+        const qint64 frame = to_first ? it->data(Qt::UserRole + 2).toLongLong()
+                                      : it->data(Qt::UserRole).toLongLong();
+        const qint64 ms = to_first ? it->data(Qt::UserRole + 3).toLongLong()
+                                   : it->data(Qt::UserRole + 1).toLongLong();
+        if (frame >= 0) emit request_history(frame, ms);
+    });
+    auto* anom_panel = new QWidget(this);
+    auto* anom_lay = new QVBoxLayout(anom_panel);
+    anom_lay->setContentsMargins(0, 0, 0, 0);
+    anom_lay->addWidget(new QLabel(trl::L("异常/冲突记录(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)"), anom_panel));
+    anom_lay->addWidget(m_anom_table, 1);
+
+    auto* bottom_tabs = new QTabWidget(this);
+    bottom_tabs->addTab(routes_panel, trl::L("路由变更"));
+    bottom_tabs->addTab(anom_panel, trl::L("异常/冲突"));
+
     // 总布局:顶部下拉 + 中央分割 + 底部表
     auto* top_lay = new QHBoxLayout();
     top_lay->addWidget(new QLabel(trl::L("网络:"), this));
@@ -700,17 +776,20 @@ TopoWindow::TopoWindow(QWidget* parent) : QWidget(parent) {
         request_live();            // 恢复历史回放(无历史回放时无副作用)
     });
     top_lay->addWidget(m_btn_live);
-    // 一键适应视图:缩小/拖拽后找回整张拓扑图
+    // 一键适应视图:缩小/拖拽后找回整张拓扑图;同时让本窗口各表列宽按内容重排一次
     auto* btn_fit = new QPushButton(trl::L("适应视图"), this);
-    btn_fit->setToolTip(trl::L("缩放并居中显示整张拓扑图"));
-    connect(btn_fit, &QPushButton::clicked, this, [this] { m_graph->fit_view(); });
+    btn_fit->setToolTip(trl::L("缩放并居中显示整张拓扑图，并让本窗口各表列宽按内容重新适配"));
+    connect(btn_fit, &QPushButton::clicked, this, [this] {
+        m_graph->fit_view();
+        fit_tables_once();
+    });
     top_lay->addWidget(btn_fit);
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(6, 6, 6, 6);
     root->addLayout(top_lay);
     root->addWidget(mid_split, 1);
-    root->addWidget(routes_panel, 1);
+    root->addWidget(bottom_tabs, 1);
 
     // 节流刷新:高频拓扑事件只置脏标志,定时器批量刷新(防回放/采集卡顿)
     m_refresh_timer = new QTimer(this);
@@ -870,6 +949,127 @@ void TopoWindow::refresh_current() {
     rebuild_all();
 }
 
+void TopoWindow::fit_tables_once() {
+    // 列宽上下限:过窄列(空内容/单字符)无法点击,过宽列(长描述/邻居 HTML)会挤掉其它列
+    constexpr int kMinColWidth = 48;
+    constexpr int kMaxColWidth = 640;
+    const QList<QTableView*> tables{m_teimac_table, m_routes_table, m_anom_table};
+    for (QTableView* view : tables) {
+        if (!view || !view->model()) continue;
+        QHeaderView* hh = view->horizontalHeader();
+        const int cols = hh->count();
+        if (cols <= 0) continue;
+        // 只处理"固定宽度(Interactive)"的列:ResizeToContents 的列本来就随内容自适应,
+        // Stretch 的列随窗口伸缩;对它们强改会打断原策略(实测:先量再还原策略,
+        // 还原时 Qt 会按内容重算,把下限覆盖掉)。邻居表(TEI-MAC)因此整体跳过。
+        QVector<int> fixed_cols;
+        for (int c = 0; c < cols; ++c)
+            if (hh->sectionResizeMode(c) == QHeaderView::Interactive) fixed_cols.append(c);
+        if (fixed_cols.isEmpty()) continue;
+        // 这些列本来就不是自适配 ⇒ resizeColumnsToContents() 直接生效
+        view->resizeColumnsToContents();
+        for (int c : fixed_cols) {
+            if (hh->sectionSize(c) < kMinColWidth) hh->resizeSection(c, kMinColWidth);
+            else if (hh->sectionSize(c) > kMaxColWidth) hh->resizeSection(c, kMaxColWidth);
+        }
+    }
+}
+
+void TopoWindow::rebuild_anomaly_table() {
+    // 异常/冲突表:每条异常占一行(同类同主体已由 TopoState 合并,trips 累加),
+    // 回放模式读冻结快照,实时模式读实时表(与图/TEI-MAC 表口径一致)
+    const int saved = m_anom_table->verticalScrollBar()->value();
+    m_anom_model->clear();
+    m_anom_model->setHorizontalHeaderLabels(
+        {trl::L("首次帧"), trl::L("类别"), QStringLiteral("TEI"), QStringLiteral("MAC"),
+         trl::L("介质"), trl::L("次数"), trl::L("最近变化"), trl::L("首次时间"),
+         trl::L("最近时间"), trl::L("最近帧")});
+    const TopoState* st = nullptr;
+    if (const auto* states = view_states()) {
+        auto it = states->constFind(m_current_nid);
+        if (it != states->constEnd()) st = &it.value();
+    }
+    if (st) {
+        for (const TopoAnomaly& a : st->anomalies) {
+            QString tei_txt, mac_txt, change;
+            switch (a.kind) {
+                case TopoAnomalyKind::MacMultipleTei:
+                    // 同一 MAC 先后落在两个仍在线 TEI 上:TEI 列显示 旧→新
+                    tei_txt = QStringLiteral("%1→%2").arg(a.tei_old).arg(a.tei);
+                    mac_txt = format_mac(a.mac);
+                    break;
+                case TopoAnomalyKind::TeiMultipleMac:
+                    // 同一 TEI 先后被两个仍在线 MAC 使用:MAC 列显示 旧→新
+                    tei_txt = QString::number(a.tei);
+                    mac_txt = QStringLiteral("%1→%2").arg(format_mac(a.mac_old), format_mac(a.mac));
+                    break;
+                case TopoAnomalyKind::RestartCountOscillation:
+                    tei_txt = QString::number(a.tei);
+                    mac_txt = a.mac ? format_mac(a.mac) : QStringLiteral("-");
+                    // 取值区间 + 最近一次方向(便于一眼看出 9↔12 这类往返)
+                    change = QStringLiteral("%1↔%2 (%3→%4)")
+                                 .arg(qMin(a.value_from, a.value_to))
+                                 .arg(qMax(a.value_from, a.value_to))
+                                 .arg(a.value_from)
+                                 .arg(a.value_to);
+                    break;
+                case TopoAnomalyKind::LinkCountMismatch:
+                    // 两链路各自计数:value_from=载波 rc,value_to=无线 rc
+                    tei_txt = QString::number(a.tei);
+                    mac_txt = a.mac ? format_mac(a.mac) : QStringLiteral("-");
+                    change = QStringLiteral("%1 %2 / %3 %4")
+                                 .arg(trl::L("载波")).arg(a.value_from)
+                                 .arg(trl::L("无线")).arg(a.value_to);
+                    break;
+            }
+            QString medium = QStringLiteral("-");
+            if (a.kind == TopoAnomalyKind::RestartCountOscillation)
+                medium = a.is_rf ? trl::L("无线") : trl::L("载波");
+            else if (a.kind == TopoAnomalyKind::LinkCountMismatch)
+                medium = trl::L("载波 / 无线");
+            auto* c0 = new QStandardItem(QString::number(a.first_frame));
+            // 双击追溯:UserRole 存最近一次(帧/时间),UserRole+2/+3 存首次(帧/时间),
+            // 由双击列号选择(首次帧列 → 首次;最近帧列/其它列 → 最近)
+            c0->setData(QVariant::fromValue(a.last_frame), Qt::UserRole);
+            c0->setData(QVariant::fromValue(a.last_ms), Qt::UserRole + 1);
+            c0->setData(QVariant::fromValue(a.first_frame), Qt::UserRole + 2);
+            c0->setData(QVariant::fromValue(a.first_ms), Qt::UserRole + 3);
+            // "次数"列在四类里含义不同(A/B 冲突次数、C 往返次数、D 差异组合数):
+            // 逐类给文本与说明,避免把"往返 20 次"误读成"重启 20 次"
+            QString trips_txt = QString::number(a.trips);
+            QString trips_tip;
+            switch (a.kind) {
+                case TopoAnomalyKind::MacMultipleTei:
+                case TopoAnomalyKind::TeiMultipleMac:
+                    trips_tip = trl::L("冲突次数：同一主体反复冲突的累计次数");
+                    break;
+                case TopoAnomalyKind::RestartCountOscillation:
+                    trips_tip = trl::L("往返次数：回到出现过的取值才计，首次出现新值不计");
+                    break;
+                case TopoAnomalyKind::LinkCountMismatch:
+                    trips_txt = trl::L("%1(组合)").arg(a.trips);
+                    trips_tip = trl::L("差异组合数：每个不同的 (载波,无线) 取值组合各计一次");
+                    break;
+            }
+            auto* trips_item = new QStandardItem(trips_txt);
+            trips_item->setToolTip(trips_tip);
+            QList<QStandardItem*> row;
+            row << c0
+                << new QStandardItem(anomaly_kind_name(a.kind))
+                << new QStandardItem(tei_txt)
+                << new QStandardItem(mac_txt)
+                << new QStandardItem(medium)
+                << trips_item
+                << new QStandardItem(change)
+                << new QStandardItem(format_time(a.first_ms))
+                << new QStandardItem(format_time(a.last_ms))
+                << new QStandardItem(QString::number(a.last_frame));
+            m_anom_model->appendRow(row);
+        }
+    }
+    m_anom_table->verticalScrollBar()->setValue(saved);
+}
+
 void TopoWindow::rebuild_all() {
     // 图(历史回放模式读冻结快照,否则读实时表)
     const TopoState* st = nullptr;
@@ -878,9 +1078,10 @@ void TopoWindow::rebuild_all() {
         if (it != states->constEnd()) st = &it.value();
     }
     m_graph->set_state(st);
-    // 两张表
+    // 三张表
     rebuild_routes_table();
     rebuild_teimac_table();
+    rebuild_anomaly_table();
 }
 
 void TopoWindow::show_history(const QHash<quint32, TopoState>* hist, bool active,
@@ -932,10 +1133,82 @@ bool TopoWindow::eventFilter(QObject* watched, QEvent* event) {
     return QWidget::eventFilter(watched, event);
 }
 
+namespace {
+/// @brief 事件行的 MAC 文本:帧内自带 MAC 优先,其余 TEI 用"截至该事件前"的时点映射解析
+/// @param asof 该事件**之前**累积的 TEI→MAC(调用方保证不含本事件)
+/// @details 为什么不能直接用最终映射:事件表是历史追溯。STA 换 TEI 后,早期事件里的旧 TEI
+///          在最终映射里已经不存在(或已被改成别的 MAC),用最终映射回填会把"当时"的信息
+///          篡改成"现在"的信息。故一律以时点映射解析;帧内自带的 MAC(关联请求/确认的
+///          nodes、离线指示的 leaves)是直接证据,优先级最高。
+QString event_mac_text(const TopoEvent& e, const QHash<quint16, quint64>& asof) {
+    QHash<quint16, quint64> tei_mac;   // TEI → MAC(0=未知)
+    QList<quint64> orphan_macs;        // 帧内直带但 TEI 未知(如离线指示只给 MAC)
+    for (const TeiMacPair& p : e.nodes) {
+        if (!p.mac) continue;
+        if (p.tei) tei_mac.insert(p.tei, p.mac);
+        else orphan_macs.append(p.mac);
+    }
+    for (quint64 mac : e.leaves) {
+        if (!mac) continue;
+        // 离线指示帧只带 MAC:反查"此时点"该 MAC 对应的 TEI(不是最终映射)
+        quint16 tei = 0;
+        for (auto it = asof.constBegin(); it != asof.constEnd(); ++it) {
+            if (it.value() == mac) { tei = it.key(); break; }
+        }
+        if (tei) tei_mac.insert(tei, mac);
+        else orphan_macs.append(mac);
+    }
+    // 事件涉及但未带 MAC 的 TEI:按"截至该事件前"的映射补
+    QList<quint16> teis;
+    for (const auto& r : e.routes) {
+        if (r.first) teis << r.first;
+        if (r.second) teis << r.second;
+    }
+    for (const auto& ur : e.up_routes) {
+        if (ur.first) teis << ur.first;
+        if (ur.second) teis << ur.second;
+    }
+    for (const auto& pr : e.node_link_types) {
+        if (pr.first) teis << pr.first;
+    }
+    for (quint16 c : e.child_teis) {
+        if (c) teis << c;
+    }
+    if (e.discover_src_tei) teis << e.discover_src_tei;
+    for (quint16 t : teis) {
+        if (tei_mac.contains(t)) continue;      // 帧内直带优先
+        tei_mac.insert(t, asof.value(t, 0));    // 0 = 此时点未知
+    }
+    QStringList parts;
+    QList<quint16> keys = tei_mac.keys();
+    std::sort(keys.begin(), keys.end());
+    for (quint16 t : keys) {
+        const quint64 mac = tei_mac.value(t);
+        parts << (mac ? QStringLiteral("TEI=%1 %2").arg(t).arg(format_mac(mac))
+                      : QStringLiteral("TEI=%1 %2").arg(t).arg(trl::L("未知")));
+    }
+    for (quint64 mac : orphan_macs) parts << format_mac(mac);   // TEI 未分配的直带 MAC
+    parts.removeDuplicates();
+    return parts.isEmpty() ? QStringLiteral("-") : parts.join(QStringLiteral("; "));
+}
+
+/// @brief 把本事件携带的 TEI→MAC 并入时点映射
+/// @note 必须在取完本行的 MAC 文本之后调用,保证"截至该事件前"的语义
+void advance_mac_asof(QHash<quint16, quint64>& asof, const TopoEvent& e) {
+    for (const TeiMacPair& p : e.nodes) {
+        if (p.tei && p.mac) asof.insert(p.tei, p.mac);
+    }
+    if (e.cco_mac) asof.insert(static_cast<quint16>(kTeiCco), e.cco_mac);
+}
+}  // namespace
+
 void TopoWindow::append_routes_rows(const TopoState* st, const QString& filter,
                                    int from, int to) {
     for (int i = from; i < to; ++i) {  // 时间正序,最新在底部(与主界面一致)
         const TopoEvent& e = st->events[i];
+        // MAC 先按"截至本事件前"的时点映射解析,再把本事件的 TEI→MAC 并入
+        const QString mac = event_mac_text(e, m_routes_mac_asof);
+        advance_mac_asof(m_routes_mac_asof, e);
         const QString time = format_time(e.epoch_ms);
         const QString kind = event_kind_name(e.kind);
         const QString nid = QStringLiteral("0x%1").arg(e.nid, 0, 16);
@@ -944,6 +1217,7 @@ void TopoWindow::append_routes_rows(const TopoState* st, const QString& filter,
             if (!time.contains(filter, Qt::CaseInsensitive) &&
                 !kind.contains(filter, Qt::CaseInsensitive) &&
                 !nid.contains(filter, Qt::CaseInsensitive) &&
+                !mac.contains(filter, Qt::CaseInsensitive) &&
                 !desc.contains(filter, Qt::CaseInsensitive))
                 continue;
         }
@@ -957,6 +1231,7 @@ void TopoWindow::append_routes_rows(const TopoState* st, const QString& filter,
             << new QStandardItem(time)
             << new QStandardItem(kind)
             << new QStandardItem(nid)
+            << new QStandardItem(mac)
             << new QStandardItem(desc);
         m_routes_model->appendRow(row);
     }
@@ -1180,8 +1455,12 @@ void TopoWindow::rebuild_routes_table() {
                            || (filter != m_routes_filter_text) || (ev_count < m_routes_shown);
     if (view_changed) {
         m_routes_model->clear();
+        // 时点映射随全量重建一起重放:清零后由 append_routes_rows 逐事件累积,
+        // 保证每行 MAC 都是"截至该事件前"的值(不能用最终映射回填)
+        m_routes_mac_asof.clear();
         m_routes_model->setHorizontalHeaderLabels(
-            {trl::L("序号"), trl::L("时间点"), trl::L("类型"), QStringLiteral("NID"), trl::L("变更说明")});
+            {trl::L("序号"), trl::L("时间点"), trl::L("类型"), QStringLiteral("NID"),
+             QStringLiteral("MAC"), trl::L("变更说明")});
         if (st) append_routes_rows(st, filter, 0, ev_count);
         m_routes_view = states;
         m_routes_nid = m_current_nid;

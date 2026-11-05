@@ -9,6 +9,8 @@
 
 #include "bplcframe.h"
 #include <QHash>
+#include <QSet>
+#include <QString>
 #include <QVector>
 
 /// @brief 节点入网状态(对应拓扑图图标三态)
@@ -50,6 +52,33 @@ struct TopoNode {
     bool online() const { return status != NodeStatus::Offline; }
 };
 
+/// @brief 异常/冲突类别(拓扑身份一致性与重启计数一致性)
+/// @details 与路由变更事件表分离:这些不是"拓扑演进",而是"数据自相矛盾"的嫌疑,
+///          单独一页签展示,避免与正常的关联/代理变更事件混在一起。
+enum class TopoAnomalyKind {
+    MacMultipleTei,          ///< 同一 MAC 先后对应两个仍在线的 TEI(重复组网/身份冲突)
+    TeiMultipleMac,          ///< 同一 TEI 先后对应两个仍在线的 MAC(TEI 被两台设备占用)
+    RestartCountOscillation, ///< 同一 TEI+介质的重启次数往返振荡(双实体共用 TEI/计数被复位)
+    LinkCountMismatch,       ///< 同一 TEI 载波与无线的重启次数不同(两条链路各自计数)
+};
+
+/// @brief 一条异常/冲突记录(同类同主体合并到一行,trips 累加,防刷屏)
+struct TopoAnomaly {
+    TopoAnomalyKind kind = TopoAnomalyKind::MacMultipleTei;
+    quint16 tei = 0;          ///< 相关 TEI(振荡项=发送方 TEI)
+    quint16 tei_old = 0;      ///< 冲突中先出现的 TEI(MacMultipleTei 有意义;其它同 tei)
+    quint64 mac = 0;          ///< 相关 MAC(0=无)
+    quint64 mac_old = 0;      ///< 冲突中先出现的 MAC(TeiMultipleMac 有意义)
+    bool    is_rf = false;    ///< 介质(振荡项有意义;false=载波 true=无线)
+    int     trips = 0;        ///< 出现次数(冲突次数 / 往返次数)
+    int     value_from = -1;  ///< 最近一次变化前值(振荡项;冲突项=旧 TEI/旧 MAC 数值无意义)
+    int     value_to = -1;    ///< 最近一次变化后值(振荡项)
+    qint64  first_ms = 0;     ///< 首次时间(epoch ms)
+    qint64  last_ms = 0;      ///< 最近时间(epoch ms)
+    qint64  first_frame = -1; ///< 首次来源帧序号
+    qint64  last_frame = -1;  ///< 最近来源帧序号
+};
+
 /// @brief 单个 NID 网络的拓扑状态(节点 + 路由 + 事件历史)
 class TopoState {
 public:
@@ -66,6 +95,16 @@ public:
     QHash<quint16, QHash<quint16, quint8>> neighbor_rates; ///< 上报方 STA → (邻居 → 接收率%·方向=邻居→上报方,即上行)
     QHash<quint16, QHash<quint16, qint16>> neighbor_snrs;  ///< 上报方 STA → (邻居 → SNR dB)
     QVector<TopoEvent> events;      ///< 路由变更事件(时间序,供底部表格)
+    QVector<TopoAnomaly> anomalies; ///< 异常/冲突记录(按主体合并;独立页签展示)
+
+    /// @brief 逐帧重启次数采样:同一 (TEI, 介质) 的取值回到曾经出现过的值即记一条往返振荡
+    /// @details 判据(用户口径):任意一次反向变化即记。以该 (TEI, 介质) 已出现过的取值集合
+    ///          为准——取值变成集合内旧值 ⇒ 记一次往返;变成从未见过的新值(如 2/3 之后首次
+    ///          见到 4)⇒ 不记,但把 4 纳入集合,之后 4→2、2→4 仍按往返计。
+    ///          仅采样 4-bit 重启次数(kRestartCountInvalid=无该字段则忽略)。
+    /// @return 是否新增/更新了异常记录(UI 刷新节流用)
+    bool note_restart_count(quint16 tei, bool is_rf, int rc,
+                            qint64 epoch_ms, qint64 frame_index);
 
     /// @brief 应用一个拓扑事件,增量更新节点/路由/入网状态并记录事件
         /// @brief 逐帧接入方式兜底(方案②):仅对"已存在且接入方式未确定"的节点写入
@@ -105,7 +144,27 @@ void apply(const TopoEvent& e);
 
 private:
     /// @brief 维护 mac_to_tei 双向一致(处理"同一 MAC 先后对应不同 TEI"和"同一 TEI 先后对应不同 MAC")
-    void index_mac(quint16 tei, quint64 mac);
+    /// @details 两个方向若"旧节点仍在线"则同时记一条异常/冲突(MacMultipleTei / TeiMultipleMac);
+    ///          旧节点已离线(正常离网后重入网换 TEI)不计,避免把正常重入网当冲突。
+    void index_mac(quint16 tei, quint64 mac, qint64 epoch_ms = 0, qint64 frame_index = -1);
+    /// @brief 记录/合并一条异常(同类同主体合并,trips 累加,更新最近取值与时间)
+    void note_anomaly(TopoAnomalyKind kind, quint16 tei, quint64 mac, quint64 mac_old,
+                      quint16 tei_old, bool is_rf, int from, int to,
+                      qint64 epoch_ms, qint64 frame_index);
+
+    /// @brief 某 (TEI, 介质) 的重启次数轨迹
+    struct RcTrack {
+        int prev = -1;      ///< 上一次取值(-1=尚无)
+        int fwd_run = 0;    ///< 连续"规整前进(+1)"的步数:用于区分 4-bit 计数器回绕与相邻值振荡
+        qint64 last_ms = 0; ///< 本链路最近一次采样的时间(新鲜度判断用;D 比较两侧要同新鲜)
+        QSet<int> seen;     ///< 已出现过的取值集合(回到其中任意值即判往返;新值一律入集合)
+    };
+    QHash<quint32, RcTrack> m_rc_track; ///< (TEI<<1 | is_rf) → 重启次数轨迹
+    /// @brief TEI → 最近一次记录的(载波 rc, 无线 rc)组合
+    /// @details 防重复计数:同一组合反复出现只算一次;两链路计数恢复一致时清除,
+    ///          之后再次不一致仍可记录(对应"次数"=差异出现过的不同组合数)。
+    QHash<quint16, QPair<int, int>> m_link_pair;
+    QHash<QString, int> m_anom_idx;     ///< 合并键 → anomalies 下标
     /// @brief 按 MAC 移除已存在的拓扑节点(设备重上电再次发起关联时先清旧状态)
     /// @details CCO(TEI=1)永不移除;同时清理该 TEI 的成功率残留与 MAC 索引。
     /// @return 是否移除了节点

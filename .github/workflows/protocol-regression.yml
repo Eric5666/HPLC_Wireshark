@@ -141,3 +141,42 @@ jobs:
           unit_test/filter/orig-src-probe/build/orig_src_probe \
             "$GITHUB_WORKSPACE/unit_test/protocol-gw/gw-topo-merge-probe/gw_topo_merge.bin"
           unit_test/filter/mac-filter-probe/build/mac_filter_probe
+
+      - name: Topology anomaly / identity-conflict regression (MAC↔TEI, restart-count)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          # Qt symlink farm:上一步建过就复用(同一 runner 同一 workspace),
+          # 没建过(单独重跑本步)就在这里按 qmake6 -query 重建一次。
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          for key in QT_HOST_BINS QT_INSTALL_LIBEXECS QT_INSTALL_HEADERS QT_INSTALL_LIBS; do
+            value=$(qmake6 -query "$key" || true)
+            if [ -z "$value" ] || [ ! -d "$value" ]; then
+              echo "::error::qmake6 -query $key 返回空或目录不存在: '$value'"
+              exit 1
+            fi
+            echo "$key=$value"
+          done
+          # 逐条建链接:上一步(或本步重跑)已建过就跳过,避免 ln 报 File exists 把步骤搞红,
+          # 也避免"只看 include/QtCore 是否存在"在部分残留时误判为全覆盖。
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake6 -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake6 -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake6 -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake6 -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          (cd unit_test/topo/topo-restart-probe && bash build.sh)
+
+          # 已编译的探针全部执行(成本≈0,不做"编了却不跑"):
+          # A 同一 MAC 多 TEI / B 同一 TEI 多 MAC / C 重启次数往返振荡 / D 两链路计数不同
+          # diversity_probe 排除:其期望表与 9cc3a44(gw_2026_pb_table.h 频段越界统一查表)不一致,
+          # 修好前运行必然红,另开工单处理。
+          cd unit_test/topo/topo-restart-probe/build
+          for p in cpc37_probe cpc_auth_probe dual_probe m2_probe m2m7_probe \
+                   m6beacon_probe main_probe module_probe pb0_gate_probe model_probe anomaly_probe; do
+            echo "== $p =="
+            "./$p"
+          done

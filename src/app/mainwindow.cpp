@@ -999,6 +999,12 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             if (ts.note_frame_medium(t, e.meta.is_rf)) topo_touched = true;
             // 双模标记:发送方(src_tei)发过 RF 帧即置位(判据取"发过"而非"收发过")
             if (ts.note_rf_capable(e.mpdu.src_tei, e.meta.is_rf)) topo_touched = true;
+            // 重启次数往返振荡:同一(发送方 TEI, 介质)的 4bit 计数回到出现过旧值即记一条
+            // (实测同一 TEI 载波上 9↔12 交替 ⇒ 双实体共用 TEI 或计数被复位,记异常)
+            if (e.msdu.present
+                && ts.note_restart_count(quint16(e.msdu.msdu_src_tei), e.meta.is_rf,
+                                         int(e.msdu.restart_count), e.epoch_ms, e.index))
+                topo_touched = true;
             // 正在入网节点(pending,按 MAC):同样仅未判定时写入
             if (e.msdu.msdu_src_mac) {
                 auto pit = ts.pending.find(e.msdu.msdu_src_mac);

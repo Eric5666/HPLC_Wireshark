@@ -165,6 +165,12 @@ private:
     void rebuild_all();
     void rebuild_routes_table();
     void rebuild_teimac_table();
+    /// @brief 重建「异常/冲突」表(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)
+    void rebuild_anomaly_table();
+    /// @brief 一次性把本窗口各表(邻居/TEI-MAC、路由变更、异常/冲突)列宽按内容重排
+    /// @details 表头策略为 ResizeToContents/Stretch 时 resizeColumnsToContents 无效,
+    ///          故临时切 Interactive 量一次再还原原策略;过窄列给最小宽度下限。
+    void fit_tables_once();
     /// @brief 历史回放模式下高亮冻结帧对应的路由表行(不滚动,不移除其他行)
     void highlight_history_row();
     void update_mode_ui();
@@ -183,6 +189,9 @@ private:
     QTableView*         m_teimac_table;
     QStandardItemModel* m_teimac_model;
     QLineEdit*          m_teimac_search;
+    // 异常/冲突表(独立页签;与路由变更事件表分离)
+    QTableView*         m_anom_table = nullptr;
+    QStandardItemModel* m_anom_model = nullptr;
 
     const QHash<quint32, TopoState>* m_states = nullptr;
     const QHash<quint32, TopoState>* m_hist_states = nullptr; ///< 回放快照(不拥有)
@@ -203,6 +212,11 @@ private:
     quint32 m_routes_nid = 0;
     QString m_routes_filter_text;
     int     m_routes_shown = 0;
+    /// @brief 路由变更表的 TEI→MAC 时点映射(按事件顺序重放;用于"截至该事件前"的解析)
+    /// @details 事件是历史追溯,不能用最终映射回填 —— 否则早期事件会显示它当时还不存在的
+    ///          MAC(如 STA 换 TEI 后,旧 TEI 的行会显示新 MAC)。全量重建时清空重放,
+    ///          增量追加时延续上一次状态。
+    QHash<quint16, quint64> m_routes_mac_asof;
 };
 
 #endif // TOPO_WINDOW_H

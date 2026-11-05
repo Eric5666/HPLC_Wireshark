@@ -59,23 +59,167 @@ static void assign_link_type(TopoNode& n, const TopoEvent& e) {
 
 } // namespace
 
-void TopoState::index_mac(quint16 tei, quint64 mac) {
+void TopoState::note_anomaly(TopoAnomalyKind kind, quint16 tei, quint64 mac, quint64 mac_old,
+                            quint16 tei_old, bool is_rf, int from, int to,
+                            qint64 epoch_ms, qint64 frame_index) {
+    // 合并键只取"类别 + 主体",不含变化中的两端值:同一主体反复冲突/振荡只占一行,
+    // 由 trips 累加计数,避免一次抓包刷出成百上千行(实测同一 TEI 两介质可交替数十次)。
+    QString key;
+    switch (kind) {
+        case TopoAnomalyKind::MacMultipleTei:
+            key = QStringLiteral("A|%1").arg(mac);
+            break;
+        case TopoAnomalyKind::TeiMultipleMac:
+            key = QStringLiteral("B|%1").arg(tei);
+            break;
+        case TopoAnomalyKind::RestartCountOscillation:
+            key = QStringLiteral("C|%1|%2").arg(tei).arg(is_rf ? 1 : 0);
+            break;
+        case TopoAnomalyKind::LinkCountMismatch:
+            key = QStringLiteral("D|%1").arg(tei);
+            break;
+    }
+    auto it = m_anom_idx.find(key);
+    if (it == m_anom_idx.end()) {
+        TopoAnomaly a;
+        a.kind = kind;
+        a.tei = tei;
+        a.tei_old = tei_old ? tei_old : tei;
+        a.mac = mac;
+        a.mac_old = mac_old;
+        a.is_rf = is_rf;
+        a.trips = 1;
+        a.value_from = from;
+        a.value_to = to;
+        a.first_ms = a.last_ms = epoch_ms;
+        a.first_frame = a.last_frame = frame_index;
+        anomalies.append(a);
+        m_anom_idx.insert(key, anomalies.size() - 1);
+        return;
+    }
+    TopoAnomaly& a = anomalies[it.value()];
+    ++a.trips;
+    a.value_from = from;
+    a.value_to = to;
+    // A/B 的 tei/tei_old 是"冲突两端":合并时必须一起更新,否则同一 MAC 在 TEI 3↔5
+    // 反复冲突时 tei 会停在最早那个值,表格显示成 "5→5" 这种自指。
+    // C/D 的 tei 是主体(振荡/差异所在的节点),保持首次出现的值不变。
+    if (kind == TopoAnomalyKind::MacMultipleTei || kind == TopoAnomalyKind::TeiMultipleMac)
+        a.tei = tei;
+    if (mac) a.mac = mac;
+    if (mac_old) a.mac_old = mac_old;
+    if (tei_old) a.tei_old = tei_old;
+    a.last_ms = epoch_ms;
+    a.last_frame = frame_index;
+}
+
+namespace {
+/// @brief 两链路计数比较(D)的新鲜度窗口
+/// @details 4-bit 重启次数是慢变量:某条链路长时间无帧时其值早已不代表当前状态。
+///          不做新鲜度判断会拿"载波最新值"和"无线很久以前的值"比,单介质运行/无线
+///          长时间静默会持续假报 D,且恢复一致也无从清除。窗口内才比较。
+constexpr qint64 kLinkCompareWindowMs = 30000;
+}  // namespace
+
+bool TopoState::note_restart_count(quint16 tei, bool is_rf, int rc,
+                                   qint64 epoch_ms, qint64 frame_index) {
+    if (!tei || tei == kTeiInvalid) return false;
+    if (rc < 0 || rc == kRestartCountInvalid) return false;   // 无该字段(单跳简头等)
+    bool touched = false;
+    const quint32 key = (quint32(tei) << 1) | (is_rf ? 1u : 0u);
+    auto it = m_rc_track.find(key);
+    if (it == m_rc_track.end()) {
+        RcTrack t;
+        t.prev = rc;
+        t.last_ms = epoch_ms;
+        t.seen.insert(rc);
+        m_rc_track.insert(key, t);
+    } else {
+        RcTrack& t = it.value();
+        const int prev = t.prev;
+        t.last_ms = epoch_ms;              // 新鲜度:每次采样都刷新(值与上次相同也算新鲜)
+        if (prev != rc) {
+            t.prev = rc;
+            // 4-bit 计数器的"回绕"(…→14→15→0)与"差 1 的双实体振荡"(9/10、11/10)在单步上
+            // 无法区分,故不用单步 +1 做豁免,而用**连续前进步数** fwd_run 判回绕:
+            //   回到出现过的旧值 ⇒ 记一次往返(用户口径:首变不计);
+            //   唯一例外:连续前进 ≥2 步之后回到的值,视为 4-bit 计数器正常回绕,静默通过。
+            // 新值一律入 seen(即使它是 forward),否则"只经规整递增到达过的值"永远无法成为
+            // 可返回的旧值 —— 那会把 9/10 这类差 1 振荡整段吞掉。
+            // 已知边界:…→15(非前进)之后单独一个 15→0,fwd_run=0 会被判成"回到旧值"而记录;
+            //   抓包丢帧时无法区分正常回绕与跳变,宁可报。
+            const bool forward = (rc == ((prev + 1) & 0x0F));
+            if (t.seen.contains(rc)) {
+                if (forward && t.fwd_run >= 2) {
+                    // 连续前进后的回绕:不记
+                } else {
+                    note_anomaly(TopoAnomalyKind::RestartCountOscillation, tei, mac_of(tei), 0, tei,
+                                 is_rf, prev, rc, epoch_ms, frame_index);
+                    touched = true;
+                }
+            } else {
+                t.seen.insert(rc);
+            }
+            t.fwd_run = forward ? t.fwd_run + 1 : 0;
+        }
+    }
+    // 两链路计数不同(用户口径):同一 TEI 载波与无线的重启次数各自计数,
+    // 两个介质都已有取值且不相等时记一条(只提示,不判重启)。
+    // 防刷屏:同一 (载波rc, 无线rc) 组合只计一次;恢复一致后清除,再不同仍可记。
+    const quint32 other_key = (quint32(tei) << 1) | (is_rf ? 0u : 1u);
+    const auto oit = m_rc_track.constFind(other_key);
+    if (oit != m_rc_track.constEnd() && oit.value().prev >= 0) {
+        // 新鲜度门:两侧最近采样时间相差超过窗口 ⇒ 不比较(也不清 D 状态,避免"陈旧值
+        // 碰巧相等"把正在观察的差异误判为已恢复)
+        const qint64 dt = epoch_ms - oit.value().last_ms;
+        if (dt > kLinkCompareWindowMs || dt < -kLinkCompareWindowMs)
+            return touched;
+        const int plc_rc = is_rf ? oit.value().prev : rc;
+        const int rf_rc  = is_rf ? rc : oit.value().prev;
+        if (plc_rc != rf_rc) {
+            const QPair<int, int> pair(plc_rc, rf_rc);
+            const auto pit = m_link_pair.constFind(tei);
+            if (pit == m_link_pair.constEnd() || pit.value() != pair) {
+                note_anomaly(TopoAnomalyKind::LinkCountMismatch, tei, mac_of(tei), 0, tei,
+                             false, plc_rc, rf_rc, epoch_ms, frame_index);
+                m_link_pair.insert(tei, pair);
+                touched = true;
+            }
+        } else {
+            m_link_pair.remove(tei);   // 两链路恢复一致
+        }
+    }
+    return touched;
+}
+
+void TopoState::index_mac(quint16 tei, quint64 mac, qint64 epoch_ms, qint64 frame_index) {
     if (!tei || !mac) return;
     // 情况1:该 MAC 之前映射到别的 TEI(TEI 复用/STA 重入网换 TEI)
-    //       → 把旧 TEI 节点的 MAC 清零,避免之后按 MAC 查找时 stale 命中
+    //       → 把旧 TEI 节点的 MAC 清零,避免之后按 MAC 查找时 stale 命中。
+    //       旧 TEI 若仍在线 ⇒ 同一 MAC 同时占两个 TEI(重复组网/身份冲突),记异常;
+    //       旧 TEI 已离线 ⇒ 正常离网后重入网换 TEI,不计。
     auto it = mac_to_tei.find(mac);
     if (it != mac_to_tei.end() && it.value() != tei) {
         const quint16 old_tei = it.value();
         auto nit = nodes.find(old_tei);
-        if (nit != nodes.end() && nit.value().mac == mac)
+        if (nit != nodes.end() && nit.value().mac == mac) {
+            if (nit.value().status != NodeStatus::Offline)
+                // mac_old 对 A 类无意义(A 用 tei/tei_old 表示冲突两端),传 0 避免语义误导
+                note_anomaly(TopoAnomalyKind::MacMultipleTei, tei, mac, 0, old_tei,
+                             nit.value().is_rf, int(old_tei), int(tei), epoch_ms, frame_index);
             nit.value().mac = 0;
+        }
     }
     // 情况2:该 TEI 之前是别的 MAC(同一 TEI 换 MAC)
-    //       → 若旧 MAC 仍指向本 TEI 则删除其映射,避免旧 MAC 离线时误伤本 TEI
+    //       → 若旧 MAC 仍指向本 TEI 则删除其映射,避免旧 MAC 离线时误伤本 TEI。
+    //       旧节点仍在线 ⇒ 同一 TEI 被两台设备占用,记异常;已离线 ⇒ TEI 复用,不计。
     auto nit = nodes.find(tei);
     if (nit != nodes.end()) {
         const quint64 old_mac = nit.value().mac;
         if (old_mac && old_mac != mac) {
+            if (nit.value().status != NodeStatus::Offline)
+                note_anomaly(TopoAnomalyKind::TeiMultipleMac, tei, mac, old_mac, tei,
+                             nit.value().is_rf, 0, 0, epoch_ms, frame_index);
             auto oit = mac_to_tei.find(old_mac);
             if (oit != mac_to_tei.end() && oit.value() == tei)
                 mac_to_tei.erase(oit);
@@ -181,7 +325,7 @@ void TopoState::apply(const TopoEvent& e) {
     // CCO(TEI=1):根节点,父=0,始终已入网
     if (e.cco_mac) {
         cco_mac = e.cco_mac;
-        index_mac(1, e.cco_mac);
+        index_mac(1, e.cco_mac, e.epoch_ms, e.frame_index);
         TopoNode& cco = nodes[1];
         cco.tei = 1;
         cco.mac = e.cco_mac;
@@ -218,7 +362,7 @@ void TopoState::apply(const TopoEvent& e) {
             pending[p.mac] = n;
             continue;
         }
-        index_mac(p.tei, p.mac);
+        index_mac(p.tei, p.mac, e.epoch_ms, e.frame_index);
         TopoNode& n = nodes[p.tei];
         n.tei = p.tei;
         n.mac = p.mac;
