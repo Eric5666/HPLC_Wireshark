@@ -4,6 +4,7 @@
 ///   D     方案 B 新增:CCO/STA 非白名单帧、NID 隔离、MAC 隔离、TEI=1 归 CCO、
 ///         逐帧采样路径(note_restart_origin)、同帧不重复报、无变化不报
 ///   D13   身份记忆按 (NID, MAC) 分键:同 MAC 在不同 NID 下 CCO/STA 身份互不串
+///   D14   mac_to_tei 按 (NID, MAC) 分键:同 MAC 在不同 NID 下映射到不同 TEI,互不串
 /// 用法:./probe ; exit 0 = 全部断言通过
 #include "topo_state.h"
 #include <QCoreApplication>
@@ -166,7 +167,7 @@ int main(int argc, char** argv) {
         learn.epoch_ms = 1001;
         learn.nodes.append({kTeiCco, MAC_CCO});
         st.apply(learn);
-        CHECK(st.mac_to_tei.value(MAC_CCO, quint16(0)) == kTeiCco, "D5a 已学到 TEI=1 → CCO MAC");
+        CHECK(st.mac_to_tei.value(TopoState::restart_base_key(0x0E, MAC_CCO), quint16(0)) == kTeiCco, "D5a 已学到 TEI=1 → CCO MAC");
         CHECK(st.cco_mac == 0, "D5b 该帧未给 cco_mac");
         st.apply(frame(TopoEventKind::AssocCnf, 0x0E, MAC_CCO, 2, 2));
         st.apply(frame(TopoEventKind::AssocCnf, 0x0E, MAC_CCO, 3, 3));
@@ -293,6 +294,35 @@ int main(int argc, char** argv) {
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1
               && count_restart_events(st) == 1,
               "D13f 两 NID 各 1 条、互不串(CCO 1 + STA 1)");
+    }
+    // D14:mac_to_tei 按 (NID, MAC) 分键 —— 同一 MAC 在 NID 0x0E 是 CCO(TEI=1)、在 NID 0x14 是 STA(TEI=5)
+    //     (事件侧;旧 MAC-only 索引会把 0x14 的同一 MAC 也判成 CCO ⇒ D14c 失败)
+    {
+        TopoState st;
+        const quint64 MAC_X = 0x0A0B0C0D0E0FULL;
+        // NID 0x0E:发现列表学到 (0x0E, MAC_X) → TEI 1(不带重启次数,不触发重启采样)
+        TopoEvent learn;
+        learn.kind = TopoEventKind::DiscoverList;
+        learn.nid = 0x0E;
+        learn.restart_count = -1;
+        learn.frame_index = 1;
+        learn.epoch_ms = 1001;
+        learn.nodes.append({kTeiCco, MAC_X});
+        st.apply(learn);
+        CHECK(st.mac_to_tei.value(TopoState::restart_base_key(0x0E, MAC_X), quint16(0)) == kTeiCco,
+              "D14a NID 0x0E 学到 (NID, MAC_X) → TEI=1");
+        // NID 0x14:同一 MAC 以 TEI=5 入网,重启 5→6 应报 StaRestart
+        TopoEvent f1 = frame(TopoEventKind::AssocCnf, 0x14, MAC_X, 5, 2);
+        f1.nodes.append({5, MAC_X});
+        st.apply(f1);
+        CHECK(st.mac_to_tei.value(TopoState::restart_base_key(0x14, MAC_X), quint16(0)) == 5,
+              "D14b NID 0x14 学到 (NID, MAC_X) → TEI=5,两网映射并存");
+        TopoEvent f2 = frame(TopoEventKind::AssocCnf, 0x14, MAC_X, 6, 3);
+        f2.nodes.append({5, MAC_X});
+        st.apply(f2);
+        CHECK(count_kind(st, TopoEventKind::StaRestart) == 1
+              && count_kind(st, TopoEventKind::CcoRestart) == 0,
+              "D14c NID 0x14 计数 5→6 报 StaRestart、不报 CcoRestart");
     }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);

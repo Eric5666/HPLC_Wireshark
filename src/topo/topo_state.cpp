@@ -192,13 +192,13 @@ bool TopoState::note_restart_count(quint16 tei, bool is_rf, int rc,
     return touched;
 }
 
-void TopoState::index_mac(quint16 tei, quint64 mac, qint64 epoch_ms, qint64 frame_index) {
+void TopoState::index_mac(quint32 net_id, quint16 tei, quint64 mac, qint64 epoch_ms, qint64 frame_index) {
     if (!tei || !mac) return;
-    // 情况1:该 MAC 之前映射到别的 TEI(TEI 复用/STA 重入网换 TEI)
+    // 情况1:该 MAC 在本 NID 之前映射到别的 TEI(TEI 复用/STA 重入网换 TEI)
     //       → 把旧 TEI 节点的 MAC 清零,避免之后按 MAC 查找时 stale 命中。
     //       旧 TEI 若仍在线 ⇒ 同一 MAC 同时占两个 TEI(重复组网/身份冲突),记异常;
     //       旧 TEI 已离线 ⇒ 正常离网后重入网换 TEI,不计。
-    auto it = mac_to_tei.find(mac);
+    auto it = mac_to_tei.find(restart_base_key(net_id, mac));
     if (it != mac_to_tei.end() && it.value() != tei) {
         const quint16 old_tei = it.value();
         auto nit = nodes.find(old_tei);
@@ -220,17 +220,17 @@ void TopoState::index_mac(quint16 tei, quint64 mac, qint64 epoch_ms, qint64 fram
             if (nit.value().status != NodeStatus::Offline)
                 note_anomaly(TopoAnomalyKind::TeiMultipleMac, tei, mac, old_mac, tei,
                              nit.value().is_rf, 0, 0, epoch_ms, frame_index);
-            auto oit = mac_to_tei.find(old_mac);
+            auto oit = mac_to_tei.find(restart_base_key(net_id, old_mac));
             if (oit != mac_to_tei.end() && oit.value() == tei)
                 mac_to_tei.erase(oit);
         }
     }
-    mac_to_tei[mac] = tei;
+    mac_to_tei[restart_base_key(net_id, mac)] = tei;
 }
 
-bool TopoState::remove_node_by_mac(quint64 mac) {
+bool TopoState::remove_node_by_mac(quint32 net_id, quint64 mac) {
     if (!mac) return false;
-    const auto iit = mac_to_tei.find(mac);
+    const auto iit = mac_to_tei.find(restart_base_key(net_id, mac));
     if (iit == mac_to_tei.end()) return false;
     const quint16 old_tei = iit.value();
     if (old_tei == kTeiCco) return false;  // CCO 永不移除
@@ -259,7 +259,7 @@ bool TopoState::resolve_is_cco(quint32 net_id, quint16 src_tei, quint64 mac, con
         for (const TeiMacPair& p : ev->nodes)
             if (p.tei == kTeiCco && p.mac == mac) { cco = true; break; }
     }
-    if (!cco && mac && mac_to_tei.value(mac, quint16(0)) == kTeiCco) cco = true;  // 5. TEI=1 映射
+    if (!cco && mac && mac_to_tei.value(restart_base_key(net_id, mac), quint16(0)) == kTeiCco) cco = true;  // 5. TEI=1 映射(NID, MAC)
     // 6. 发现列表是 CCO 广播:缺源 MAC 时按 CCO 归属
     //    (否则会走 nodes 首条回落,把 CCO 重启记到发现列表里第一个 STA 头上 —— 实测缺陷 M2)
     if (!cco && !mac && ev && ev->kind == TopoEventKind::DiscoverList) cco = true;
@@ -391,7 +391,7 @@ void TopoState::apply(const TopoEvent& e) {
     // CCO(TEI=1):根节点,父=0,始终已入网
     if (e.cco_mac) {
         cco_mac = e.cco_mac;
-        index_mac(1, e.cco_mac, e.epoch_ms, e.frame_index);
+        index_mac(e.nid, 1, e.cco_mac, e.epoch_ms, e.frame_index);
         TopoNode& cco = nodes[1];
         cco.tei = 1;
         cco.mac = e.cco_mac;
@@ -415,7 +415,7 @@ void TopoState::apply(const TopoEvent& e) {
             // 该 MAC 若已在拓扑中(设备重上电再次发起关联):先移除旧节点,
             // 再绘制当前"入网中"状态,避免同一 MAC 以"在线"+"入网中"
             // 两种状态同时出现在拓扑图中。
-            remove_node_by_mac(p.mac);
+            remove_node_by_mac(e.nid, p.mac);
             TopoNode n;
             n.tei = 0;
             n.mac = p.mac;
@@ -428,7 +428,7 @@ void TopoState::apply(const TopoEvent& e) {
             pending[p.mac] = n;
             continue;
         }
-        index_mac(p.tei, p.mac, e.epoch_ms, e.frame_index);
+        index_mac(e.nid, p.tei, p.mac, e.epoch_ms, e.frame_index);
         TopoNode& n = nodes[p.tei];
         n.tei = p.tei;
         n.mac = p.mac;
@@ -502,11 +502,11 @@ void TopoState::apply(const TopoEvent& e) {
             if (!n.is_rf_known) { n.is_rf = (e.link_type == LinkTypeRf); n.is_rf_known = true; }
         }
     }
-    // 离网节点(按 MAC 匹配,标记离线):先走 MAC→TEI 索引 O(1),索引不一致时回退线性扫描
+    // 离网节点(按 (NID, MAC) 匹配,标记离线):先走 MAC→TEI 索引 O(1),索引不一致时回退线性扫描
     for (quint64 mac : e.leaves) {
         if (!mac) continue;
         bool done = false;
-        auto iit = mac_to_tei.find(mac);
+        auto iit = mac_to_tei.find(restart_base_key(e.nid, mac));
         if (iit != mac_to_tei.end()) {
             auto nit = nodes.find(iit.value());
             if (nit != nodes.end() && nit.value().mac == mac) {
