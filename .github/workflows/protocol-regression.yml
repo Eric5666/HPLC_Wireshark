@@ -1,6 +1,15 @@
 name: Protocol Regression
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'unit_test/**'
+      - 'tools/**'
+      - 'samples/**'
+      - 'wireshark_support_plugins/**'
+      - '.github/workflows/**'
   pull_request:
   workflow_dispatch:
 
@@ -103,6 +112,16 @@ jobs:
           set -e
           QT_ROOT="$RUNNER_TEMP/qt-root"
           mkdir -p "$QT_ROOT"
+          # qmake6 -query 任一键返回空/不存在时直接报明确错误,
+          # 否则下面会抛 "failed to create symbolic link" 这种难懂的错误。
+          for key in QT_HOST_BINS QT_INSTALL_LIBEXECS QT_INSTALL_HEADERS QT_INSTALL_LIBS; do
+            value=$(qmake6 -query "$key" || true)
+            if [ -z "$value" ] || [ ! -d "$value" ]; then
+              echo "::error::qmake6 -query $key 返回空或目录不存在: '$value'"
+              exit 1
+            fi
+            echo "$key=$value"
+          done
           ln -s "$(qmake6 -query QT_HOST_BINS)" "$QT_ROOT/bin"
           ln -s "$(qmake6 -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
           ln -s "$(qmake6 -query QT_INSTALL_HEADERS)" "$QT_ROOT/include"
@@ -114,9 +133,11 @@ jobs:
           (cd unit_test/protocol-common/pb-batch2-probe && bash build.sh)
           (cd unit_test/filter/info-crc-probe && bash build.sh)
           (cd unit_test/filter/orig-src-probe && bash build.sh)
+          (cd unit_test/filter/mac-filter-probe && bash build.sh)
 
           unit_test/protocol-common/pb-reorder-probe/build/pb_reorder_probe/pb_reorder_probe
           unit_test/protocol-common/pb-batch2-probe/build/pb_batch2_probe/pb_batch2_probe
           unit_test/filter/info-crc-probe/build/info_crc_probe
           unit_test/filter/orig-src-probe/build/orig_src_probe \
             "$GITHUB_WORKSPACE/unit_test/protocol-gw/gw-topo-merge-probe/gw_topo_merge.bin"
+          unit_test/filter/mac-filter-probe/build/mac_filter_probe
