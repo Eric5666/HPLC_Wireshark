@@ -106,6 +106,22 @@ public:
     bool note_restart_count(quint16 tei, bool is_rf, int rc,
                             qint64 epoch_ms, qint64 frame_index);
 
+    /// @brief 逐帧重启次数采样(方案 B):全帧采样,按 (NID, 主体 MAC) 分键,变化即报重启
+    /// @details 依据与口径:
+    ///  - 重启次数是 MAC 帧头的 4-bit 计数器(国网 MSDU 头 / 南网 MAC 帧头),任何变化即视为重启,
+    ///    天然处理 15→0 回绕(判据未改,仅扩采样点);
+    ///  - **CCO 的 TEI 固定为 1**(南网规约 / HDC 2.0 5.3.3.1),故主体判定依据:
+    ///    src_tei==1、或 MAC == 本 NID 已学到的 CCO MAC、或 MAC 已映射到 TEI=1 ⇒ CCO;其余按 STA;
+    ///  - 分键 = (NID, MAC):旧实现 CCO 基线是单一全局值(多 NID 互相踩)、STA 基线只有 MAC
+    ///    (不同 NID 下同 MAC 会串),两者都必须带 NID;
+    ///  - src_mac==0 时不检测:宁可不报,也不把计数记到别的主体名下;
+    ///  - 已知代价:事件量上升(以前漏报的真实重启现在会报);CcoRestart/StaRestart 是插件 API 事件
+    ///    (plugin/host/js_backend.cpp / lua_backend.cpp 映射为 ccoRestart/staRestart),
+    ///    Lua/JS 侧若按事件条数统计会随之变化。
+    /// @return 是否新增了重启事件
+    bool note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src_mac, int rc,
+                             qint64 epoch_ms, qint64 frame_index, bool is_rf, bool is_rf_known);
+
     /// @brief 应用一个拓扑事件,增量更新节点/路由/入网状态并记录事件
         /// @brief 逐帧接入方式兜底(方案②):仅对"已存在且接入方式未确定"的节点写入
     /// @note  不建占位节点(避免数据帧/广播帧在拓扑里凭空生成 TEI 节点);不覆盖已确定值(防双模抖动)
@@ -170,8 +186,41 @@ private:
     /// @return 是否移除了节点
     bool remove_node_by_mac(quint64 mac);
 
-    int m_last_restart_count = -1; ///< 上次发现列表的发送方重启次数(-1=尚无基线;CCO 重启检测用)
-    QHash<quint64, int> m_sta_restart_count; ///< STA MAC → 上次重启次数(-1=尚无基线;STA 重启检测用,仅关联请求更新)
+    /// @brief 重启次数基线(键 = restart_base_key(NID, 主体 MAC))
+    /// @details 两个哈希都不能省 NID:
+    ///          - CCO 旧实现是**单一全局值**(m_last_restart_count,已删除),多 NID 同时抓包时互相踩;
+    ///          - STA 旧实现只有 MAC,不同 NID 下同 MAC 会串(用户 2026-11 口径:先分 NID,再分 MAC)。
+    QHash<quint64, int> m_cco_restart_count;  ///< CCO 主体基线
+    QHash<quint64, int> m_sta_restart_count;  ///< STA 主体基线
+
+    /// @brief (NID, MAC) → 重启基线键:NID 取低 16bit(规约网络标识 ≤12bit)、MAC 取低 48bit,两段不重叠
+    static quint64 restart_base_key(quint32 net_id, quint64 mac);
+
+    /// @brief 主体身份判定(CCO/STA)的**唯一入口**:apply() 事件侧与逐帧采样侧都走这里,
+    ///        避免两条路径判据集合不同导致同一次重启被报成 STA/CCO 两条(M1),
+    ///        或 CCO 帧缺源 MAC 时被回落成"发现列表里第一个 STA"(M2)。
+    /// @details 依据(任一成立即 CCO):
+    ///   1. src_tei == kTeiCco —— 南网规约 / HDC 2.0 5.3.3.1:CCO 的 TEI 固定为 1
+    ///      (事件侧拿不到 TEI 时传 0,表示"该路径没有 TEI 信息");
+    ///   2. mac 非 0 且已在 m_cco_macs 身份记忆里;
+    ///   3. 本帧 cco_mac == mac;
+    ///   4. 本帧 nodes 含 (kTeiCco, mac);
+    ///   5. mac 已映射到 TEI=1(mac_to_tei);
+    ///   6. mac == 0 且事件种类是发现列表 —— 发现列表是 CCO 广播,缺源 MAC 时按 CCO 归属
+    ///      (否则会回落到 nodes 首条,把 CCO 重启记到无关 STA 头上)。
+    ///   另:拓扑事件里 discover_src_tei 记的是路由/位图条目的 STA TEI,不是发送方 TEI,故**不用**它判 CCO。
+    /// 判定为 CCO 且 mac 非 0 时写入 m_cco_macs 身份记忆,防同一主体后续因 cco_mac 缺失而漂移成 STA。
+    /// @param[in] ev 事件上下文(可为 nullptr:逐帧路径没有 TopoEvent)
+    /// @return true=CCO 主体
+    bool resolve_is_cco(quint16 src_tei, quint64 mac, const TopoEvent* ev);
+
+    QSet<quint64> m_cco_macs;   ///< CCO 身份记忆(判定为 CCO 的 MAC;防归属漂移)
+
+    /// @brief 重启变化记录(CCO/STA 共用实现):比较基线、变化即生成重启事件并更新基线
+    /// @param[in] proto 事件模板(沿用其 nid/is_rf/来源信息),只有 kind/desc/restart_count/主体被改写
+    /// @return 是否新增了重启事件
+    bool note_restart_change(quint32 net_id, quint64 subject, bool is_cco, int rc,
+                             qint64 epoch_ms, qint64 frame_index, const TopoEvent& proto);
 };
 
 #endif // TOPO_STATE_H

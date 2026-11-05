@@ -1005,6 +1005,16 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
                 && ts.note_restart_count(quint16(e.msdu.msdu_src_tei), e.meta.is_rf,
                                          int(e.msdu.restart_count), e.epoch_ms, e.index))
                 topo_touched = true;
+            // 重启归属(CCO/STA,方案 B):全帧采样(不再限于发现列表/关联请求),
+            // 基线按 (NID, 主体 MAC) 分键 —— CCO 的 TEI 固定为 1(南网规约/HDC2.0 5.3.3.1),
+            // 主体判定与变化比较都在 TopoState 内完成;src_mac==0 时不检测(宁可不报,也不串主体)。
+            // 注:与上面 apply() 事件侧的重启检测共用同一基线,不会重复报(同帧同主体第二次
+            //     比较时基线已相等)。
+            if (e.msdu.present
+                && ts.note_restart_origin(e.mpdu.net_id, quint16(e.msdu.msdu_src_tei),
+                                          e.msdu.msdu_src_mac, int(e.msdu.restart_count),
+                                          e.epoch_ms, e.index, e.meta.is_rf, true))
+                topo_touched = true;
             // 正在入网节点(pending,按 MAC):同样仅未判定时写入
             if (e.msdu.msdu_src_mac) {
                 auto pit = ts.pending.find(e.msdu.msdu_src_mac);

@@ -245,6 +245,69 @@ bool TopoState::remove_node_by_mac(quint64 mac) {
     return true;
 }
 
+quint64 TopoState::restart_base_key(quint32 net_id, quint64 mac) {
+    // NID 取低 16bit(规约网络标识 ≤12bit)、MAC 取低 48bit,两段不重叠 ⇒ 不会串键
+    return (quint64(net_id & 0xFFFFu) << 48) | (mac & 0xFFFFFFFFFFFFULL);
+}
+
+bool TopoState::resolve_is_cco(quint16 src_tei, quint64 mac, const TopoEvent* ev) {
+    bool cco = false;
+    if (src_tei == kTeiCco) cco = true;                                     // 1. TEI 固定为 1
+    if (!cco && mac && m_cco_macs.contains(mac)) cco = true;                // 2. 身份记忆
+    if (!cco && ev && mac && ev->cco_mac && ev->cco_mac == mac) cco = true; // 3. 本帧 CCO MAC
+    if (!cco && ev && mac) {                                                // 4. 本帧 nodes 的 TEI=1 条目
+        for (const TeiMacPair& p : ev->nodes)
+            if (p.tei == kTeiCco && p.mac == mac) { cco = true; break; }
+    }
+    if (!cco && mac && mac_to_tei.value(mac, quint16(0)) == kTeiCco) cco = true;  // 5. TEI=1 映射
+    // 6. 发现列表是 CCO 广播:缺源 MAC 时按 CCO 归属
+    //    (否则会走 nodes 首条回落,把 CCO 重启记到发现列表里第一个 STA 头上 —— 实测缺陷 M2)
+    if (!cco && !mac && ev && ev->kind == TopoEventKind::DiscoverList) cco = true;
+    if (cco && mac) m_cco_macs.insert(mac);   // 身份记忆:防后续 cco_mac 缺失时漂移成 STA
+    return cco;
+}
+
+bool TopoState::note_restart_change(quint32 net_id, quint64 subject, bool is_cco, int rc,
+                                    qint64 epoch_ms, qint64 frame_index, const TopoEvent& proto) {
+    // CCO 允许"无 MAC 主体"(subject==0 ⇒ 每 NID 一条 CCO 基线);STA 必须有 MAC
+    if ((!subject && !is_cco) || rc < 0 || rc == kRestartCountInvalid)
+        return false;   // 0xFF=无该字段(单跳简头等)
+    const quint64 key = restart_base_key(net_id, subject);
+    QHash<quint64, int>& base = is_cco ? m_cco_restart_count : m_sta_restart_count;
+    const auto it = base.constFind(key);
+    const bool changed = (it != base.constEnd() && it.value() != rc);
+    const int prev = (it == base.constEnd()) ? -1 : it.value();
+    base[key] = rc;   // 首次见到只建基线不报(与既有口径一致)
+    if (!changed) return false;
+    TopoEvent re = proto;
+    re.nid = net_id;
+    re.kind = is_cco ? TopoEventKind::CcoRestart : TopoEventKind::StaRestart;
+    re.restart_count = rc;
+    re.sender_mac = subject;
+    re.epoch_ms = epoch_ms;
+    re.frame_index = frame_index;
+    re.desc = is_cco
+                  ? trl::L("警告CCO重启过！重启次数 %1→%2").arg(prev).arg(rc)
+                  : trl::L("警告STA重启过！STA %1 重启次数 %2→%3")
+                        .arg(topo_mac_str(subject)).arg(prev).arg(rc);
+    events.append(re);
+    return true;
+}
+
+bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src_mac, int rc,
+                                    qint64 epoch_ms, qint64 frame_index,
+                                    bool is_rf, bool is_rf_known) {
+    if (rc < 0 || rc == kRestartCountInvalid) return false;   // 无该字段(单跳简头等)不采样
+    // 身份判定统一走 resolve_is_cco(TEI 固定 1 / 身份记忆 / cco_mac / mac_to_tei)
+    const bool is_cco = resolve_is_cco(src_tei, src_mac, nullptr);
+    // STA 必须有 MAC 才能定位主体;唯一例外:CCO 帧缺源 MAC ⇒ 归本 NID 的 CCO 基线(subject=0)
+    if (!src_mac && !is_cco) return false;
+    TopoEvent proto;
+    proto.is_rf = is_rf;
+    proto.is_rf_known = is_rf_known;
+    return note_restart_change(net_id, src_mac, is_cco, rc, epoch_ms, frame_index, proto);
+}
+
 void TopoState::apply(const TopoEvent& e) {
     nid = e.nid;
     // 南网发现列表上行路由变化检测:若 UpRoute 条目的下一跳与当前父节点
@@ -284,43 +347,46 @@ void TopoState::apply(const TopoEvent& e) {
         first_seen_frame = e.frame_index;
         first_seen_ms = e.epoch_ms;
     }
-    // CCO 重启检测:发现列表携带的发送方(CCO)重启次数若发生变化,说明 CCO 已重启。
-    // 仅识别记录(警告),不清空拓扑:新的关联请求可能先于发现列表到达,
-    // 清空会误删已重建的正确状态。
-    // (重启次数为 4-bit 计数,任何变化即视为重启,天然处理 15→0 回绕)
-    if (e.kind == TopoEventKind::DiscoverList && e.restart_count >= 0) {
-        if (m_last_restart_count >= 0 && e.restart_count != m_last_restart_count) {
-            TopoEvent re = e;
-            re.kind = TopoEventKind::CcoRestart;
-            re.desc = trl::L("警告CCO重启过！重启次数 %1→%2")
-                          .arg(m_last_restart_count).arg(e.restart_count);
-            events.append(re);
+    // ---------------------------------------------------------------------
+    // 重启检测(方案 B:采样点从「发现列表/关联请求」白名单扩到全帧;基线按 (NID, 主体 MAC) 分键)
+    // 依据与口径:
+    //  - 重启次数是 MAC 帧头的 4-bit 计数器(国网 MSDU 头 / 南网 MAC 帧头),任何变化即视为重启,
+    //    天然处理 15→0 回绕 —— 判据未改,只扩采样点;restart_count<0(0xFF 哨兵:单跳简头等
+    //    无该字段的帧)天然被排除。
+    //  - 旧实现只在 DiscoverList 上采 CCO、只在 AssocReq 上采 STA,其它管理帧携带的计数变化
+    //    完全看不到(实测漏报),故去掉事件种类白名单。
+    //  - CCO 的 TEI 固定为 1(南网规约 / HDC 2.0 5.3.3.1):主体判定用「本帧 CCO MAC」、
+    //    「MAC 已映射到 TEI=1」、或「本帧 nodes 里 (TEI=1, 该 MAC)」三条依据;其余按 STA。
+    //  - 分键 = restart_base_key(NID, 主体 MAC):CCO 旧基线是单一全局值(多 NID 互相踩),
+    //    STA 旧基线只有 MAC(不同 NID 下同 MAC 会串)。
+    //  - 已知代价:事件量上升(以前漏报的真实重启现在会报),且 CcoRestart/StaRestart 是插件
+    //    API 事件(plugin/host/js_backend.cpp:47、lua_backend.cpp:65 → ccoRestart/staRestart),
+    //    Lua/JS 侧若按事件条数统计会变化。
+    //  - 拓扑状态不清空:新的关联请求可能先于发现列表到达,清空会误删已重建的正确状态。
+    // ---------------------------------------------------------------------
+    if (e.restart_count >= 0) {
+        quint64 subject = e.sender_mac;
+        bool is_cco = false;
+        if (subject) {
+            // 有源 MAC:身份判定统一走 resolve_is_cco(事件侧无 TEI 信息 ⇒ 传 0)
+            is_cco = resolve_is_cco(quint16(0), subject, &e);
+        } else {
+            // 无源 MAC:先看能否按"无 MAC 的 CCO"归属(发现列表 = CCO 广播,实测缺陷 M2:
+            // 旧实现直接回落 nodes 首条,把 CCO 的重启次数记到发现列表里第一个 STA 头上)
+            is_cco = resolve_is_cco(quint16(0), 0, &e);
+            if (!is_cco) {
+                // 既有口径保留(AssocReq 等:直接关联时主体即发送方):回落本事件 nodes 首条,
+                // 再对该主体做一次身份判定(它可能就是 CCO 条目)
+                for (const TeiMacPair& p : e.nodes) {
+                    if (p.mac) { subject = p.mac; break; }
+                }
+                if (subject) is_cco = resolve_is_cco(quint16(0), subject, &e);
+            }
         }
-        m_last_restart_count = e.restart_count;
-    }
-    // STA 重启检测:关联请求由 STA 本人发出,MSDU 头重启次数即该 STA 的;
-    // 但帧可能经代理/中继转发 ⇒ 按【本跳发送方 MAC】(sender_mac) 建基线,
-    // 避免把发送方的重启次数记到 MMe 主体名下(实测:主体 08:78:29:07,
-    // 发送方 08:66:78:08,重启次数属于发送方)。
-    // sender_mac==0(MSDU 头无源 MAC)时不再整段跳过:回落到 MMe 主体 MAC
-    // (关联请求 nodes 首条即主体 STA,tei=0 承载 MAC);直接关联时主体即发送方,
-    // 回落正确;中继帧缺发送方 MAC 时无法区分,宁可按主体建基线也不静默丢检测。
-    quint64 restart_key = e.sender_mac;
-    if (!restart_key) {
-        for (const TeiMacPair& p : e.nodes) {
-            if (p.mac) { restart_key = p.mac; break; }
+        if (subject || is_cco) {
+            note_restart_change(e.nid, subject, is_cco, e.restart_count,
+                                e.epoch_ms, e.frame_index, e);
         }
-    }
-    if (e.kind == TopoEventKind::AssocReq && e.restart_count >= 0 && restart_key) {
-        const auto it = m_sta_restart_count.constFind(restart_key);
-        if (it != m_sta_restart_count.constEnd() && it.value() != e.restart_count) {
-            TopoEvent re = e;
-            re.kind = TopoEventKind::StaRestart;
-            re.desc = trl::L("警告STA重启过！STA %1 重启次数 %2→%3")
-                          .arg(topo_mac_str(restart_key)).arg(it.value()).arg(e.restart_count);
-            events.append(re);
-        }
-        m_sta_restart_count[restart_key] = e.restart_count;
     }
     // CCO(TEI=1):根节点,父=0,始终已入网
     if (e.cco_mac) {
