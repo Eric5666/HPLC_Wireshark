@@ -183,11 +183,30 @@
 - 构建脚本：每个用例必须有 `build.sh`（g++ 直编）或 `build.sh`
  （qmake wrapper，二者选一；gw-learn-probe 沿用 `build_probe.sh` 旧名）。
   仓库根用 `REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"`
-  （`.pro` 内用 `$$PWD/../../..`），不要写死 `/home/hatch`；
-  Qt 与 libfix 仍用 `$HOME/qt/6.11.2/gcc_64` 与
-  `$HOME/workspace/build_deps/libfix` 的本机约定。
+  （`.pro` 内用 `$$PWD/../../..`），不要写死本机绝对路径。
   qmake 用例用 shadow 构建（`build/<pro-basename>/`），不要在用例根目录
   生成 Makefile/`.o`/二进制；g++ 用例把 moc 生成到 `./build/`。
+- **`build.sh` 必须同时能在 Windows(git-bash) 与 Linux CI 上跑**（CI 见
+  `.github/workflows/protocol-regression.yml` 的「… regression probes」步骤，
+  它把 `$QT_ROOT/{bin,libexec,include,lib}` 软链到 `qmake6 -query` 的各路径后
+  `bash build.sh`）。四条硬约定：
+  1. **make**：`MAKE` → `make` → `mingw32-make`（Windows 只有后者）；
+  2. **qmake**：`$QT/bin/` 下逐个探测 `qmake.exe` → `qmake` → `qmake6` →
+     `qmake6.exe` → `qmake-qt6`。**Ubuntu/Debian 的 `QT_HOST_BINS` 里常常只有
+     `qmake6`**，只试 `qmake` 会让 CI 直接挂；
+  3. **moc**：`$QT/bin/moc.exe` → `$QT/bin/moc` → `$QT/libexec/moc` →
+     `$QT/libexec/moc.exe`。**Debian/Ubuntu 的 moc 在 `libexec/`**，
+     Windows 的在 `bin/`，两边都要试；
+  4. **路径形式**：传给 g++/moc/qmake 的一律用原生形式（`C:/…`；
+     MSYS 下用 `cygpath -m` 转换）。bash 习惯的 `/c/…` 会被原生程序**静默忽略**，
+     表现为「找不到头文件」。
+  Qt 查找顺序 `QT_ROOT` → `QT` → `C:/Qt/6.11.2/mingw_64` →
+  `$HOME/qt/6.11.2/gcc_64`；Windows 下不链 `-lEGL -lGL` 与
+  `$HOME/workspace/build_deps/libfix`（仅 Linux 需要）。
+  **这 5 个已接入 CI 的用例是参考实现**：`protocol-common/pb-reorder-probe`、
+  `protocol-common/pb-batch2-probe`、`filter/info-crc-probe`、
+  `filter/orig-src-probe`、`filter/mac-filter-probe`。其余用例若将来接进 CI，
+  须先按上述四条补齐探测，否则会在 CI 上因 `qmake6`/`libexec/moc` 命不中而失败。
 - README 条目：主 README 索引表加一行（目的、构建、运行、输入、预期结果）；
   输入非 obvious（argv 形式、外部大文件、跨用例输入、特殊运行目录）的，
   在用例目录另放简短 README.md 说明。

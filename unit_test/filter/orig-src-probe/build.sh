@@ -38,9 +38,12 @@ fi
 QT="$(native_path "$QT")"
 
 # moc:Windows 版 Qt 装在 bin/(无 libexec/),Linux 版在 libexec/
-MOC="$QT/bin/moc.exe"
-[ -x "$MOC" ] || MOC="$QT/libexec/moc"
-[ -x "$MOC" ] || { echo "未找到 moc: $QT/bin、$QT/libexec" >&2; exit 1; }
+# moc 位置随发行版不同:Windows 在 bin/;Debian/Ubuntu 在 libexec/(bin/ 里也可能有)。
+MOC=""
+for cand in "$QT/bin/moc.exe" "$QT/bin/moc" "$QT/libexec/moc" "$QT/libexec/moc.exe"; do
+    if [ -x "$cand" ]; then MOC="$cand"; break; fi
+done
+[ -n "$MOC" ] || { echo "未找到 moc(试过 bin/ 与 libexec/): $QT" >&2; exit 1; }
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) WINDOWS=1 ;;

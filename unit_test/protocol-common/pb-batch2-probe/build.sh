@@ -46,9 +46,14 @@ if [ -z "$MAKE_BIN" ]; then
     fi
 fi
 
-QMAKE="$QT/bin/qmake.exe"
-[ -x "$QMAKE" ] || QMAKE="$QT/bin/qmake"
-[ -x "$QMAKE" ] || { echo "未找到 qmake: $QT/bin" >&2; exit 1; }
+# qmake 名字随发行版不同:Windows 只有 qmake.exe;Ubuntu/Debian 的 QT_HOST_BINS
+# 里常只有 qmake6 或 qmake(qmake-qt6)。逐个探测,别假设叫 qmake。
+QMAKE=""
+for cand in "$QT/bin/qmake.exe" "$QT/bin/qmake" "$QT/bin/qmake6" \
+            "$QT/bin/qmake6.exe" "$QT/bin/qmake-qt6"; do
+    if [ -x "$cand" ]; then QMAKE="$cand"; break; fi
+done
+[ -n "$QMAKE" ] || { echo "未找到 qmake(试过 qmake/qmake6/qmake-qt6): $QT/bin" >&2; exit 1; }
 
 name="pb_batch2_probe"
 mkdir -p "build/$name"

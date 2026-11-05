@@ -26,7 +26,7 @@ jobs:
 
       - name: Hard-only source convention checks
         run: |
-          python3 tools/check_i18n.py
+          python3 tools/check_i18n.py --strict
           python3 tools/check_title_case.py
           python3 - <<'PY'
           from pathlib import Path
