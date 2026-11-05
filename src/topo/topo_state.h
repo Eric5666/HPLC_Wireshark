@@ -114,6 +114,14 @@ public:
     QVector<TopoEvent> events;      ///< 路由变更事件(时间序,供底部表格)
     QVector<TopoAnomaly> anomalies; ///< 异常/冲突记录(按主体合并;独立页签展示)
 
+    /// @brief 是否已有可在 TOPO 窗口展示的拓扑/事件内容。
+    /// @details RestartCount 基线可先于任何拓扑事件建立；这种仅含采样基线的状态不应
+    ///          在网络列表中表现为一个空拓扑。重启事件或异常产生后则应正常显示。
+    bool has_topology_content() const {
+        return first_seen_frame >= 0 || !nodes.isEmpty() || !pending.isEmpty()
+            || !events.isEmpty() || !anomalies.isEmpty();
+    }
+
     /// @brief 逐帧重启次数采样:同一 (TEI, 介质) 的取值回到曾经出现过的值即记一条往返振荡
     /// @details 判据(用户口径):任意一次反向变化即记。以该 (TEI, 介质) 已出现过的取值集合
     ///          为准——取值变成集合内旧值 ⇒ 记一次往返;变成从未见过的新值(如 2/3 之后首次
@@ -248,5 +256,12 @@ private:
     bool note_restart_change(quint32 net_id, quint64 subject, bool is_cco, int rc,
                              qint64 epoch_ms, qint64 frame_index, const TopoEvent& proto);
 };
+
+/// @brief 获取/创建供有效 RestartCount 采样使用的 NID 状态。
+/// @details 普通 MSDU 可能先于任何拓扑管理事件到达；此时仍需保存重启计数基线。
+///          不为 NID==0 或无效计数创建状态，且调用方仍须确认 MSDU 已解析。
+/// @return 状态指针；输入不适合采样时返回 nullptr。
+TopoState* ensure_restart_sample_state(QHash<quint32, TopoState>& states,
+                                       quint32 net_id, int restart_count);
 
 #endif // TOPO_STATE_H

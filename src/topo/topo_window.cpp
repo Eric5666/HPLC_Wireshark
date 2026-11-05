@@ -842,6 +842,7 @@ void TopoWindow::refresh_nids() {
         std::sort(nids.begin(), nids.end());
         for (quint32 nid : nids) {
             const TopoState& st = states->value(nid);
+            if (!st.has_topology_content()) continue;  // 隐藏仅用于 RestartCount 基线的状态
             QString label = QStringLiteral("NID:0x%1").arg(nid, 0, 16);
             if (st.cco_mac)
                 label += QStringLiteral(" CCO:") + format_mac(st.cco_mac);

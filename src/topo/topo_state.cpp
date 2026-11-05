@@ -121,6 +121,17 @@ namespace {
 constexpr qint64 kLinkCompareWindowMs = 30000;
 }  // namespace
 
+TopoState* ensure_restart_sample_state(QHash<quint32, TopoState>& states,
+                                       quint32 net_id, int restart_count) {
+    if (net_id == 0 || restart_count < 0 || restart_count == kRestartCountInvalid)
+        return nullptr;
+    auto it = states.find(net_id);
+    if (it == states.end())
+        it = states.insert(net_id, TopoState());
+    it->nid = net_id;
+    return &it.value();
+}
+
 bool TopoState::note_restart_count(quint16 tei, bool is_rf, int rc,
                                    qint64 epoch_ms, qint64 frame_index) {
     if (!tei || tei == kTeiInvalid) return false;

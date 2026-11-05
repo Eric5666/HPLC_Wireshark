@@ -199,6 +199,30 @@ int main(int argc, char** argv) {
         CHECK(!st.note_restart_origin(0x0E, 5, MAC_A, kRestartCountInvalid, 1005, 6, false, true),
               "D7h 重启次数 0xFF(无该字段)不采样");
     }
+    // D7i: 普通数据帧早于首个拓扑事件时,有效 NID + RestartCount 也建立轻量基线；
+    //      基线-only 状态不显示为空拓扑,后续计数变化可报告且事件侧不重复。
+    {
+        QHash<quint32, TopoState> states;
+        TopoState* st = ensure_restart_sample_state(states, 0x0E, 7);
+        CHECK(st != nullptr && states.size() == 1 && st->nid == 0x0E,
+              "D7i 有效 NID/RestartCount 创建采样状态");
+        CHECK(!st->has_topology_content(), "D7j 仅有计数基线时不显示空拓扑");
+        CHECK(!st->note_restart_origin(0x0E, 5, MAC_A, 7, 1000, 1, false, true),
+              "D7k 首个普通帧只建立 STA 基线");
+        CHECK(st->note_restart_origin(0x0E, 5, MAC_A, 8, 1001, 2, false, true),
+              "D7l 拓扑建档前的后续计数变化仍报重启");
+        CHECK(count_kind(*st, TopoEventKind::StaRestart) == 1 && st->has_topology_content(),
+              "D7m 变化事件可见且只产生一条");
+        TopoEvent assoc = frame(TopoEventKind::AssocReq, 0x0E, MAC_A, 8, 3);
+        st->apply(assoc);
+        CHECK(count_kind(*st, TopoEventKind::StaRestart) == 1,
+              "D7n 后续拓扑事件复用同一基线,不重复报重启");
+        CHECK(ensure_restart_sample_state(states, 0, 4) == nullptr
+                  && ensure_restart_sample_state(states, 0x0F, kRestartCountInvalid) == nullptr
+                  && states.size() == 1,
+              "D7o NID==0/无效 RestartCount 不新建采样状态");
+    }
+
     // D8: 同一帧既走事件侧又走逐帧侧 ⇒ 只报一次
     {
         TopoState st;

@@ -993,7 +993,13 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
     // 已确定后不再被后续帧覆盖(防双模设备载波+无线并存时拓扑颜色跳变)
     {
         bool topo_touched = false;
-        auto ts_it = m_topo_states.find(e.mpdu.net_id);   // find 不新建空状态
+        // 普通 MSDU 的 RestartCount 可能早于首个拓扑管理事件到达。
+        // 有效 NID/计数先建立轻量基线状态，避免丢掉后续比较所需的首个样本；
+        // TopoWindow 会隐藏尚无拓扑/事件内容的基线-only 状态。
+        if (e.msdu.present)
+            ensure_restart_sample_state(m_topo_states, e.mpdu.net_id,
+                                        int(e.msdu.restart_count));
+        auto ts_it = m_topo_states.find(e.mpdu.net_id);
         if (e.mpdu.net_id != 0 && ts_it != m_topo_states.end()) {
             TopoState& ts = ts_it.value();
             // FCH TEI 源优先/目的兜底(覆盖无 MSDU 的帧)
