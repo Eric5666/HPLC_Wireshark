@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
     c.is_rf = true; c.is_rf_known = false; c.epoch_ms = 3000; c.frame_index = 3;
 
     TopoState st;
+    a.nid = b.nid = c.nid = 0x0E;   // 探针用真实 NID(生产不允许 NID==0 的事件进拓扑)
     st.apply(a);
     std::printf("after PLC CCO event:   cco.is_rf=%d is_rf_known=%d\n",
                 (int)st.nodes[1].is_rf, (int)st.nodes[1].is_rf_known);

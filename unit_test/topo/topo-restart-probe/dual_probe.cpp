@@ -19,6 +19,7 @@ int main(int argc, char** argv) {
     // P1 权威路径:AssocCnf link_type=1
     {
         TopoState st; TopoEvent e;
+        e.nid = 0x0E;
         e.kind = TopoEventKind::AssocCnf; e.link_type = 1; e.epoch_ms = 1000;
         e.nodes.append(TeiMacPair{78, MAC78});
         st.apply(e);
@@ -28,6 +29,7 @@ int main(int argc, char** argv) {
     // P2 弱路径:非权威帧首个 link_type=1
     {
         TopoState st; TopoEvent e;
+        e.nid = 0x0E;
         e.kind = TopoEventKind::DiscoverList; e.link_type = 1; e.epoch_ms = 1000;
         e.nodes.append(TeiMacPair{79, MAC79});
         st.apply(e);
@@ -37,6 +39,7 @@ int main(int argc, char** argv) {
     // P3 媒介回退:无 link_type 字段,RF 帧回退 link_type=1
     {
         TopoState st; TopoEvent e;
+        e.nid = 0x0E;
         e.kind = TopoEventKind::DiscoverList; e.link_type = -1;
         e.is_rf = true; e.is_rf_known = true; e.epoch_ms = 1000;
         e.nodes.append(TeiMacPair{80, MAC80});
@@ -47,6 +50,7 @@ int main(int argc, char** argv) {
     // P4 载波不误标
     {
         TopoState st; TopoEvent e;
+        e.nid = 0x0E;
         e.kind = TopoEventKind::AssocCnf; e.link_type = 0; e.epoch_ms = 1000;
         e.nodes.append(TeiMacPair{81, MAC81});
         st.apply(e);
@@ -56,6 +60,7 @@ int main(int argc, char** argv) {
     // P5 CCO 自己发 RF 事件帧 -> CCO 双模
     {
         TopoState st; TopoEvent e;
+        e.nid = 0x0E;
         e.kind = TopoEventKind::Other; e.cco_mac = CCO; e.sender_mac = CCO;
         e.is_rf = true; e.is_rf_known = true; e.epoch_ms = 1000;
         st.apply(e);
@@ -64,6 +69,7 @@ int main(int argc, char** argv) {
     // P6 RF STA 事件不得误标 CCO 双模(CCO is_rf 会翻,见 M2;rf_capable 不应动)
     {
         TopoState st; TopoEvent e;
+        e.nid = 0x0E;
         e.kind = TopoEventKind::Other; e.cco_mac = CCO; e.sender_mac = STA;
         e.is_rf = true; e.is_rf_known = true; e.epoch_ms = 1000;
         st.apply(e);
@@ -72,6 +78,7 @@ int main(int argc, char** argv) {
     // P7 node_link_types 循环:无线条目 -> 双模
     {
         TopoState st; TopoEvent e;
+        e.nid = 0x0E;
         e.kind = TopoEventKind::AssocCnf; e.epoch_ms = 1000;
         e.node_link_types.append(qMakePair<quint16, quint8>(82, 1));
         st.apply(e);
@@ -81,6 +88,7 @@ int main(int argc, char** argv) {
     // P8 逐帧路径:CCO 节点已存在时 note_rf_capable(1, RF) 置位
     {
         TopoState st; TopoEvent e;
+        e.nid = 0x0E;
         e.kind = TopoEventKind::Other; e.cco_mac = CCO; e.epoch_ms = 1000;
         st.apply(e);
         const bool touched = st.note_rf_capable(1, true);

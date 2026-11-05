@@ -18,6 +18,7 @@ static int failures = 0;
 static TopoEvent assoc(quint64 sender, quint64 subject_mac, int restart, qint64 idx) {
     TopoEvent e;
     e.kind = TopoEventKind::AssocReq;
+    e.nid = 0x0E;   // 探针用真实 NID(生产不允许 NID==0 的事件进拓扑)
     e.restart_count = restart;
     e.sender_mac = sender;
     if (subject_mac) e.nodes.append({0, subject_mac});
@@ -167,7 +168,7 @@ int main(int argc, char** argv) {
         learn.epoch_ms = 1001;
         learn.nodes.append({kTeiCco, MAC_CCO});
         st.apply(learn);
-        CHECK(st.mac_to_tei.value(TopoState::restart_base_key(0x0E, MAC_CCO), quint16(0)) == kTeiCco, "D5a 已学到 TEI=1 → CCO MAC");
+        CHECK(st.mac_to_tei.value(TopoState::nid_mac_key(0x0E, MAC_CCO), quint16(0)) == kTeiCco, "D5a 已学到 TEI=1 → CCO MAC");
         CHECK(st.cco_mac == 0, "D5b 该帧未给 cco_mac");
         st.apply(frame(TopoEventKind::AssocCnf, 0x0E, MAC_CCO, 2, 2));
         st.apply(frame(TopoEventKind::AssocCnf, 0x0E, MAC_CCO, 3, 3));
@@ -309,13 +310,13 @@ int main(int argc, char** argv) {
         learn.epoch_ms = 1001;
         learn.nodes.append({kTeiCco, MAC_X});
         st.apply(learn);
-        CHECK(st.mac_to_tei.value(TopoState::restart_base_key(0x0E, MAC_X), quint16(0)) == kTeiCco,
+        CHECK(st.mac_to_tei.value(TopoState::nid_mac_key(0x0E, MAC_X), quint16(0)) == kTeiCco,
               "D14a NID 0x0E 学到 (NID, MAC_X) → TEI=1");
         // NID 0x14:同一 MAC 以 TEI=5 入网,重启 5→6 应报 StaRestart
         TopoEvent f1 = frame(TopoEventKind::AssocCnf, 0x14, MAC_X, 5, 2);
         f1.nodes.append({5, MAC_X});
         st.apply(f1);
-        CHECK(st.mac_to_tei.value(TopoState::restart_base_key(0x14, MAC_X), quint16(0)) == 5,
+        CHECK(st.mac_to_tei.value(TopoState::nid_mac_key(0x14, MAC_X), quint16(0)) == 5,
               "D14b NID 0x14 学到 (NID, MAC_X) → TEI=5,两网映射并存");
         TopoEvent f2 = frame(TopoEventKind::AssocCnf, 0x14, MAC_X, 6, 3);
         f2.nodes.append({5, MAC_X});
@@ -323,6 +324,72 @@ int main(int argc, char** argv) {
         CHECK(count_kind(st, TopoEventKind::StaRestart) == 1
               && count_kind(st, TopoEventKind::CcoRestart) == 0,
               "D14c NID 0x14 计数 5→6 报 StaRestart、不报 CcoRestart");
+    }
+    // D15:组合键取完整 quint32 NID —— 同一 MAC 在 NID 0x123456(CCO)与 0x003456(STA)互不串
+    //     (旧打包只取 NID 低 16bit,两网键相同 ⇒ 0x003456 的 STA 会被误判 CCO)
+    {
+        TopoState st;
+        const quint64 MAC_Y = 0x112233445566ULL;
+        // NID 0x123456:发现列表学到 (0x123456, MAC_Y) → TEI 1
+        TopoEvent learn;
+        learn.kind = TopoEventKind::DiscoverList;
+        learn.nid = 0x123456;
+        learn.restart_count = -1;
+        learn.frame_index = 1;
+        learn.epoch_ms = 1001;
+        learn.nodes.append({kTeiCco, MAC_Y});
+        st.apply(learn);
+        CHECK(st.mac_to_tei.value(TopoState::nid_mac_key(0x123456, MAC_Y), quint16(0)) == kTeiCco,
+              "D15a NID 0x123456 学到 (NID, MAC_Y) → TEI=1");
+        // NID 0x003456:同一 MAC 以 TEI=5 入网,重启 5→6 应报 StaRestart(不报 CcoRestart)
+        TopoEvent f1 = frame(TopoEventKind::AssocCnf, 0x003456, MAC_Y, 5, 2);
+        f1.nodes.append({5, MAC_Y});
+        st.apply(f1);
+        CHECK(st.mac_to_tei.value(TopoState::nid_mac_key(0x003456, MAC_Y), quint16(0)) == 5,
+              "D15b NID 0x003456 学到 (NID, MAC_Y) → TEI=5,仅高 8bit 不同的两网映射并存");
+        TopoEvent f2 = frame(TopoEventKind::AssocCnf, 0x003456, MAC_Y, 6, 3);
+        f2.nodes.append({5, MAC_Y});
+        st.apply(f2);
+        CHECK(count_kind(st, TopoEventKind::StaRestart) == 1
+              && count_kind(st, TopoEventKind::CcoRestart) == 0,
+              "D15c NID 0x003456 计数 5→6 报 StaRestart、不报 CcoRestart");
+        CHECK(st.mac_to_tei.value(TopoState::nid_mac_key(0x123456, MAC_Y), quint16(0)) == kTeiCco,
+              "D15d NID 0x123456 的映射仍为 TEI=1");
+        // 反向:0x123456 的 CCO 基线独立,计数 7→8 报 CcoRestart
+        TopoEvent f3 = frame(TopoEventKind::AssocCnf, 0x123456, MAC_Y, 7, 4);
+        f3.nodes.append({kTeiCco, MAC_Y});
+        st.apply(f3);
+        TopoEvent f4 = frame(TopoEventKind::AssocCnf, 0x123456, MAC_Y, 8, 5);
+        f4.nodes.append({kTeiCco, MAC_Y});
+        st.apply(f4);
+        CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1
+              && count_kind(st, TopoEventKind::StaRestart) == 1,
+              "D15e NID 0x123456 计数 7→8 报 CcoRestart,两网基线互不串");
+    }
+    // D16:网络标识符不完整(NID==0)的事件不进拓扑 —— 不学节点、不建基线、不报重启
+    {
+        TopoState st;
+        const quint64 MAC_Z = 0x223344556677ULL;
+        TopoEvent bad;
+        bad.kind = TopoEventKind::DiscoverList;
+        bad.nid = 0;
+        bad.restart_count = 3;
+        bad.frame_index = 1;
+        bad.epoch_ms = 1001;
+        bad.nodes.append({kTeiCco, MAC_Z});
+        st.apply(bad);
+        CHECK(st.mac_to_tei.isEmpty() && st.nodes.isEmpty() && st.events.isEmpty(),
+              "D16a NID==0 的发现列表不学节点、不记事件");
+        TopoEvent bad2 = frame(TopoEventKind::AssocCnf, 0, MAC_Z, 4, 2);
+        bad2.nodes.append({5, MAC_Z});
+        st.apply(bad2);
+        CHECK(count_kind(st, TopoEventKind::StaRestart) == 0
+              && count_kind(st, TopoEventKind::CcoRestart) == 0
+              && st.mac_to_tei.isEmpty(),
+              "D16b NID==0 的关联确认不建基线、不报重启");
+        st.note_restart_origin(0, 5, MAC_Z, 5, 2002, 3, false, true);
+        CHECK(!st.note_restart_origin(0, 5, MAC_Z, 6, 2003, 4, false, true),
+              "D16c note_restart_origin 拒绝 NID==0,两次采样均不建基线");
     }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);

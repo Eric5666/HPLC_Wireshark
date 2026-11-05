@@ -79,6 +79,23 @@ struct TopoAnomaly {
     qint64  last_frame = -1;  ///< 最近来源帧序号
 };
 
+/// @brief (NID, MAC) 组合键:网络标识符用完整 quint32(GW HDC1.0 为 24bit,有效 1~16777215;
+///        GW HDC2.0 为 16bit;南网 SNID 合并后 5bit),MAC 取低 48bit;两者都不截断,
+///        仅高位不同的网络也不会串键(旧 quint64 打包只取 NID 低 16bit,已作废)。
+struct NidMacKey {
+    quint32 nid = 0;
+    quint64 mac = 0;
+    bool operator==(const NidMacKey &o) const { return nid == o.nid && mac == o.mac; }
+};
+/// @brief NidMacKey 的哈希:不调用 qHashMulti(不同 Qt 小版本可用性不一),直接整数混叠。
+inline size_t qHash(const NidMacKey &k, size_t seed = 0) {
+    size_t h = seed + size_t(0x9e3779b97f4a7c15ULL);
+    h ^= size_t(k.nid) * size_t(0x9e3779b97f4a7c15ULL);
+    h ^= size_t(quint32(k.mac)) + size_t(0x9e3779b97f4a7c15ULL) + (h << 6) + (h >> 2);
+    h ^= size_t(quint32(k.mac >> 32)) + size_t(0x9e3779b97f4a7c15ULL) + (h << 6) + (h >> 2);
+    return h;
+}
+
 /// @brief 单个 NID 网络的拓扑状态(节点 + 路由 + 事件历史)
 class TopoState {
 public:
@@ -88,7 +105,7 @@ public:
     qint64 first_seen_frame = -1; ///< 首次识别到该 NID 的帧序号(-1=未知)
     QHash<quint16, TopoNode> nodes; ///< TEI → 节点(含 CCO TEI=1)
     QHash<quint64, TopoNode> pending; ///< MAC → 正在入网节点(TEI 未分配,关联请求阶段)
-    QHash<quint64, quint16> mac_to_tei; ///< (NID, MAC) → TEI 快速索引(键 = restart_base_key(NID, MAC),先分 NID 再分 MAC;离线标记按 MAC 查找;与 nodes 双向一致)
+    QHash<NidMacKey, quint16> mac_to_tei; ///< (NID, MAC) → TEI 快速索引(键 = nid_mac_key(NID, MAC),先分 NID 再分 MAC;离线标记按 MAC 查找;与 nodes 双向一致)
     QHash<quint16, CommRateInfo> comm_rates; ///< TEI → 通讯成功率(成功率上报)
     QHash<quint16, QVector<quint16>> neighbors; ///< TEI → 邻居 TEI 列表(发现列表位图,按帧更新)
     QHash<quint16, QHash<quint16, int>> neighbor_counts; ///< STA TEI → (邻居 TEI → 发现列表接收数,累计)
@@ -155,12 +172,10 @@ void apply(const TopoEvent& e);
     /// @brief 计算各节点层级(从 CCO=0 沿父链向下;不可达=-1)
     QHash<quint16, int> compute_levels() const;
 
-    /// @brief (NID, MAC) → 64bit 组合键:NID 取低 16bit、MAC 取低 48bit,两段不重叠
-    /// @note GW HDC1.0 的 NID 是 24bit(有效 1~16777215),此处只取低 16bit:两个仅高 8bit
-    ///       不同的 1.0 网络若落入同一 TopoState 会串键;生产按完整 NID 分状态(mainwindow
-    ///       m_topo_states 以完整 quint32 net_id 为键)故不触发,探针 NID 均 < 0x10000 亦不触发。
-    ///       NW SNID 合并后 5bit(有效 1~31)、GW HDC2.0 NID 16bit(有效 1~65535)均全取。
-    static quint64 restart_base_key(quint32 net_id, quint64 mac);
+    /// @brief (NID, MAC) → 组合键:NID 用完整 quint32、MAC 取低 48bit
+    /// @note GW HDC1.0 的 NID 是 24bit(有效 1~16777215)、HDC2.0 是 16bit(有效 1~65535)、
+    ///       NW SNID 合并后 5bit(有效 1~31),三者全取,不截断。
+    static NidMacKey nid_mac_key(quint32 net_id, quint64 mac);
 
     /// @brief 取节点 MAC(TEI 未知返回 0)
     quint64 mac_of(quint16 tei) const;
@@ -169,7 +184,7 @@ private:
     /// @brief 维护 mac_to_tei 双向一致(处理"同一 MAC 先后对应不同 TEI"和"同一 TEI 先后对应不同 MAC")
     /// @details 两个方向若"旧节点仍在线"则同时记一条异常/冲突(MacMultipleTei / TeiMultipleMac);
     ///          旧节点已离线(正常离网后重入网换 TEI)不计,避免把正常重入网当冲突。
-    ///          索引按 (NID, MAC) 分键(键 = restart_base_key):同 MAC 在不同 NID 下可映射到
+    ///          索引按 (NID, MAC) 分键(键 = nid_mac_key):同 MAC 在不同 NID 下可映射到
     ///          不同 TEI;nodes 表仍按 TEI 单键,故"同一 TEI 多 MAC"的节点侧校验仍读共享表,
     ///          删除旧映射时只删本 NID 的键,不动别 NID 的映射。
     void index_mac(quint32 net_id, quint16 tei, quint64 mac, qint64 epoch_ms = 0, qint64 frame_index = -1);
@@ -197,14 +212,14 @@ private:
     /// @return 是否移除了节点
     bool remove_node_by_mac(quint32 net_id, quint64 mac);
 
-    /// @brief 重启次数基线(键 = restart_base_key(NID, 主体 MAC))
+    /// @brief 重启次数基线(键 = nid_mac_key(NID, 主体 MAC))
     /// @details 两个哈希都不能省 NID:
     ///          - CCO 旧实现是**单一全局值**(m_last_restart_count,已删除),多 NID 同时抓包时互相踩;
     ///          - STA 旧实现只有 MAC,不同 NID 下同 MAC 会串(用户 2026-11 口径:先分 NID,再分 MAC)。
-    ///          身份记忆 m_cco_macs 同样按 (NID, MAC) 分键(键 = restart_base_key),同 MAC 在
+    ///          身份记忆 m_cco_macs 同样按 (NID, MAC) 分键(键 = nid_mac_key),同 MAC 在
     ///          不同 NID 下的 CCO 身份互不串。
-    QHash<quint64, int> m_cco_restart_count;  ///< CCO 主体基线
-    QHash<quint64, int> m_sta_restart_count;  ///< STA 主体基线
+    QHash<NidMacKey, int> m_cco_restart_count;  ///< CCO 主体基线
+    QHash<NidMacKey, int> m_sta_restart_count;  ///< STA 主体基线
 
     /// @brief 主体身份判定(CCO/STA)的**唯一入口**:apply() 事件侧与逐帧采样侧都走这里,
     ///        避免两条路径判据集合不同导致同一次重启被报成 STA/CCO 两条(M1),
@@ -212,10 +227,10 @@ private:
     /// @details 依据(任一成立即 CCO):
     ///   1. src_tei == kTeiCco —— 南网规约 / HDC 2.0 5.3.3.1:CCO 的 TEI 固定为 1
     ///      (事件侧拿不到 TEI 时传 0,表示"该路径没有 TEI 信息");
-    ///   2. (NID, mac) 已在 m_cco_macs 身份记忆里(键 = restart_base_key(NID, MAC),先分 NID 再分 MAC);
+    ///   2. (NID, mac) 已在 m_cco_macs 身份记忆里(键 = nid_mac_key(NID, MAC),先分 NID 再分 MAC);
     ///   3. 本帧 cco_mac == mac;
     ///   4. 本帧 nodes 含 (kTeiCco, mac);
-    ///   5. (NID, mac) 已映射到 TEI=1(mac_to_tei,键 = restart_base_key(NID, MAC));
+    ///   5. (NID, mac) 已映射到 TEI=1(mac_to_tei,键 = nid_mac_key(NID, MAC));
     ///   6. mac == 0 且事件种类是发现列表 —— 发现列表是 CCO 广播,缺源 MAC 时按 CCO 归属
     ///      (否则会回落到 nodes 首条,把 CCO 重启记到无关 STA 头上)。
     ///   另:拓扑事件里 discover_src_tei 记的是路由/位图条目的 STA TEI,不是发送方 TEI,故**不用**它判 CCO。
@@ -225,7 +240,7 @@ private:
     /// @return true=CCO 主体
     bool resolve_is_cco(quint32 net_id, quint16 src_tei, quint64 mac, const TopoEvent* ev);
 
-    QSet<quint64> m_cco_macs;   ///< CCO 身份记忆(键 = restart_base_key(NID, MAC),先分 NID 再分 MAC;防归属漂移)
+    QSet<NidMacKey> m_cco_macs;   ///< CCO 身份记忆(键 = nid_mac_key(NID, MAC),先分 NID 再分 MAC;防归属漂移)
 
     /// @brief 重启变化记录(CCO/STA 共用实现):比较基线、变化即生成重启事件并更新基线
     /// @param[in] proto 事件模板(沿用其 nid/is_rf/来源信息),只有 kind/desc/restart_count/主体被改写

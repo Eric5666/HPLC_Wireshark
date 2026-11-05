@@ -26,6 +26,7 @@ static int g_fail = 0;
 static TopoEvent node_event(TopoEventKind kind, quint16 tei, quint64 mac, qint64 idx) {
     TopoEvent e;
     e.kind = kind;
+    e.nid = 0x0E;   // 探针用真实 NID(生产不允许 NID==0 的事件进拓扑)
     e.epoch_ms = 1000 + idx;
     e.frame_index = idx;
     e.nodes.append(TeiMacPair{tei, mac});
@@ -67,6 +68,7 @@ int main(int argc, char** argv) {
         TopoState st;
         st.apply(node_event(TopoEventKind::AssocCnf, 5, MAC_A, 1));
         TopoEvent leave;
+        leave.nid = 0x0E;
         leave.kind = TopoEventKind::LeaveInd;
         leave.epoch_ms = 1002;
         leave.frame_index = 2;
@@ -92,6 +94,7 @@ int main(int argc, char** argv) {
         TopoState st;
         st.apply(node_event(TopoEventKind::AssocCnf, 5, MAC_A, 1));
         TopoEvent leave;
+        leave.nid = 0x0E;
         leave.kind = TopoEventKind::LeaveInd;
         leave.frame_index = 2;
         leave.leaves.append(MAC_A);

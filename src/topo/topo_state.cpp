@@ -198,7 +198,7 @@ void TopoState::index_mac(quint32 net_id, quint16 tei, quint64 mac, qint64 epoch
     //       → 把旧 TEI 节点的 MAC 清零,避免之后按 MAC 查找时 stale 命中。
     //       旧 TEI 若仍在线 ⇒ 同一 MAC 同时占两个 TEI(重复组网/身份冲突),记异常;
     //       旧 TEI 已离线 ⇒ 正常离网后重入网换 TEI,不计。
-    auto it = mac_to_tei.find(restart_base_key(net_id, mac));
+    auto it = mac_to_tei.find(nid_mac_key(net_id, mac));
     if (it != mac_to_tei.end() && it.value() != tei) {
         const quint16 old_tei = it.value();
         auto nit = nodes.find(old_tei);
@@ -220,17 +220,17 @@ void TopoState::index_mac(quint32 net_id, quint16 tei, quint64 mac, qint64 epoch
             if (nit.value().status != NodeStatus::Offline)
                 note_anomaly(TopoAnomalyKind::TeiMultipleMac, tei, mac, old_mac, tei,
                              nit.value().is_rf, 0, 0, epoch_ms, frame_index);
-            auto oit = mac_to_tei.find(restart_base_key(net_id, old_mac));
+            auto oit = mac_to_tei.find(nid_mac_key(net_id, old_mac));
             if (oit != mac_to_tei.end() && oit.value() == tei)
                 mac_to_tei.erase(oit);
         }
     }
-    mac_to_tei[restart_base_key(net_id, mac)] = tei;
+    mac_to_tei[nid_mac_key(net_id, mac)] = tei;
 }
 
 bool TopoState::remove_node_by_mac(quint32 net_id, quint64 mac) {
     if (!mac) return false;
-    const auto iit = mac_to_tei.find(restart_base_key(net_id, mac));
+    const auto iit = mac_to_tei.find(nid_mac_key(net_id, mac));
     if (iit == mac_to_tei.end()) return false;
     const quint16 old_tei = iit.value();
     if (old_tei == kTeiCco) return false;  // CCO 永不移除
@@ -245,25 +245,25 @@ bool TopoState::remove_node_by_mac(quint32 net_id, quint64 mac) {
     return true;
 }
 
-quint64 TopoState::restart_base_key(quint32 net_id, quint64 mac) {
-    // NID 取低 16bit(规约网络标识 ≤12bit)、MAC 取低 48bit,两段不重叠 ⇒ 不会串键
-    return (quint64(net_id & 0xFFFFu) << 48) | (mac & 0xFFFFFFFFFFFFULL);
+NidMacKey TopoState::nid_mac_key(quint32 net_id, quint64 mac) {
+    // NID 用完整 quint32(24bit 全取)、MAC 取低 48bit;不截断,不串键。
+    return NidMacKey{net_id, mac & 0xFFFFFFFFFFFFULL};
 }
 
 bool TopoState::resolve_is_cco(quint32 net_id, quint16 src_tei, quint64 mac, const TopoEvent* ev) {
     bool cco = false;
     if (src_tei == kTeiCco) cco = true;                                     // 1. TEI 固定为 1
-    if (!cco && mac && m_cco_macs.contains(restart_base_key(net_id, mac))) cco = true;  // 2. 身份记忆(NID, MAC)
+    if (!cco && mac && m_cco_macs.contains(nid_mac_key(net_id, mac))) cco = true;  // 2. 身份记忆(NID, MAC)
     if (!cco && ev && mac && ev->cco_mac && ev->cco_mac == mac) cco = true; // 3. 本帧 CCO MAC
     if (!cco && ev && mac) {                                                // 4. 本帧 nodes 的 TEI=1 条目
         for (const TeiMacPair& p : ev->nodes)
             if (p.tei == kTeiCco && p.mac == mac) { cco = true; break; }
     }
-    if (!cco && mac && mac_to_tei.value(restart_base_key(net_id, mac), quint16(0)) == kTeiCco) cco = true;  // 5. TEI=1 映射(NID, MAC)
+    if (!cco && mac && mac_to_tei.value(nid_mac_key(net_id, mac), quint16(0)) == kTeiCco) cco = true;  // 5. TEI=1 映射(NID, MAC)
     // 6. 发现列表是 CCO 广播:缺源 MAC 时按 CCO 归属
     //    (否则会走 nodes 首条回落,把 CCO 重启记到发现列表里第一个 STA 头上 —— 实测缺陷 M2)
     if (!cco && !mac && ev && ev->kind == TopoEventKind::DiscoverList) cco = true;
-    if (cco && mac) m_cco_macs.insert(restart_base_key(net_id, mac));  // 身份记忆(NID, MAC):防后续 cco_mac 缺失时漂移成 STA
+    if (cco && mac) m_cco_macs.insert(nid_mac_key(net_id, mac));  // 身份记忆(NID, MAC):防后续 cco_mac 缺失时漂移成 STA
     return cco;
 }
 
@@ -272,8 +272,8 @@ bool TopoState::note_restart_change(quint32 net_id, quint64 subject, bool is_cco
     // CCO 允许"无 MAC 主体"(subject==0 ⇒ 每 NID 一条 CCO 基线);STA 必须有 MAC
     if ((!subject && !is_cco) || rc < 0 || rc == kRestartCountInvalid)
         return false;   // 0xFF=无该字段(单跳简头等)
-    const quint64 key = restart_base_key(net_id, subject);
-    QHash<quint64, int>& base = is_cco ? m_cco_restart_count : m_sta_restart_count;
+    const NidMacKey key = nid_mac_key(net_id, subject);
+    QHash<NidMacKey, int>& base = is_cco ? m_cco_restart_count : m_sta_restart_count;
     const auto it = base.constFind(key);
     const bool changed = (it != base.constEnd() && it.value() != rc);
     const int prev = (it == base.constEnd()) ? -1 : it.value();
@@ -297,6 +297,8 @@ bool TopoState::note_restart_change(quint32 net_id, quint64 subject, bool is_cco
 bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src_mac, int rc,
                                     qint64 epoch_ms, qint64 frame_index,
                                     bool is_rf, bool is_rf_known) {
+    // 网络标识符不完整(NID==0,两规约里 0 均无效)不采样:不建基线、不报重启。
+    if (net_id == 0) return false;
     if (rc < 0 || rc == kRestartCountInvalid) return false;   // 无该字段(单跳简头等)不采样
     // 身份判定统一走 resolve_is_cco(TEI 固定 1 / 身份记忆 / cco_mac / mac_to_tei)
     const bool is_cco = resolve_is_cco(net_id, src_tei, src_mac, nullptr);
@@ -309,6 +311,8 @@ bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src
 }
 
 void TopoState::apply(const TopoEvent& e) {
+    // 网络标识符不完整(NID==0,两规约里 0 均无效)的事件不进拓扑:不学节点、不记事件。
+    if (e.nid == 0) return;
     nid = e.nid;
     // 南网发现列表上行路由变化检测:若 UpRoute 条目的下一跳与当前父节点
     // 不同,则为拓扑变化,入表记录。必须在下方状态更新前判断。
@@ -357,7 +361,7 @@ void TopoState::apply(const TopoEvent& e) {
     //    完全看不到(实测漏报),故去掉事件种类白名单。
     //  - CCO 的 TEI 固定为 1(南网规约 / HDC 2.0 5.3.3.1):主体判定用「本帧 CCO MAC」、
     //    「MAC 已映射到 TEI=1」、或「本帧 nodes 里 (TEI=1, 该 MAC)」三条依据;其余按 STA。
-    //  - 分键 = restart_base_key(NID, 主体 MAC):CCO 旧基线是单一全局值(多 NID 互相踩),
+    //  - 分键 = nid_mac_key(NID, 主体 MAC):CCO 旧基线是单一全局值(多 NID 互相踩),
     //    STA 旧基线只有 MAC(不同 NID 下同 MAC 会串)。
     //  - 已知代价:事件量上升(以前漏报的真实重启现在会报),且 CcoRestart/StaRestart 是插件
     //    API 事件(plugin/host/js_backend.cpp:47、lua_backend.cpp:65 → ccoRestart/staRestart),
@@ -506,7 +510,7 @@ void TopoState::apply(const TopoEvent& e) {
     for (quint64 mac : e.leaves) {
         if (!mac) continue;
         bool done = false;
-        auto iit = mac_to_tei.find(restart_base_key(e.nid, mac));
+        auto iit = mac_to_tei.find(nid_mac_key(e.nid, mac));
         if (iit != mac_to_tei.end()) {
             auto nit = nodes.find(iit.value());
             if (nit != nodes.end() && nit.value().mac == mac) {

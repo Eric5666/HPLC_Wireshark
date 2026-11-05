@@ -935,6 +935,8 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
     // 后续事件取拷贝应用,不改写存储的 extras。
     auto apply_one_topo_event = [&](TopoEvent& te) {
         te.nid = e.mpdu.net_id;
+        // 网络标识符不完整(NID==0,两规约里 0 均无效)不进拓扑:不建状态、不记日志。
+        if (te.nid == 0) return;
         te.epoch_ms = e.epoch_ms;
         // 接入方式判定口径:
         // - 国网(GW_2022)关联确认/代理变更确认:解析层已从「链路类型」字段判定
@@ -979,7 +981,7 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             || !e.msdu.topo_event.rssi_entries.isEmpty()
             || e.msdu.topo_event.proxy_tei != kTeiInvalid)) {
         auto ts_it = m_topo_states.find(e.mpdu.net_id);
-        if (ts_it != m_topo_states.end()) {
+        if (e.mpdu.net_id != 0 && ts_it != m_topo_states.end()) {
             ts_it.value().apply_channel_info(e.mpdu.src_tei, e.msdu.topo_event);
             if (m_topo_window) m_topo_window->mark_dirty();
         }
@@ -992,7 +994,7 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
     {
         bool topo_touched = false;
         auto ts_it = m_topo_states.find(e.mpdu.net_id);   // find 不新建空状态
-        if (ts_it != m_topo_states.end()) {
+        if (e.mpdu.net_id != 0 && ts_it != m_topo_states.end()) {
             TopoState& ts = ts_it.value();
             // FCH TEI 源优先/目的兜底(覆盖无 MSDU 的帧)
             const quint16 t = e.mpdu.src_tei ? e.mpdu.src_tei : e.mpdu.dst_tei;
@@ -1187,6 +1189,8 @@ void MainWindow::replay_topo_history() {
         const TopoLogItem& it = m_topo_log[i];
         if (it.frame_index > m_topo_hist_frame)
             break;  // 日志按帧序追加,后续事件不属于本次回放
+        // 网络标识符不完整(NID==0)的旧日志事件不回放(不建空状态)
+        if (it.event.nid == 0) continue;
         m_topo_hist_states[it.event.nid].apply(it.event);
     }
     m_topo_hist_replayed = m_topo_hist_frame;

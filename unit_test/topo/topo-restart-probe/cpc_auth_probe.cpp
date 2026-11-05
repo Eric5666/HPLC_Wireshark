@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
     // P1
     {
         TopoState st; TopoEvent a, b;
+        a.nid = 0x0E; b.nid = 0x0E;
         a.kind = TopoEventKind::ChangeProxyCnf; a.link_type = 1; a.epoch_ms = 1000;
         a.routes.append({90, 1});
         b.kind = TopoEventKind::AssocCnf; b.link_type = 0; b.epoch_ms = 2000;
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
     // P2
     {
         TopoState st; TopoEvent a, b;
+        a.nid = 0x0E; b.nid = 0x0E;
         a.kind = TopoEventKind::AssocCnf; a.link_type = 0; a.epoch_ms = 1000;
         a.routes.append({91, 1});
         b.kind = TopoEventKind::ChangeProxyCnf; b.link_type = 1; b.epoch_ms = 2000;
@@ -41,6 +43,7 @@ int main(int argc, char** argv) {
     // P3
     {
         TopoState st; TopoEvent a, b;
+        a.nid = 0x0E; b.nid = 0x0E;
         a.kind = TopoEventKind::ChangeProxyCnf; a.link_type = -1; a.epoch_ms = 1000;
         a.routes.append({92, 1});
         b.kind = TopoEventKind::AssocCnf; b.link_type = 1; b.epoch_ms = 2000;
@@ -53,6 +56,7 @@ int main(int argc, char** argv) {
     // P4
     {
         TopoState st; TopoEvent a, b;
+        a.nid = 0x0E; b.nid = 0x0E;
         a.kind = TopoEventKind::ChangeProxyReq; a.link_type = 1; a.epoch_ms = 1000;
         a.routes.append({93, 1});
         b.kind = TopoEventKind::AssocCnf; b.link_type = 0; b.epoch_ms = 2000;

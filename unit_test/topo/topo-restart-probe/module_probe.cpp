@@ -15,6 +15,7 @@ static int g_fail = 0;
 static TopoEvent assoc_req(quint64 mac, quint8 module_type, qint64 idx) {
     TopoEvent e;
     e.kind = TopoEventKind::AssocReq;
+    e.nid = 0x0E;   // 探针用真实 NID(生产不允许 NID==0 的事件进拓扑)
     e.module_type = module_type;
     e.nodes.append(TeiMacPair{0, mac});
     e.epoch_ms = 1000 + idx;
@@ -25,6 +26,7 @@ static TopoEvent assoc_req(quint64 mac, quint8 module_type, qint64 idx) {
 static TopoEvent assoc_cnf(quint16 tei, quint64 mac, qint64 idx) {
     TopoEvent e;
     e.kind = TopoEventKind::AssocCnf;
+    e.nid = 0x0E;   // 探针用真实 NID(生产不允许 NID==0 的事件进拓扑)
     e.nodes.append(TeiMacPair{tei, mac});
     e.epoch_ms = 2000 + idx;
     e.frame_index = idx;

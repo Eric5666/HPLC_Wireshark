@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
     // M2c:未知介质事件 -> 仍 (0, known)
     {
         TopoState st; TopoEvent a, b, c;
+        a.nid = 0x0E; b.nid = 0x0E; c.nid = 0x0E;
         a.kind = TopoEventKind::Other; a.cco_mac = CCO;
         a.is_rf = false; a.is_rf_known = true; a.epoch_ms = 1000;
         b.kind = TopoEventKind::Other; b.cco_mac = CCO;
@@ -33,6 +34,7 @@ int main(int argc, char** argv) {
     // M2d:反向先到先得:RF CCO 事件先到 -> (1, known),PLC 事件后到不翻回
     {
         TopoState st; TopoEvent a, b;
+        a.nid = 0x0E; b.nid = 0x0E;
         a.kind = TopoEventKind::Other; a.cco_mac = CCO;
         a.is_rf = true; a.is_rf_known = true; a.epoch_ms = 1000;
         b.kind = TopoEventKind::Other; b.cco_mac = CCO;
@@ -45,6 +47,7 @@ int main(int argc, char** argv) {
     // M7a:child_teis 首次写入锁定:无线先到 -> (1,known),载波后到不翻回
     {
         TopoState st; TopoEvent a, b;
+        a.nid = 0x0E; b.nid = 0x0E;
         a.kind = TopoEventKind::ChangeProxyCnf; a.link_type = 1; a.epoch_ms = 1000;
         a.child_teis.append(90);
         b.kind = TopoEventKind::ChangeProxyCnf; b.link_type = 0; b.epoch_ms = 2000;
@@ -57,6 +60,7 @@ int main(int argc, char** argv) {
     // M7b:node_link_types kind 门:非权威 kind 不写;权威 kind 照常写并锁定
     {
         TopoState st; TopoEvent a, b;
+        a.nid = 0x0E; b.nid = 0x0E;
         a.kind = TopoEventKind::Other; a.epoch_ms = 1000;
         a.node_link_types.append(qMakePair<quint16, quint8>(78, 1));
         st.apply(a);
