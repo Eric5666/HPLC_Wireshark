@@ -28,10 +28,14 @@ enum class NW_2021_AckNackBid : quint8 {
     Deny    = 0x01,  ///< 否认
 };
 
-/// @brief 数据转发帧业务标识(表9)
+/// @brief 数据转发帧业务标识(表9,必须按 (报文端口号, 业务标识) 联合判定)
+/// @note  释义统一由 src/protocol/common/nw_app_bid.cpp 提供(2021/2026 共用):
+///        应用层 6.3.2 表9(2021/2026 共用;2026 为超集)。
 enum class NW_2021_DataForwardBid : quint8 {
-    ToDevice = 0x00,  ///< 数据透传至设备(端口 0x11)
-    ToModule = 0x01,  ///< 数据透传至模块(端口 0x13)
+    ToDevice               = 0x00,  ///< 数据透传至设备(端口 0x11,SPLC 表9)
+    ToModule               = 0x01,  ///< 数据透传至模块(端口 0x13,SPLC 表9)
+    ConcurrentMeterReading = 0x02,  ///< 并发抄读端设备(端口 0x11,SPLC 表9)
+    InterStationComm       = 0x03,  ///< 站点间通信(端口 0x13,SPLC 表9)
 };
 
 /// @brief 命令帧业务标识(表9)
@@ -44,7 +48,8 @@ enum class NW_2021_CommandBid : quint8 {
     NodeInfoQuery        = 0x05,  ///< 从节点信息查询(0x11)
     IssueCommAddrMap     = 0x06,  ///< 下发通信地址映射表列表(0x11)
     QueryNodeRunStatus   = 0x07,  ///< 查询从节点运行状态信息(0x13)
-    QueryNodeChannelInfo = 0x08,  ///< 查询从节点信道信息(0x13)
+    QueryNodeChannelInfo = 0x08,  ///< 查询从节点信道信息(0x13,SPLC 表9)
+    QueryModuleRunParam  = 0x09,  ///< 查询模块运行参数(0x13,SPLC 表9)
     PhaseIdent           = 0x10,  ///< 台区户变关系/相位识别(0x11)
     TestFrame            = 0xF0,  ///< 测试帧(0x11)
 };

@@ -11,6 +11,7 @@
 #include "common/crc.h"
 #include "i18n.h"
 #include "parse_anomaly.h"
+#include "nw_app_bid.h"
 
 namespace {
 
@@ -188,7 +189,7 @@ struct MMeI18nReg {
         trl::register_en("扩展网络冲突上报", "MMeExtNetworkConflictReport");
         trl::register_en("MMe", "MMe");
         trl::register_en("应用报文(截断)", "APP (truncated)");
-        trl::register_en("应用报文 %1 (BID=0x%2%3)", "APP %1 (BID=0x%2%3)");
+        trl::register_en("应用层报文 (%1)", "Application Layer Packet (%1)");
         trl::register_en(" (CRC 缺失)", " (CRC missing)");
         trl::register_en(" (无线发现节点列表截断)", " (RF DiscoverNodeList truncated)");
         trl::register_en("无线发现节点列表 (%1 个信息单元)", "RF DiscoverNodeList (%1 info units)");
@@ -315,6 +316,9 @@ struct MMeI18nReg {
         trl::register_en("否认", "NACK");
         trl::register_en("数据透传至设备", "Data Forward to Device");
         trl::register_en("数据透传至模块", "Data Forward to Module");
+        trl::register_en("并发抄读端设备", "Concurrent Meter Reading");
+        trl::register_en("站点间通信", "Inter-Station Communication");
+        trl::register_en("查询模块运行参数", "Query Module Running Parameters");
         trl::register_en("查询终端搜索结果", "Query Meter Search Result");
         trl::register_en("下发搜索终端列表", "Distribute Meter Search List");
         trl::register_en("文件传输", "File Transmission");
@@ -910,21 +914,6 @@ static void append_payload_hex(MsduInfo& out, const QByteArray& app, int offset,
     n.rel_start = rel_base + offset; n.rel_len = avail;
 }
 
-// ── 南网 APP 应用层解析入口 ────────────────────────────
-static QString app_type_name(NW_2026_PacketType packet_type) {
-    switch (packet_type) {
-    case NW_2026_PacketType::AckNack:      return QStringLiteral("ACK/NACK");
-    case NW_2026_PacketType::DataForward:  return QStringLiteral("DataForward");
-    case NW_2026_PacketType::Command:      return QStringLiteral("Command");
-    case NW_2026_PacketType::EventReport:  return QStringLiteral("EventReport");
-    case NW_2026_PacketType::ReaderFrame:  return QStringLiteral("ReaderFrame");
-    case NW_2026_PacketType::Test:         return QStringLiteral("Test");
-    case NW_2026_PacketType::FactoryFrame: return QStringLiteral("FactoryFrame");
-    default:
-        return QStringLiteral("PacketType 0x%1").arg(static_cast<quint8>(packet_type), 1, 16);
-    }
-}
-
 
 // ── 报文端口号(6.1):0x11 业务报文 0x13 管理报文 ──
 static QString port_num_name(quint8 port) {
@@ -941,69 +930,17 @@ static QString packet_id_name(quint16 id) {
     return QString();
 }
 
-// ── 业务标识(表9)值解释:依赖帧类型,返回空串表示保留/无释义 ──
-static QString business_id_name(quint8 port_num, NW_2026_PacketType packet_type, quint8 business_id) {
-    switch (packet_type) {
-    case NW_2026_PacketType::AckNack:  // 确认/否认
-        switch (static_cast<NW_2026_AckNackBid>(business_id)) {
-        case NW_2026_AckNackBid::Confirm: return trl::L("确认");
-        case NW_2026_AckNackBid::Deny:    return trl::L("否认");
-        default: break;
-        }
-        break;
-    case NW_2026_PacketType::DataForward:  // 数据转发
-        switch (static_cast<NW_2026_DataForwardBid>(business_id)) {
-        case NW_2026_DataForwardBid::ToDevice: return trl::L("数据透传至设备");
-        case NW_2026_DataForwardBid::ToModule: return trl::L("数据透传至模块");
-        default: break;
-        }
-        break;
-    case NW_2026_PacketType::Command:  // 命令
-        switch (static_cast<NW_2026_CommandBid>(business_id)) {
-        case NW_2026_CommandBid::QuerySearchResult:    return trl::L("查询终端搜索结果");
-        case NW_2026_CommandBid::IssueSearchList:      return trl::L("下发搜索终端列表");
-        case NW_2026_CommandBid::FileTransfer:         return trl::L("文件传输");
-        case NW_2026_CommandBid::EnableDisableNodeEv:  return trl::L("允许/禁止从节点事件");
-        case NW_2026_CommandBid::NodeRestart:          return trl::L("从节点重启");
-        case NW_2026_CommandBid::NodeInfoQuery:        return trl::L("从节点信息查询");
-        case NW_2026_CommandBid::IssueCommAddrMap:     return trl::L("下发通信地址映射表列表");
-        case NW_2026_CommandBid::QueryNodeRunStatus:   return trl::L("查询从节点运行状态信息");
-        case NW_2026_CommandBid::QueryNodeChannelInfo: return trl::L("查询从节点信道信息");
-        case NW_2026_CommandBid::PhaseIdent:           return trl::L("台区户变关系/相位识别");
-        case NW_2026_CommandBid::TestFrame:            return trl::L("测试帧");
-        default: break;
-        }
-        break;
-    case NW_2026_PacketType::EventReport:  // 主动上报
-        switch (static_cast<NW_2026_EventReportBid>(business_id)) {
-        case NW_2026_EventReportBid::MeterEvent:  return trl::L("电表事件主动上报");
-        case NW_2026_EventReportBid::PowerOnOff:  return trl::L("停上电事件上报");
-        case NW_2026_EventReportBid::DeviceEvent:
-            return trl::L(port_num == static_cast<quint8>(NW_2026_PortNum::MGMT_PORT)
-                              ? "通信模块事件上报" : "设备事件主动上报");
-        default: break;
-        }
-        break;
-    case NW_2026_PacketType::ReaderFrame:  // 抄控器协议
-        switch (static_cast<NW_2026_ReaderFrameBid>(business_id)) {
-        case NW_2026_ReaderFrameBid::CcoProtocol:   return trl::L("抄控器-CCO协议");
-        case NW_2026_ReaderFrameBid::SerialForward: return trl::L("数据透传串口转发");
-        default: break;
-        }
-        break;
-    case NW_2026_PacketType::BroadcastCmd:  // 广播命令
-        switch (static_cast<NW_2026_BroadcastCmdBid>(business_id)) {
-        case NW_2026_BroadcastCmdBid::NodeRestart:          return trl::L("从节点重启");
-        case NW_2026_BroadcastCmdBid::NodeInfoQuery:        return trl::L("从节点信息查询");
-        case NW_2026_BroadcastCmdBid::QueryNodeRunStatus:   return trl::L("查询从节点运行状态信息");
-        case NW_2026_BroadcastCmdBid::QueryNodeChannelInfo: return trl::L("查询从节点信道信息");
-        default: break;
-        }
-        break;
-    default: break;
+
+/// @brief 递归给 "MSDU Type" 字段填释义
+/// @note  标准 MAC 头的 MSDU Type 在 out.tree 顶层,而单跳帧(表113)的 MSDU Type 在
+///        "MAC Header [4B]" 子节点里 ⇒ 必须递归,只扫顶层会漏掉单跳应用帧。
+static void set_msdu_type_text(QVector<MsduFieldNode>& nodes, const QString& text) {
+    for (MsduFieldNode& n : nodes) {
+        if (n.name.startsWith(QLatin1String("MSDU Type"))) n.value = text;
+        set_msdu_type_text(n.children, text);
     }
-    return QString();
 }
+
 
 static void parse_app(MsduInfo& out, const QByteArray& app, int rel_base, quint16 msdu_type) {
     if (app.size() < 12) { out.summary = trl::L("应用报文(截断)"); return; }
@@ -1036,31 +973,33 @@ static void parse_app(MsduInfo& out, const QByteArray& app, int rel_base, quint1
     translate_enum_i18n(bh.children, "TransDirectionFlag", kTransDirectionFlagZh, 2);
     out.trans_direction_flag = (quint8)get_bits(app, 5, 7, 1);  // 表8 byte1 bit7(业务报文头自 app[4],P2P Dir 列)
     annotate_unit(bh.children, "PacketLen", QStringLiteral(" B"));
-    const QString bid_name = business_id_name(port_num, packet_type, business_id);
+    const QString bid_name = nw_app_bid_name(port_num, static_cast<quint8>(packet_type), business_id);
+    // 括号内统一文案:有业务名 → "BID=0x03 站点间通信 ↓";保留组合 → 只留 "BID=0x02"(不带方向/尾部空白)
+    const QString bid_disp = bid_name.isEmpty()
+        ? QStringLiteral("BID=0x%1").arg(business_id, 2, 16, QChar('0'))
+        : QStringLiteral("BID=0x%1 %2 %3")
+              .arg(business_id, 2, 16, QChar('0'))
+              .arg(bid_name)
+              .arg(nw_app_dir_symbol(out.trans_direction_flag));
     if (!bid_name.isEmpty()) {
         for (auto& n : bh.children) {
             if (n.name.startsWith(QLatin1String("BusinessID")))
-                n.value = QStringLiteral("0x%1 - %2")
-                              .arg(business_id, 2, 16, QChar('0')).arg(bid_name);
+                n.value = QStringLiteral("0x%1 - %2 %3")
+                              .arg(business_id, 2, 16, QChar('0'))
+                              .arg(bid_name)
+                              .arg(nw_app_dir_symbol(out.trans_direction_flag));
         }
     }
-    // MSDU Type 字段附带 BID 值 + 释义(应用层报文:一眼看出业务标识)
-    for (auto& n : out.tree) {
-        if (!n.name.startsWith(QLatin1String("MSDU Type"))) continue;
-        n.value = bid_name.isEmpty()
-            ? QStringLiteral("0x%1 - %2 (BID=0x%3)")
-                  .arg(msdu_type, 4, 16, QChar('0')).arg(trl::L("应用层报文"))
-                  .arg(business_id, 2, 16, QChar('0'))
-            : QStringLiteral("0x%1 - %2 (BID=0x%3 %4)")
-                  .arg(msdu_type, 4, 16, QChar('0')).arg(trl::L("应用层报文"))
-                  .arg(business_id, 2, 16, QChar('0')).arg(bid_name);
-    }
+    // MSDU Type 字段附带 BID + 业务名 + 方向(应用层报文:一眼看出业务类型与上下行)
+    // 单跳帧的 MSDU Type 在 MAC Header 子节点里 ⇒ 用递归填充(只扫顶层会漏)
+    set_msdu_type_text(out.tree, QStringLiteral("0x%1 - %2 (%3)")
+                                   .arg(msdu_type, 4, 16, QChar('0'))
+                                   .arg(trl::L("应用层报文"))
+                                   .arg(bid_disp));
     out.business_id = business_id;
     out.app_packet_type = static_cast<quint8>(packet_type);
-    out.summary = trl::L("应用报文 %1 (BID=0x%2%3)").arg(app_type_name(packet_type))
-                      .arg(business_id, 2, 16, QChar('0'))
-                      .arg(bid_name.isEmpty() ? QString()
-                                              : QStringLiteral(" %1").arg(bid_name));
+    // MSDU Type 列 / Info 列来源:保留帧类型名,括号内补业务名 + 方向(表9/表8)
+    out.summary = trl::L("应用层报文 (%1)").arg(bid_disp);
     // 业务数据单元(业务报文头之后,含业务扩展域)统一以"APP Data"字段展示
     append_payload_hex(out, app, 12, -1, QStringLiteral("APP Data"), rel_base);
 }

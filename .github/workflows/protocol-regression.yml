@@ -180,3 +180,22 @@ jobs:
             echo "== $p =="
             "./$p"
           done
+
+      - name: NW APP business ID / direction regression (SPLC 表9 / 表8)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          # 复用/重建 Qt symlink farm(逐条守卫,已存在则跳过)
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake6 -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake6 -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake6 -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake6 -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          (cd unit_test/protocol-nw/nw-app-bid-probe && bash build.sh)
+          # 表9 四组合 + 端口不匹配的保留组合 + 表8 方向箭头 + 载荷不拆解;nw_2026/nw_2021 各一遍
+          unit_test/protocol-nw/nw-app-bid-probe/build/nw_app_bid_probe/release/nw_app_bid_probe
