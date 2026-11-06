@@ -658,12 +658,12 @@ TopoWindow::TopoWindow(QWidget* parent) : QWidget(parent) {
     m_teimac_table->setModel(m_teimac_model);
     m_teimac_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_teimac_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    // 列宽适配:邻居表列(索引 7)占满剩余宽度,其余列按内容自适应
-    {
-        auto* teimac_hh = m_teimac_table->horizontalHeader();
-        teimac_hh->setSectionResizeMode(QHeaderView::ResizeToContents);
-        teimac_hh->setSectionResizeMode(7, QHeaderView::Stretch);
-    }
+    // 列宽适配:其余列按内容自适应;邻居表列(索引 7)占满剩余宽度,
+    // 但不能在这里对第 7 列调 setSectionResizeMode:此时模型还是空的
+    // (表头在 rebuild_teimac_table() 里才建),Qt 6.4.2 下对不存在的
+    // 列调该接口会段错误(见 unit_test/topo/topo-pco-probe),第 7 列
+    // 的 Stretch 改在 rebuild_teimac_table() 里表头建好后设置。
+    m_teimac_table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_teimac_table->verticalHeader()->setVisible(false);
     // 邻居表列(索引 7)用 HTML 代理渲染多色 TEI
     m_teimac_table->setItemDelegateForColumn(7, new NeighborHtmlDelegate(this));
@@ -1488,6 +1488,12 @@ void TopoWindow::rebuild_teimac_table() {
     m_teimac_model->setHorizontalHeaderLabels(
         {QStringLiteral("TEI"), QStringLiteral("MAC"), trl::L("入网链路"), trl::L("双模"),
          trl::L("状态"), trl::L("层级"), trl::L("代理 TEI"), trl::L("邻居表")});
+    // 邻居表列(索引 7)占满剩余宽度:只能在表头建好后设置,构造函数里
+    // 模型还是空的,此时调 setSectionResizeMode(7, ...) 在 Qt 6.4.2 下
+    // 会段错误(见 unit_test/topo/topo-pco-probe);每次重建表头后都
+    // 重新设置一次,保证列宽策略始终生效。
+    if (m_teimac_table->horizontalHeader()->count() > 7)
+        m_teimac_table->horizontalHeader()->setSectionResizeMode(7, QHeaderView::Stretch);
 
     const TopoState* st = nullptr;
     // 历史回放模式读冻结快照,否则读实时表(此前误读 m_states,回放时表格未冻结)
