@@ -415,6 +415,33 @@ int main(int argc, char** argv) {
         CHECK(!st.note_restart_origin(0, 5, MAC_Z, 6, 2003, 4, false, true),
               "D16c note_restart_origin 拒绝 NID==0,两次采样均不建基线");
     }
+    // D17:离网清理 CCO 身份记忆 —— 同一 NID/MAC 复用为 STA 后不得误报 CcoRestart;
+    //      其他 NID 的同 MAC 记忆必须保留。
+    {
+        TopoState st;
+        const quint64 MAC_REUSE = 0x334455667788ULL;
+        // 逐帧路径先以 TEI=1 识别为 CCO,建立身份记忆和 CCO 基线。
+        CHECK(!st.note_restart_origin(0x0E, kTeiCco, MAC_REUSE, 2, 3001, 1, false, true),
+              "D17a 非 CCO 节点 MAC 被逐帧路径识别为 CCO时首帧建基线");
+        // 同 MAC 在另一 NID 下也建立 CCO 记忆,验证离网只删目标 NID。
+        CHECK(!st.note_restart_origin(0x14, kTeiCco, MAC_REUSE, 7, 3002, 2, false, true),
+              "D17b 另一 NID 同 MAC 建立独立 CCO 基线");
+        TopoEvent leave = frame(TopoEventKind::LeaveInd, 0x0E, 0, -1, 3);
+        leave.leaves.append(MAC_REUSE);
+        st.apply(leave);
+        // 同一 NID、同一 MAC 作为 STA 首帧只建 STA 基线,下一次变化必须是 StaRestart。
+        CHECK(!st.note_restart_origin(0x0E, 5, MAC_REUSE, 4, 3003, 4, false, true),
+              "D17c 离网后同 NID 同 MAC 以 STA 角色首帧建基线");
+        CHECK(st.note_restart_origin(0x0E, 5, MAC_REUSE, 5, 3004, 5, false, true),
+              "D17d 离网后同 NID 同 MAC 计数变化触发 StaRestart");
+        CHECK(count_kind(st, TopoEventKind::StaRestart) == 1
+              && count_kind(st, TopoEventKind::CcoRestart) == 0,
+              "D17e MAC 复用后只报 StaRestart、不误报 CcoRestart");
+        CHECK(st.note_restart_origin(0x14, 5, MAC_REUSE, 8, 3005, 6, false, true),
+              "D17f 其他 NID 的 CCO 记忆未被离网清理,仍报 CcoRestart");
+        CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1,
+              "D17g 其他 NID CCO 身份记忆保持独立");
+    }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);
     return failures ? 1 : 0;

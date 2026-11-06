@@ -520,6 +520,9 @@ void TopoState::apply(const TopoEvent& e) {
     // 离网节点(按 (NID, MAC) 匹配,标记离线):先走 MAC→TEI 索引 O(1),索引不一致时回退线性扫描
     for (quint64 mac : e.leaves) {
         if (!mac) continue;
+        // 离网后该 MAC 可能在同一 NID 下被另一角色复用;仅清理本 NID 的 CCO 身份记忆,
+        // 不影响其他 NID 下同 MAC 的身份。
+        m_cco_macs.remove(nid_mac_key(e.nid, mac));
         bool done = false;
         auto iit = mac_to_tei.find(nid_mac_key(e.nid, mac));
         if (iit != mac_to_tei.end()) {
