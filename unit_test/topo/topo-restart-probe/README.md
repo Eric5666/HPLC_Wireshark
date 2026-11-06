@@ -1,6 +1,6 @@
 # topo-restart-probe（原名 topo_restart_probe）
 
-TopoState 相关探针合集，一次构建出 11 个二进制：
+TopoState 相关探针合集，一次构建出 12 个二进制：
 
 ```
 ./build.sh
@@ -9,6 +9,7 @@ TopoState 相关探针合集，一次构建出 11 个二进制：
 
 | 程序 | 测什么 |
 |---|---|
+| anomaly_probe | 同一在线 MAC/TEI 冲突、重启次数往返、双链路计数不一致 |
 | cpc37_probe | NW_2026 0x0037 link_type 1bit（0x03 → 1）与树节点 |
 | cpc_auth_probe | ChangeProxyCnf 权威锁定（弱路径 0xFF → 成功确认锁定） |
 | diversity_probe | GW_2026 分集拷贝新表（旧表仅 0/2/6/8 四模式一致） |
