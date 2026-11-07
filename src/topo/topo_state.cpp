@@ -203,40 +203,67 @@ bool TopoState::note_restart_count(quint16 tei, bool is_rf, int rc,
     return touched;
 }
 
-void TopoState::index_mac(quint32 net_id, quint16 tei, quint64 mac, qint64 epoch_ms, qint64 frame_index) {
-    if (!tei || !mac) return;
-    // 情况1:该 MAC 在本 NID 之前映射到别的 TEI(TEI 复用/STA 重入网换 TEI)
-    //       → 把旧 TEI 节点的 MAC 清零,避免之后按 MAC 查找时 stale 命中。
-    //       旧 TEI 若仍在线 ⇒ 同一 MAC 同时占两个 TEI(重复组网/身份冲突),记异常;
-    //       旧 TEI 已离线 ⇒ 正常离网后重入网换 TEI,不计。
-    auto it = mac_to_tei.find(nid_mac_key(net_id, mac));
-    if (it != mac_to_tei.end() && it.value() != tei) {
-        const quint16 old_tei = it.value();
+bool TopoState::index_mac(quint32 net_id, quint16 tei, quint64 mac, qint64 epoch_ms, qint64 frame_index) {
+    if (!net_id || !mac || !tei || tei >= kTeiBroadcast) return false;
+    const NidMacKey key = nid_mac_key(net_id, mac);
+    const quint16 old_tei = mac_to_tei.value(key,
+        m_cco_macs.contains(key) ? kTeiCco : quint16(0));
+    const bool role_conflict = old_tei && old_tei != tei
+        && (old_tei == kTeiCco || tei == kTeiCco);
+    bool touched = false;
+    // CCO/STA 共用 MAC 始终算冲突(即使旧节点离线);每次反向切换继续累加 trips。
+    // 当前帧/管理事件提供的有效 TEI 覆盖旧身份,不能再由 CCO 记忆反向覆盖它。
+    if (old_tei && old_tei != tei) {
         auto nit = nodes.find(old_tei);
-        if (nit != nodes.end() && nit.value().mac == mac) {
-            if (nit.value().status != NodeStatus::Offline)
-                // mac_old 对 A 类无意义(A 用 tei/tei_old 表示冲突两端),传 0 避免语义误导
-                note_anomaly(TopoAnomalyKind::MacMultipleTei, tei, mac, 0, old_tei,
-                             nit.value().is_rf, int(old_tei), int(tei), epoch_ms, frame_index);
-            nit.value().mac = 0;
+        const bool has_old_node = nit != nodes.end() && nit->mac == mac;
+        if (role_conflict || (has_old_node && nit->status != NodeStatus::Offline)) {
+            note_anomaly(TopoAnomalyKind::MacMultipleTei, tei, mac, 0, old_tei,
+                         has_old_node && nit->is_rf, int(old_tei), int(tei), epoch_ms, frame_index);
+            touched = true;
+        }
+        if (has_old_node) nit->mac = 0;
+        if (role_conflict) {
+            // 角色变更只建新基线,不把两种身份/实体的计数差当作重启。
+            m_cco_restart_count.remove(key);
+            m_sta_restart_count.remove(key);
         }
     }
-    // 情况2:该 TEI 之前是别的 MAC(同一 TEI 换 MAC)
-    //       → 若旧 MAC 仍指向本 TEI 则删除其映射,避免旧 MAC 离线时误伤本 TEI。
-    //       旧节点仍在线 ⇒ 同一 TEI 被两台设备占用,记异常;已离线 ⇒ TEI 复用,不计。
+    // 同一 TEI 换 MAC:保留既有的在线冲突提示,清掉旧 MAC 索引和身份记忆。
     auto nit = nodes.find(tei);
     if (nit != nodes.end()) {
-        const quint64 old_mac = nit.value().mac;
+        const quint64 old_mac = nit->mac;
         if (old_mac && old_mac != mac) {
-            if (nit.value().status != NodeStatus::Offline)
+            if (nit->status != NodeStatus::Offline) {
                 note_anomaly(TopoAnomalyKind::TeiMultipleMac, tei, mac, old_mac, tei,
-                             nit.value().is_rf, 0, 0, epoch_ms, frame_index);
-            auto oit = mac_to_tei.find(nid_mac_key(net_id, old_mac));
-            if (oit != mac_to_tei.end() && oit.value() == tei)
+                             nit->is_rf, 0, 0, epoch_ms, frame_index);
+                touched = true;
+            }
+            const NidMacKey old_key = nid_mac_key(net_id, old_mac);
+            auto oit = mac_to_tei.find(old_key);
+            if (oit != mac_to_tei.end() && oit.value() == tei) {
                 mac_to_tei.erase(oit);
+                m_cco_macs.remove(old_key);
+                m_cco_restart_count.remove(old_key);
+                m_sta_restart_count.remove(old_key);
+            }
         }
     }
-    mac_to_tei[nid_mac_key(net_id, mac)] = tei;
+    mac_to_tei[key] = tei;
+    m_offline_macs.remove(key);
+    // 普通帧不凭空建拓扑节点;已有节点则同步最新 MAC,避免旧节点反复制造冲突。
+    if (nit != nodes.end()) {
+        nit->mac = mac;
+        nit->status = NodeStatus::Online;
+        nit->last_seen_ms = epoch_ms;
+    }
+    if (tei == kTeiCco) {
+        m_cco_macs.insert(key);
+        if (nid == net_id) cco_mac = mac;
+    } else {
+        m_cco_macs.remove(key);
+        if (nid == net_id && cco_mac == mac) cco_mac = 0;
+    }
+    return touched;
 }
 
 bool TopoState::remove_node_by_mac(quint32 net_id, quint64 mac) {
@@ -262,20 +289,24 @@ NidMacKey TopoState::nid_mac_key(quint32 net_id, quint64 mac) {
 }
 
 bool TopoState::resolve_is_cco(quint32 net_id, quint16 src_tei, quint64 mac, const TopoEvent* ev) {
-    bool cco = false;
-    if (src_tei == kTeiCco) cco = true;                                     // 1. TEI 固定为 1
-    if (!cco && mac && m_cco_macs.contains(nid_mac_key(net_id, mac))) cco = true;  // 2. 身份记忆(NID, MAC)
-    if (!cco && ev && mac && ev->cco_mac && ev->cco_mac == mac) cco = true; // 3. 本帧 CCO MAC
-    if (!cco && ev && mac) {                                                // 4. 本帧 nodes 的 TEI=1 条目
-        for (const TeiMacPair& p : ev->nodes)
-            if (p.tei == kTeiCco && p.mac == mac) { cco = true; break; }
+    // 有效源 TEI 是当前帧身份,优先于历史记忆。0/广播/无效 TEI 不提供角色证据。
+    if (src_tei && src_tei < kTeiBroadcast) return src_tei == kTeiCco;
+    if (mac) {
+        const NidMacKey key = nid_mac_key(net_id, mac);
+        if (m_offline_macs.contains(key)) return false;
+        const quint16 tei = mac_to_tei.value(key, quint16(0));
+        if (tei && tei != kTeiCco) return false;
+        if (m_cco_macs.contains(key)) return true;
+        if (tei == kTeiCco) {
+            // 离网保留索引供历史展示/后续冲突比较,但不能用离线索引回灌身份记忆。
+            const auto it = nodes.constFind(tei);
+            if (it == nodes.constEnd() || it->mac != mac || it->status != NodeStatus::Offline)
+                return true;
+        }
     }
-    if (!cco && mac && mac_to_tei.value(nid_mac_key(net_id, mac), quint16(0)) == kTeiCco) cco = true;  // 5. TEI=1 映射(NID, MAC)
-    // 6. 发现列表是 CCO 广播:缺源 MAC 时按 CCO 归属
-    //    (否则会走 nodes 首条回落,把 CCO 重启记到发现列表里第一个 STA 头上 —— 实测缺陷 M2)
-    if (!cco && !mac && ev && ev->kind == TopoEventKind::DiscoverList) cco = true;
-    if (cco && mac) m_cco_macs.insert(nid_mac_key(net_id, mac));  // 身份记忆(NID, MAC):防后续 cco_mac 缺失时漂移成 STA
-    return cco;
+    // apply() 在采样前已学习当前事件的 CCO/TEI→MAC 信息;不再拿旧事件字段覆盖新索引。
+    // 发现列表缺源 MAC 时仍按该 NID 的无 MAC CCO 主体采样,不落到首个 STA。
+    return !mac && ev && ev->kind == TopoEventKind::DiscoverList;
 }
 
 bool TopoState::note_restart_change(quint32 net_id, quint64 subject, bool is_cco, int rc,
@@ -310,15 +341,17 @@ bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src
                                     bool is_rf, bool is_rf_known) {
     // 网络标识符不完整(NID==0,两规约里 0 均无效)不采样:不建基线、不报重启。
     if (net_id == 0) return false;
-    if (rc < 0 || rc == kRestartCountInvalid) return false;   // 无该字段(单跳简头等)不采样
-    // 身份判定统一走 resolve_is_cco(TEI 固定 1 / 身份记忆 / cco_mac / mac_to_tei)
+    // 即使本帧没有重启计数,当前有效源 TEI/MAC 仍应覆盖旧角色并记录身份冲突。
+    const bool conflict = index_mac(net_id, src_tei, src_mac, epoch_ms, frame_index);
+    if (rc < 0 || rc == kRestartCountInvalid) return conflict;
+    // 当前有效源 TEI 优先;无有效源 TEI 时才回退本 NID 最近身份。
     const bool is_cco = resolve_is_cco(net_id, src_tei, src_mac, nullptr);
     // STA 必须有 MAC 才能定位主体;唯一例外:CCO 帧缺源 MAC ⇒ 归本 NID 的 CCO 基线(subject=0)
-    if (!src_mac && !is_cco) return false;
+    if (!src_mac && !is_cco) return conflict;
     TopoEvent proto;
     proto.is_rf = is_rf;
     proto.is_rf_known = is_rf_known;
-    return note_restart_change(net_id, src_mac, is_cco, rc, epoch_ms, frame_index, proto);
+    return note_restart_change(net_id, src_mac, is_cco, rc, epoch_ms, frame_index, proto) || conflict;
 }
 
 void TopoState::apply(const TopoEvent& e) {
@@ -361,47 +394,6 @@ void TopoState::apply(const TopoEvent& e) {
     if (first_seen_frame < 0) {
         first_seen_frame = e.frame_index;
         first_seen_ms = e.epoch_ms;
-    }
-    // ---------------------------------------------------------------------
-    // 重启检测(方案 B:采样点从「发现列表/关联请求」白名单扩到全帧;基线按 (NID, 主体 MAC) 分键)
-    // 依据与口径:
-    //  - 重启次数是 MAC 帧头的 4-bit 计数器(国网 MSDU 头 / 南网 MAC 帧头),任何变化即视为重启,
-    //    天然处理 15→0 回绕 —— 判据未改,只扩采样点;restart_count<0(0xFF 哨兵:单跳简头等
-    //    无该字段的帧)天然被排除。
-    //  - 旧实现只在 DiscoverList 上采 CCO、只在 AssocReq 上采 STA,其它管理帧携带的计数变化
-    //    完全看不到(实测漏报),故去掉事件种类白名单。
-    //  - CCO 的 TEI 固定为 1(南网规约 / HDC 2.0 5.3.3.1):主体判定用「本帧 CCO MAC」、
-    //    「MAC 已映射到 TEI=1」、或「本帧 nodes 里 (TEI=1, 该 MAC)」三条依据;其余按 STA。
-    //  - 分键 = nid_mac_key(NID, 主体 MAC):CCO 旧基线是单一全局值(多 NID 互相踩),
-    //    STA 旧基线只有 MAC(不同 NID 下同 MAC 会串)。
-    //  - 已知代价:事件量上升(以前漏报的真实重启现在会报),且 CcoRestart/StaRestart 是插件
-    //    API 事件(plugin/host/js_backend.cpp:47、lua_backend.cpp:65 → ccoRestart/staRestart),
-    //    Lua/JS 侧若按事件条数统计会变化。
-    //  - 拓扑状态不清空:新的关联请求可能先于发现列表到达,清空会误删已重建的正确状态。
-    // ---------------------------------------------------------------------
-    if (e.restart_count >= 0) {
-        quint64 subject = e.sender_mac;
-        bool is_cco = false;
-        if (subject) {
-            // 有源 MAC:身份判定统一走 resolve_is_cco(事件侧无 TEI 信息 ⇒ 传 0)
-            is_cco = resolve_is_cco(e.nid, quint16(0), subject, &e);
-        } else {
-            // 无源 MAC:先看能否按"无 MAC 的 CCO"归属(发现列表 = CCO 广播,实测缺陷 M2:
-            // 旧实现直接回落 nodes 首条,把 CCO 的重启次数记到发现列表里第一个 STA 头上)
-            is_cco = resolve_is_cco(e.nid, quint16(0), 0, &e);
-            if (!is_cco) {
-                // 既有口径保留(AssocReq 等:直接关联时主体即发送方):回落本事件 nodes 首条,
-                // 再对该主体做一次身份判定(它可能就是 CCO 条目)
-                for (const TeiMacPair& p : e.nodes) {
-                    if (p.mac) { subject = p.mac; break; }
-                }
-                if (subject) is_cco = resolve_is_cco(e.nid, quint16(0), subject, &e);
-            }
-        }
-        if (subject || is_cco) {
-            note_restart_change(e.nid, subject, is_cco, e.restart_count,
-                                e.epoch_ms, e.frame_index, e);
-        }
     }
     // CCO(TEI=1):根节点,父=0,始终已入网
     if (e.cco_mac) {
@@ -457,6 +449,47 @@ void TopoState::apply(const TopoEvent& e) {
         // 若该 MAC 之前正在入网(关联请求),现已分配到 TEI → 移除 pending。
         // pending 的 key 恒等于 TopoNode.mac(写入处 pending[p.mac]=n),等价于哈希直接删除。
         pending.remove(p.mac);
+    }
+    // ---------------------------------------------------------------------
+    // 重启检测(方案 B:采样点从「发现列表/关联请求」白名单扩到全帧;基线按 (NID, 主体 MAC) 分键)
+    // 依据与口径:
+    //  - 重启次数是 MAC 帧头的 4-bit 计数器(国网 MSDU 头 / 南网 MAC 帧头),任何变化即视为重启,
+    //    天然处理 15→0 回绕 —— 判据未改,只扩采样点;restart_count<0(0xFF 哨兵:单跳简头等
+    //    无该字段的帧)天然被排除。
+    //  - 旧实现只在 DiscoverList 上采 CCO、只在 AssocReq 上采 STA,其它管理帧携带的计数变化
+    //    完全看不到(实测漏报),故去掉事件种类白名单。
+    //  - 先学习当前事件的 CCO/节点映射,再判主体角色,防新 STA 仍用旧 CCO 基线。
+    //    当前有效 TEI 优先于历史记忆;角色切换已由 index_mac 记录冲突并重建基线。
+    //  - 分键 = nid_mac_key(NID, 主体 MAC):CCO 旧基线是单一全局值(多 NID 互相踩),
+    //    STA 旧基线只有 MAC(不同 NID 下同 MAC 会串)。
+    //  - 已知代价:事件量上升(以前漏报的真实重启现在会报),且 CcoRestart/StaRestart 是插件
+    //    API 事件(plugin/host/js_backend.cpp:47、lua_backend.cpp:65 → ccoRestart/staRestart),
+    //    Lua/JS 侧若按事件条数统计会变化。
+    //  - 拓扑状态不清空:新的关联请求可能先于发现列表到达,清空会误删已重建的正确状态。
+    // ---------------------------------------------------------------------
+    if (e.restart_count >= 0) {
+        quint64 subject = e.sender_mac;
+        bool is_cco = false;
+        if (subject) {
+            // 有源 MAC:身份判定统一走 resolve_is_cco(事件侧无 TEI 信息 ⇒ 传 0)
+            is_cco = resolve_is_cco(e.nid, quint16(0), subject, &e);
+        } else {
+            // 无源 MAC:先看能否按"无 MAC 的 CCO"归属(发现列表 = CCO 广播,实测缺陷 M2:
+            // 旧实现直接回落 nodes 首条,把 CCO 的重启次数记到发现列表里第一个 STA 头上)
+            is_cco = resolve_is_cco(e.nid, quint16(0), 0, &e);
+            if (!is_cco) {
+                // 既有口径保留(AssocReq 等:直接关联时主体即发送方):回落本事件 nodes 首条,
+                // 再对该主体做一次身份判定(它可能就是 CCO 条目)
+                for (const TeiMacPair& p : e.nodes) {
+                    if (p.mac) { subject = p.mac; break; }
+                }
+                if (subject) is_cco = resolve_is_cco(e.nid, quint16(0), subject, &e);
+            }
+        }
+        if (subject || is_cco) {
+            note_restart_change(e.nid, subject, is_cco, e.restart_count,
+                                e.epoch_ms, e.frame_index, e);
+        }
     }
     // 路由关系(子 TEI → 父/代理 TEI)
     for (const auto& r : e.routes) {
@@ -523,6 +556,7 @@ void TopoState::apply(const TopoEvent& e) {
         // 离网后该 MAC 可能在同一 NID 下被另一角色复用;仅清理本 NID 的 CCO 身份记忆,
         // 不影响其他 NID 下同 MAC 的身份。
         m_cco_macs.remove(nid_mac_key(e.nid, mac));
+        m_offline_macs.insert(nid_mac_key(e.nid, mac));
         bool done = false;
         auto iit = mac_to_tei.find(nid_mac_key(e.nid, mac));
         if (iit != mac_to_tei.end()) {
@@ -531,8 +565,9 @@ void TopoState::apply(const TopoEvent& e) {
                 nit.value().status = NodeStatus::Offline;
                 nit.value().last_seen_ms = e.epoch_ms;
                 done = true;
-            } else {
-                // 索引与节点不一致(不应发生):删除坏映射,回退线性扫描保证不错杀/不漏杀
+            } else if (nit != nodes.end()) {
+                // 节点存在但 MAC 不一致时才是坏索引。逐帧采样可能只建身份索引,
+                // 尚未有拓扑节点;保留其历史 TEI 供下次角色冲突比较。
                 mac_to_tei.erase(iit);
             }
         }

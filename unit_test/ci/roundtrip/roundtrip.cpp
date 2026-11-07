@@ -35,6 +35,19 @@ public:
         return frames;
     }
 
+    static bool short_hex_preserves_time(const QByteArray& line) {
+        ReaderWorker worker;
+        worker.m_cfg.mode = ReaderMode::RawHex;
+        worker.m_hex_seg_first = false;
+        worker.m_hex_seg_base_ts = 123456;
+        worker.m_hex_seg_base_us = 987654321;
+        int emitted = 0;
+        QObject::connect(&worker, &ReaderWorker::frame_ready, [&](const BplcFrame&) { ++emitted; });
+        worker.process_raw_hex_line(line);
+        return emitted == 0 && !worker.m_hex_seg_first
+            && worker.m_hex_seg_base_ts == 123456 && worker.m_hex_seg_base_us == 987654321;
+    }
+
     static QVector<BplcFrame> file_frames(const QByteArray& input) {
         QTemporaryDir dir;
         QFile file(dir.filePath("file-input"));
@@ -441,6 +454,32 @@ void malformed_frame_regressions() {
     check(ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(invalid_escape)).isEmpty()
               && ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(dangling_escape)).isEmpty(),
           "RawHex rejects invalid and dangling 0x3D escapes");
+
+    // 所有短解码长度都在时间链更新前拒绝,不是只保护 [2..5] 的访问。
+    for (int n = 0; n < 26; ++n) {
+        const QByteArray body(n, char(0x3C));  // 同时覆盖转义前长、解码后短的输入
+        const QByteArray encoded = QByteArray(1, char(0x3C))
+            + playback::escape_frame_data(body) + QByteArray(1, char(0x3E));
+        const auto serial = ReaderWorkerTestAccess::serial_frames(encoded);
+        const auto replay = ReaderWorkerTestAccess::file_frames(encoded);
+        const bool serial_rejected = std::none_of(serial.cbegin(), serial.cend(),
+            [](const BplcFrame& f) { return f.accepted; });
+        const bool replay_rejected = std::none_of(replay.cbegin(), replay.cend(),
+            [](const BplcFrame& f) { return f.accepted; });
+        check(serial_rejected && replay_rejected
+                  && ReaderWorkerTestAccess::short_hex_preserves_time(playback::hex_line_of(encoded)),
+              QStringLiteral("decoded length %1 rejected by all readers without changing RawHex time").arg(n));
+    }
+    const QByteArray minimum_body(26, char(0x55));
+    const QByteArray minimum = QByteArray(1, char(0x3C))
+        + playback::escape_frame_data(minimum_body) + QByteArray(1, char(0x3E));
+    const auto min_serial = ReaderWorkerTestAccess::serial_frames(minimum);
+    const auto min_replay = ReaderWorkerTestAccess::file_frames(minimum);
+    const auto min_hex = ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(minimum));
+    check(min_serial.size() == 1 && min_serial[0].accepted
+              && min_replay.size() == 1 && min_replay[0].accepted
+              && min_hex.size() == 1 && min_hex[0].accepted,
+          "26-byte decoded minimum remains accepted by all readers");
 
     QByteArray at_limit(4 * 1024 + 1, char(0x55));
     at_limit[0] = char(0x3C);

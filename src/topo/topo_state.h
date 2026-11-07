@@ -56,7 +56,7 @@ struct TopoNode {
 /// @details 与路由变更事件表分离:这些不是"拓扑演进",而是"数据自相矛盾"的嫌疑,
 ///          单独一页签展示,避免与正常的关联/代理变更事件混在一起。
 enum class TopoAnomalyKind {
-    MacMultipleTei,          ///< 同一 MAC 先后对应两个仍在线的 TEI(重复组网/身份冲突)
+    MacMultipleTei,          ///< 同一 MAC 对应不同 TEI(在线节点冲突;CCO/STA 角色切换不受离线状态限制)
     TeiMultipleMac,          ///< 同一 TEI 先后对应两个仍在线的 MAC(TEI 被两台设备占用)
     RestartCountOscillation, ///< 同一 TEI+介质的重启次数往返振荡(双实体共用 TEI/计数被复位)
     LinkCountMismatch,       ///< 同一 TEI 载波与无线的重启次数不同(两条链路各自计数)
@@ -136,14 +136,15 @@ public:
     ///  - 重启次数是 MAC 帧头的 4-bit 计数器(国网 MSDU 头 / 南网 MAC 帧头),任何变化即视为重启,
     ///    天然处理 15→0 回绕(判据未改,仅扩采样点);
     ///  - **CCO 的 TEI 固定为 1**(南网规约 / HDC 2.0 5.3.3.1),故主体判定依据:
-    ///    src_tei==1、或 MAC == 本 NID 已学到的 CCO MAC、或 MAC 已映射到 TEI=1 ⇒ CCO;其余按 STA;
+    ///    当前有效 src_tei 优先于旧身份;无有效源 TEI 时回退本 NID 最新映射/身份记忆;
+    ///    CCO/STA 同 MAC 每次冲突均记录,并以最新信息覆盖;角色切换首帧重建基线;
     ///  - 分键 = (NID, MAC):旧实现 CCO 基线是单一全局值(多 NID 互相踩)、STA 基线只有 MAC
     ///    (不同 NID 下同 MAC 会串),两者都必须带 NID;
     ///  - src_mac==0 时不检测:宁可不报,也不把计数记到别的主体名下;
     ///  - 已知代价:事件量上升(以前漏报的真实重启现在会报);CcoRestart/StaRestart 是插件 API 事件
     ///    (plugin/host/js_backend.cpp / lua_backend.cpp 映射为 ccoRestart/staRestart),
     ///    Lua/JS 侧若按事件条数统计会随之变化。
-    /// @return 是否新增了重启事件
+    /// @return 是否新增了重启事件或记录了身份冲突(UI 刷新用)
     bool note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src_mac, int rc,
                              qint64 epoch_ms, qint64 frame_index, bool is_rf, bool is_rf_known);
 
@@ -190,12 +191,14 @@ void apply(const TopoEvent& e);
 
 private:
     /// @brief 维护 mac_to_tei 双向一致(处理"同一 MAC 先后对应不同 TEI"和"同一 TEI 先后对应不同 MAC")
-    /// @details 两个方向若"旧节点仍在线"则同时记一条异常/冲突(MacMultipleTei / TeiMultipleMac);
-    ///          旧节点已离线(正常离网后重入网换 TEI)不计,避免把正常重入网当冲突。
+    /// @details CCO(TEI=1)/STA 共用 MAC 时每次切换均记冲突并以最新有效 TEI 覆盖身份,
+    ///          不受旧节点在线状态影响。其他 A/B 冲突沿用旧节点在线才计的口径。
+    ///          角色切换重置该 (NID, MAC) 的 CCO/STA 重启基线,避免串角色误报。
+    /// @return 是否记录了异常(逐帧调用侧据此刷新 UI)。
     ///          索引按 (NID, MAC) 分键(键 = nid_mac_key):同 MAC 在不同 NID 下可映射到
     ///          不同 TEI;nodes 表仍按 TEI 单键,故"同一 TEI 多 MAC"的节点侧校验仍读共享表,
     ///          删除旧映射时只删本 NID 的键,不动别 NID 的映射。
-    void index_mac(quint32 net_id, quint16 tei, quint64 mac, qint64 epoch_ms = 0, qint64 frame_index = -1);
+    bool index_mac(quint32 net_id, quint16 tei, quint64 mac, qint64 epoch_ms = 0, qint64 frame_index = -1);
     /// @brief 记录/合并一条异常(同类同主体合并,trips 累加,更新最近取值与时间)
     void note_anomaly(TopoAnomalyKind kind, quint16 tei, quint64 mac, quint64 mac_old,
                       quint16 tei_old, bool is_rf, int from, int to,
@@ -232,22 +235,17 @@ private:
     /// @brief 主体身份判定(CCO/STA)的**唯一入口**:apply() 事件侧与逐帧采样侧都走这里,
     ///        避免两条路径判据集合不同导致同一次重启被报成 STA/CCO 两条(M1),
     ///        或 CCO 帧缺源 MAC 时被回落成"发现列表里第一个 STA"(M2)。
-    /// @details 依据(任一成立即 CCO):
-    ///   1. src_tei == kTeiCco —— 南网规约 / HDC 2.0 5.3.3.1:CCO 的 TEI 固定为 1
-    ///      (事件侧拿不到 TEI 时传 0,表示"该路径没有 TEI 信息");
-    ///   2. (NID, mac) 已在 m_cco_macs 身份记忆里(键 = nid_mac_key(NID, MAC),先分 NID 再分 MAC);
-    ///   3. 本帧 cco_mac == mac;
-    ///   4. 本帧 nodes 含 (kTeiCco, mac);
-    ///   5. (NID, mac) 已映射到 TEI=1(mac_to_tei,键 = nid_mac_key(NID, MAC));
-    ///   6. mac == 0 且事件种类是发现列表 —— 发现列表是 CCO 广播,缺源 MAC 时按 CCO 归属
-    ///      (否则会回落到 nodes 首条,把 CCO 重启记到无关 STA 头上)。
-    ///   另:拓扑事件里 discover_src_tei 记的是路由/位图条目的 STA TEI,不是发送方 TEI,故**不用**它判 CCO。
-    /// 判定为 CCO 且 mac 非 0 时写入 m_cco_macs 身份记忆,防同一主体后续因 cco_mac 缺失而漂移成 STA。
+    /// @details 当前有效源 TEI 优先(1=CCO,其他单播 TEI=STA);无有效源 TEI 时,
+    ///          回退本 NID 最新 TEI→MAC 索引和身份记忆,离线索引不得回灌记忆。
+    ///          apply() 先学习当前事件映射,再做重启采样;当前节点映射覆盖过时 CCO 字段。
+    ///          缺 MAC 的发现列表仍归本 NID 无 MAC CCO 基线。
+    ///          discover_src_tei 是路由/位图条目的 STA TEI,不是发送方 TEI,不用于角色判定。
     /// @param[in] net_id 事件/NID(身份记忆按 (NID, MAC) 分键)
     /// @param[in] ev 事件上下文(可为 nullptr:逐帧路径没有 TopoEvent)
     /// @return true=CCO 主体
     bool resolve_is_cco(quint32 net_id, quint16 src_tei, quint64 mac, const TopoEvent* ev);
 
+    QSet<NidMacKey> m_offline_macs; ///< 离网后禁用旧身份回退;新有效 TEI/MAC 到达时解除
     QSet<NidMacKey> m_cco_macs;   ///< CCO 身份记忆(键 = nid_mac_key(NID, MAC),先分 NID 再分 MAC;防归属漂移)
 
     /// @brief 重启变化记录(CCO/STA 共用实现):比较基线、变化即生成重启事件并更新基线

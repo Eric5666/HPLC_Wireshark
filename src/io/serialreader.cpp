@@ -507,8 +507,9 @@ void ReaderWorker::process_raw_hex_line(const QByteArray& line) {
         QByteArray body = raw.mid(1, raw.size() - 2);
         QByteArray data;
         if (!playback::unescape_frame_data(body, data)) return;
-        // dlen(2B)+NTB(4B)+媒介字段(4B)+至少 1B MPDU;在读取 data[2..5] 前验证长度。
-        if (data.size() < 11) return;
+        // 与串口/二进制回放一致:采集头 10B + 完整 FCH 至少 16B。
+        // 必须在读取时间戳、更新 RawHex 时间链之前拒绝短帧。
+        if (data.size() < 26) return;
         // 时间:ts 统一 NTB tick(25kHz,40ns)。段首帧用 TIME 头(m_raw_base_ms)
         // 作基准,无 TIME 头则用首帧本地时刻作基准;段内按自段首累计 NTB 差
         // ×40ns 统一换算为 µs(单次除法,避免逐帧 ms 截断累计漂移,µs 级准确);
