@@ -551,7 +551,7 @@ int main(int argc, char** argv) {
               "D21b 同一 CCO 有效源 TEI 重现恢复在线并检测重启,不当作角色冲突");
     }
 
-    // D22:请求帧不把离线节点直接判在线;其他帧仍可恢复既有节点。
+    // D22:关联请求不把已分配 TEI 的离线节点直接判在线;已入网请求及其他正向帧可恢复。
     {
         TopoState st;
         const quint32 net = 0x0E;
@@ -601,8 +601,89 @@ int main(int argc, char** argv) {
         st.apply(assoc_req);
         st.note_restart_origin(net, 0, MAC_A, kRestartCountInvalid, 1008, 8, false, true,
                                TopoEventKind::AssocReq);
-        CHECK(st.pending.contains(MAC_A) && !st.nodes.contains(5),
+        CHECK(st.pending.contains(MAC_A) && !st.nodes.contains(5)
+                  && st.pending.value(MAC_A).status == NodeStatus::OnlineGoing,
               "D22e 关联请求仅建立入网中状态,不复活离线 TEI 节点");
+    }
+
+    // D23:离线→入网中→在线/离网,以及只更新状态的权威来源。
+    {
+        TopoState st;
+        const quint32 net = 0x0F;
+        TopoEvent joined = frame(TopoEventKind::AssocCnf, net, MAC_A, kRestartCountInvalid, 1);
+        joined.nodes.append({5, MAC_A});
+        st.apply(joined);
+        TopoEvent leave = frame(TopoEventKind::LeaveInd, net, 0, kRestartCountInvalid, 2);
+        leave.leaves.append(MAC_A);
+        st.apply(leave);
+
+        TopoEvent assoc_req = frame(TopoEventKind::AssocReq, net, MAC_A,
+                                    kRestartCountInvalid, 3);
+        assoc_req.nodes.append({0, MAC_A});
+        st.apply(assoc_req);
+        CHECK(!st.nodes.contains(5) && st.pending.contains(MAC_A)
+                  && st.pending.value(MAC_A).status == NodeStatus::OnlineGoing,
+              "D23a 离线 STA 的关联请求转为入网中");
+
+        TopoEvent leave_pending = frame(TopoEventKind::LeaveInd, net, 0,
+                                        kRestartCountInvalid, 4);
+        leave_pending.leaves.append(MAC_A);
+        st.apply(leave_pending);
+        CHECK(!st.pending.contains(MAC_A),
+              "D23b 离网指示清除未完成的 pending 入网状态");
+
+        assoc_req.epoch_ms = 5;
+        assoc_req.frame_index = 5;
+        st.apply(assoc_req);
+        TopoEvent assoc_cnf = frame(TopoEventKind::AssocCnf, net, MAC_A,
+                                    kRestartCountInvalid, 6);
+        assoc_cnf.nodes.append({5, MAC_A});
+        st.apply(assoc_cnf);
+        CHECK(!st.pending.contains(MAC_A) && st.nodes.value(5).status == NodeStatus::Online,
+              "D23c 关联确认将 pending 节点提升为在线");
+    }
+    {
+        TopoState st;
+        const quint32 net = 0x10;
+        TopoEvent joined = frame(TopoEventKind::AssocCnf, net, MAC_A, kRestartCountInvalid, 1);
+        joined.nodes.append({5, MAC_A});
+        st.apply(joined);
+        TopoEvent leave = frame(TopoEventKind::LeaveInd, net, 0, kRestartCountInvalid, 2);
+        leave.leaves.append(MAC_A);
+        st.apply(leave);
+        TopoEvent synthetic = frame(TopoEventKind::StaRestart, net, MAC_A,
+                                    kRestartCountInvalid, 3);
+        synthetic.nodes.append({5, MAC_A});
+        synthetic.routes.append({5, 2});
+        st.apply(synthetic);
+        CHECK(st.nodes.value(5).status == NodeStatus::Offline,
+              "D23d 非在线证据事件不把离线节点改为在线");
+
+        TopoEvent proxy = frame(TopoEventKind::ChangeProxyCnf, net, 0,
+                                kRestartCountInvalid, 4);
+        proxy.link_type = 0;
+        proxy.child_teis.append(7);
+        st.apply(proxy);
+        CHECK(st.nodes.value(7).status == NodeStatus::Online
+                  && st.nodes.value(7).last_seen_ms == proxy.epoch_ms,
+              "D23e 成功代理确认中的子 TEI 位图建立在线节点");
+
+        TopoEvent sta = frame(TopoEventKind::AssocCnf, net, MAC_B,
+                              kRestartCountInvalid, 5);
+        sta.nodes.append({8, MAC_B});
+        st.apply(sta);
+        TopoEvent sta_leave = frame(TopoEventKind::LeaveInd, net, 0,
+                                    kRestartCountInvalid, 6);
+        sta_leave.leaves.append(MAC_B);
+        st.apply(sta_leave);
+        TopoEvent channel = frame(TopoEventKind::Other, net, MAC_B,
+                                  kRestartCountInvalid, 7);
+        channel.proxy_tei = 1;
+        channel.proxy_up_rate = 90;
+        st.apply_channel_info(8, channel);
+        CHECK(st.nodes.value(8).status == NodeStatus::Online
+                  && st.nodes.value(8).last_seen_ms == channel.epoch_ms,
+              "D23f 离线节点发出有效信道报告后恢复在线");
     }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);

@@ -21,7 +21,7 @@ struct I18nRegTopoState { I18nRegTopoState() {
 /// @brief 48-bit MAC 转冒号分隔小端字符串(唯一实现见 common/mac_format.h,本函数仅委托)
 inline QString topo_mac_str(quint64 v) { return format_mac_u64(v); }
 
-/// @brief 仅明确表示节点仍在网的帧可恢复在线状态;请求/离网帧不是在线证据。
+/// @brief 仅确认发送方已入网的帧可恢复在线;关联请求和离网帧另按状态机处理。
 bool provides_online_evidence(TopoEventKind k) {
     switch (k) {
         case TopoEventKind::DiscoverList:
@@ -38,12 +38,17 @@ bool provides_online_evidence(TopoEventKind k) {
     }
 }
 
-/// @brief 事件类型 → 节点入网状态(发起关联请求=正在入网,其余在网事件=已入网)
-NodeStatus status_for(TopoEventKind k) {
-    switch (k) {
-        case TopoEventKind::AssocReq: return NodeStatus::OnlineGoing;
-        default:                      return NodeStatus::Online;
+/// @brief 事件类型 → 状态更新;未明确表示在线/入网的事件不改状态。
+bool status_for(TopoEventKind k, NodeStatus& status) {
+    if (k == TopoEventKind::AssocReq) {
+        status = NodeStatus::OnlineGoing;
+        return true;
     }
+    if (provides_online_evidence(k)) {
+        status = NodeStatus::Online;
+        return true;
+    }
+    return false;
 }
 
 /// @brief 入网链路类型赋值(用户拍板优先级):
@@ -381,6 +386,8 @@ void TopoState::apply(const TopoEvent& e) {
     // 网络标识符不完整(NID==0,两规约里 0 均无效)的事件不进拓扑:不学节点、不记事件。
     if (e.nid == 0) return;
     nid = e.nid;
+    NodeStatus event_status = NodeStatus::OnlineGoing;
+    const bool has_event_status = status_for(e.kind, event_status);
     // 南网发现列表上行路由变化检测:若 UpRoute 条目的下一跳与当前父节点
     // 不同,则为拓扑变化,入表记录。必须在下方状态更新前判断。
     bool up_route_changed = false;
@@ -441,6 +448,8 @@ void TopoState::apply(const TopoEvent& e) {
     for (const TeiMacPair& p : e.nodes) {
         if (!p.mac) continue;
         if (p.tei == 0) {
+            // 只有关联请求能创建 pending;其他事件的 TEI=0 不代表正在入网。
+            if (e.kind != TopoEventKind::AssocReq) continue;
             // 正在入网(TEI 未分配):按 MAC 暂存 pending(关联请求阶段)。
             // 该 MAC 若已在拓扑中(设备重上电再次发起关联):先移除旧节点,
             // 再绘制当前"入网中"状态,避免同一 MAC 以"在线"+"入网中"
@@ -462,7 +471,7 @@ void TopoState::apply(const TopoEvent& e) {
         TopoNode& n = nodes[p.tei];
         n.tei = p.tei;
         n.mac = p.mac;
-        n.status = status_for(e.kind);
+        if (has_event_status) n.status = event_status;
         n.last_seen_ms = e.epoch_ms;
         if (e.is_rf_known) { n.is_rf = e.is_rf; n.is_rf_known = true; }
         assign_link_type(n, e);
@@ -520,7 +529,7 @@ void TopoState::apply(const TopoEvent& e) {
         TopoNode& n = nodes[r.first];
         n.tei = r.first;
         n.parent_tei = r.second;
-        n.status = status_for(e.kind);
+        if (has_event_status) n.status = event_status;
         n.last_seen_ms = e.epoch_ms;
         if (e.is_rf_known) { n.is_rf = e.is_rf; n.is_rf_known = true; }
         assign_link_type(n, e);
@@ -568,7 +577,8 @@ void TopoState::apply(const TopoEvent& e) {
             if (!ctei || ctei == kTeiInvalid) continue;   // 0=根(CCO 自身);0xFFFF=未知,均不建节点
             TopoNode& n = nodes[ctei];
             n.tei = ctei;
-            if (n.last_seen_ms == 0) n.last_seen_ms = e.epoch_ms;
+            n.status = NodeStatus::Online; // 成功确认中的子 TEI 位图是当前在网证据
+            n.last_seen_ms = e.epoch_ms;
             // 帧内链路类型:仅首次写入并锁定(方案②,后续事件不翻转);last_seen 为 0 时的补写不受影响
             if (!n.is_rf_known) { n.is_rf = (e.link_type == LinkTypeRf); n.is_rf_known = true; }
         }
@@ -576,6 +586,8 @@ void TopoState::apply(const TopoEvent& e) {
     // 离网节点(按 (NID, MAC) 匹配,标记离线):先走 MAC→TEI 索引 O(1),索引不一致时回退线性扫描
     for (quint64 mac : e.leaves) {
         if (!mac) continue;
+        // 明确离网同时结束该 MAC 尚未完成的入网状态,避免 pending 永久显示为“入网中”。
+        pending.remove(mac);
         // 离网后该 MAC 可能在同一 NID 下被另一角色复用;仅清理本 NID 的 CCO 身份记忆,
         // 不影响其他 NID 下同 MAC 的身份。
         m_cco_macs.remove(nid_mac_key(e.nid, mac));
@@ -646,6 +658,18 @@ void TopoState::apply(const TopoEvent& e) {
 
 void TopoState::apply_channel_info(quint16 reporter_tei, const TopoEvent& e) {
     if (!reporter_tei || reporter_tei == kTeiInvalid) return;
+    const bool has_observation = e.proxy_tei != kTeiInvalid
+        || e.proxy_up_rate >= 0 || e.proxy_down_rate >= 0
+        || e.proxy_comm_rate >= 0 || e.proxy_down_comm_rate >= 0
+        || e.min_comm_rate >= 0 || e.neighbor_teis_present
+        || !e.neighbor_rates.isEmpty() || !e.neighbor_snrs.isEmpty()
+        || !e.rssi_entries.isEmpty();
+    if (!has_observation) return;
+    // 有效帧携带该 reporter 的信道/站点属性,可证明其在线;同时恢复离线状态。
+    TopoNode& reporter = nodes[reporter_tei];
+    if (reporter.tei == 0) reporter.tei = reporter_tei;
+    reporter.status = NodeStatus::Online;
+    reporter.last_seen_ms = e.epoch_ms;
     // 站点属性(表217/表126):代理上行/下行接收率、最小接收率、RF 跳数、角色 + parent_tei 校正
     // 站点属性直报的代理 TEI 比路由推导权威;节点不存在时据此建占位(站点属性自带 proxy/role 身份)
     if (e.proxy_tei != kTeiInvalid) {
