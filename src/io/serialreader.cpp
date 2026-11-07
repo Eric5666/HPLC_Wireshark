@@ -150,7 +150,8 @@ void ReaderWorker::stop_reading() {
 }
 
 namespace {
-// 帧体最多 4 KiB,避免损坏/恶意输入使串口缓冲持续增长。
+// 帧体最多 4 KiB:本分支新增的安全上限,防损坏/恶意输入使串口缓冲持续增长。
+// 合规单帧 ≤4 PB×520B ≈ 2.1KB,4KB 不影响合规帧。
 constexpr int kMaxFrameBodyBytes = 4 * 1024;
 
 // 单调高精度时钟(µs):帧起始分节符 0x3C 到达打点

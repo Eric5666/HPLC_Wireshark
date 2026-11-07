@@ -5,6 +5,15 @@
 ///         逐帧采样路径(note_restart_origin)、同帧不重复报、无变化不报
 ///   D13   身份记忆按 (NID, MAC) 分键:同 MAC 在不同 NID 下 CCO/STA 身份互不串
 ///   D14   mac_to_tei 按 (NID, MAC) 分键:同 MAC 在不同 NID 下映射到不同 TEI,互不串
+///   D17   CCO 基线按 MAC 隔离;同一 NID 多 CCO MAC 标为 NID 冲突,无 MAC 样本不猜身份
+///   D18   逐帧重启进历史回放:replay_topo_logs 合并事件日志与采样日志重放
+///   D24   离网清理 CCO 身份记忆:同一 NID/MAC 复用为 STA 后不得误报 CcoRestart
+///   D25   真实 CCO 节点/TEI=1 索引 -> 离网 -> STA 普通帧先于关联确认
+///   D26   事件侧先学习当前映射再判重启;反复冲突沿用异常表 trips 累加
+///   D27   无 RestartCount 的源角色也生效;广播/未知 TEI 不得覆盖有效身份
+///   D28   离网后的未知身份不能借残留 TEI=1 索引恢复 CCO;有效 CCO 重现仍可检测重启
+///   D29   离线复活:关联请求不复活,白名单帧复活且留复活原因记录
+///   D30   离线→入网中→在线/离网,以及只更新状态的权威来源
 /// 用法:./probe ; exit 0 = 全部断言通过
 #include "topo_state.h"
 #include <QCoreApplication>
@@ -36,6 +45,14 @@ static int count_kind(const TopoState& st, TopoEventKind k) {
 
 static int count_restart_events(const TopoState& st) {
     return count_kind(st, TopoEventKind::StaRestart);
+}
+
+/// @brief 离线复活原因记录条数(描述含“节点恢复在线”的事件)
+static int count_revival_events(const TopoState& st) {
+    int n = 0;
+    for (const TopoEvent& ev : st.events)
+        if (ev.desc.contains(QStringLiteral("节点恢复在线"))) ++n;
+    return n;
 }
 
 /// @brief 构造任意种类的帧级事件(方案 B:采样点不再限于发现列表/关联请求)
@@ -416,35 +433,239 @@ int main(int argc, char** argv) {
         CHECK(!st.note_restart_origin(0, 5, MAC_Z, 6, 2003, 4, false, true),
               "D16c note_restart_origin 拒绝 NID==0,两次采样均不建基线");
     }
-    // D17:离网清理 CCO 身份记忆 —— 同一 NID/MAC 复用为 STA 后不得误报 CcoRestart;
+    // D17(CCO 基线归一到已知 cco_mac,04531b9 遗留):缺源 MAC 的 CCO 帧走 (NID, 0)、带 MAC
+    //     的走 (NID, cco_mac) 时,同一次重启两条基线各报一次。现规范键为 (NID, 已知
+    //     cco_mac):未知时暂用 (NID, 0) 占位,一旦已知就把基线值迁移过去并删占位键。
+    {
+        TopoState st;
+        // 逐帧侧:帧1 缺 MAC 建基线,帧2 带 MAC 同值只迁移不报,帧3 带 MAC 变化报 1 条且 prev 为迁移值
+        CHECK(!st.note_restart_origin(0x0E, kTeiCco, 0, 2, 1001, 1, false, true),
+              "D17a 逐帧 CCO 缺 MAC 首帧建基线不报");
+        CHECK(!st.note_restart_origin(0x0E, kTeiCco, MAC_CCO, 2, 1002, 2, false, true),
+              "D17b 先无 MAC 后有 MAC,同值只迁移不报");
+        CHECK(count_kind(st, TopoEventKind::CcoRestart) == 0,
+              "D17c 迁移后总数仍为 0");
+        CHECK(st.note_restart_origin(0x0E, kTeiCco, MAC_CCO, 3, 1003, 3, false, true),
+              "D17d 迁移后计数 2→3 报 1 条 CcoRestart");
+        bool desc_ok = false;
+        for (const TopoEvent& ev : st.events)
+            if (ev.kind == TopoEventKind::CcoRestart)
+                desc_ok = ev.desc.contains(QStringLiteral("2→3"))
+                       && ev.sender_mac == MAC_CCO && ev.frame_index == 3;
+        CHECK(desc_ok, "D17e CcoRestart 文案 2→3 且 sender_mac 保留真实 cco_mac");
+        CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1
+              && count_restart_events(st) == 0, "D17f 总数 1 条且为 CcoRestart");
+        CHECK(st.note_restart_origin(0x0E, kTeiCco, 0, 4, 1004, 4, false, true),
+              "D17g 再回缺 MAC 形态,计数 3→4 仍报");
+        CHECK(count_kind(st, TopoEventKind::CcoRestart) == 2, "D17h 两次变化共 2 条,不多不少");
+        // 反向顺序:先带 MAC 建基线,后缺 MAC 同值不报、变值只报 1 条(旧实现会漏报)
+        TopoState st2;
+        CHECK(!st2.note_restart_origin(0x0E, kTeiCco, MAC_CCO, 5, 1001, 1, false, true),
+              "D17i 逐帧 CCO 带 MAC 首帧建基线不报");
+        CHECK(!st2.note_restart_origin(0x0E, kTeiCco, 0, 5, 1002, 2, false, true),
+              "D17j 先有 MAC 后无 MAC,同值不报");
+        CHECK(st2.note_restart_origin(0x0E, kTeiCco, 0, 6, 1003, 3, false, true),
+              "D17k 反向计数 5→6 报 1 条(旧实现漏报)");
+        CHECK(count_kind(st2, TopoEventKind::CcoRestart) == 1, "D17l 反向总数 1 条");
+        bool desc2_ok = false;
+        for (const TopoEvent& ev : st2.events)
+            if (ev.kind == TopoEventKind::CcoRestart)
+                desc2_ok = ev.desc.contains(QStringLiteral("5→6"))
+                        && ev.sender_mac == 0 && ev.frame_index == 3;
+        CHECK(desc2_ok, "D17m 反向 CcoRestart 文案 5→6 且无 MAC 帧 sender_mac 为 0");
+        // 事件侧同样归一:发现列表缺 MAC 建基线,带 cco_mac 的关联确认同值不报、变值只报 1 条
+        TopoState st3;
+        TopoEvent dl = frame(TopoEventKind::DiscoverList, 0x0E, 0, 2, 1);
+        st3.apply(dl);
+        TopoEvent cnf_same = frame(TopoEventKind::AssocCnf, 0x0E, MAC_CCO, 2, 2, MAC_CCO);
+        st3.apply(cnf_same);
+        CHECK(count_kind(st3, TopoEventKind::CcoRestart) == 0,
+              "D17n 事件侧先无 MAC 后有 MAC,同值只迁移不报");
+        TopoEvent cnf = frame(TopoEventKind::AssocCnf, 0x0E, MAC_CCO, 3, 3, MAC_CCO);
+        st3.apply(cnf);
+        bool desc3_ok = false;
+        for (const TopoEvent& ev : st3.events)
+            if (ev.kind == TopoEventKind::CcoRestart)
+                desc3_ok = ev.desc.contains(QStringLiteral("2→3"))
+                        && ev.sender_mac == MAC_CCO;
+        CHECK(count_kind(st3, TopoEventKind::CcoRestart) == 1
+              && count_restart_events(st3) == 0 && desc3_ok,
+              "D17o 事件侧迁移后变值只报 1 条,文案 2→3 且 sender_mac 为 cco_mac");
+        // 事件侧反向:先带 MAC 建基线,后缺 MAC 同值不报、变值只报 1 条
+        TopoState st5;
+        TopoEvent cnf_first = frame(TopoEventKind::AssocCnf, 0x0E, MAC_CCO, 5, 1, MAC_CCO);
+        st5.apply(cnf_first);
+        TopoEvent dl_same = frame(TopoEventKind::DiscoverList, 0x0E, 0, 5, 2);
+        st5.apply(dl_same);
+        CHECK(count_kind(st5, TopoEventKind::CcoRestart) == 0,
+              "D17p 事件侧先有 MAC 后无 MAC,同值不报");
+        TopoEvent dl_chg = frame(TopoEventKind::DiscoverList, 0x0E, 0, 6, 3);
+        st5.apply(dl_chg);
+        bool desc5_ok = false;
+        for (const TopoEvent& ev : st5.events)
+            if (ev.kind == TopoEventKind::CcoRestart)
+                desc5_ok = ev.desc.contains(QStringLiteral("5→6"))
+                        && ev.sender_mac == 0;
+        CHECK(count_kind(st5, TopoEventKind::CcoRestart) == 1
+              && count_restart_events(st5) == 0 && desc5_ok,
+              "D17q 事件侧反向变值只报 1 条,文案 5→6 且 sender_mac 为 0");
+        // STA 基线不受影响:仍按 (NID, 主体 MAC) 分键,两 STA 各自报
+        TopoState st4;
+        CHECK(!st4.note_restart_origin(0x0E, 5, MAC_A, 2, 1001, 1, false, true),
+              "D17r STA 首帧建基线不报");
+        CHECK(st4.note_restart_origin(0x0E, 5, MAC_A, 3, 1002, 2, false, true),
+              "D17s STA 计数 2→3 报 StaRestart");
+        CHECK(count_kind(st4, TopoEventKind::CcoRestart) == 0
+              && count_restart_events(st4) == 1, "D17t STA 变化仍为 1 条 StaRestart");
+    }
+    // D17u:不同 CCO MAC 即使计数相同也属于不同身份;同一 NID 下同时记为 NID 冲突。
+    //       无 MAC 样本只更新独立占位基线,后续带 MAC 样本仍各自按原基线判断。
+    {
+        TopoState st;
+        CHECK(!st.note_restart_origin(0x0E, kTeiCco, MAC_CCO, 3, 1001, 1, false, true),
+              "D17u-a 首个 CCO MAC 的计数 3 建基线");
+        CHECK(!st.note_restart_origin(0x0E, kTeiCco, MAC_B, 3, 1002, 2, false, true),
+              "D17u-b 第二个 CCO MAC 的相同计数仍建独立基线");
+        int nid_conflicts = 0;
+        bool conflict_pair_ok = false;
+        for (const TopoAnomaly& a : st.anomalies) {
+            if (a.kind != TopoAnomalyKind::NidConflict) continue;
+            ++nid_conflicts;
+            conflict_pair_ok = a.mac_old == MAC_CCO && a.mac == MAC_B
+                            && a.trips == 1 && a.first_frame == 2;
+        }
+        CHECK(nid_conflicts == 1 && conflict_pair_ok,
+              "D17u-c 同一 NID 下不同 CCO MAC 记录 NID 冲突及 MAC 对");
+        CHECK(!st.note_restart_origin(0x0E, kTeiCco, 0, 4, 1003, 3, false, true)
+                  && count_kind(st, TopoEventKind::CcoRestart) == 0,
+              "D17u-d 多身份时无 MAC 样本只建独立占位基线,不冒认任一设备");
+        CHECK(st.note_restart_origin(0x0E, kTeiCco, MAC_CCO, 4, 1004, 4, false, true),
+              "D17u-e 后续 MAC_CCO 样本仍按自身 3→4 基线告警");
+        CHECK(!st.note_restart_origin(0x0E, kTeiCco, MAC_B, 3, 1005, 5, false, true),
+              "D17u-f 另一 MAC 的基线未被无 MAC 样本改写");
+        CHECK(st.note_restart_origin(0x0E, kTeiCco, MAC_B, 4, 1006, 6, false, true),
+              "D17u-g 第二个 MAC 独立 3→4 时也报告");
+        bool independent_events_ok = false;
+        int cco_restart_count = 0;
+        for (const TopoEvent& ev : st.events) {
+            if (ev.kind != TopoEventKind::CcoRestart) continue;
+            ++cco_restart_count;
+            if (ev.sender_mac == MAC_B && ev.frame_index == 6
+                && ev.desc.contains(QStringLiteral("3→4")))
+                independent_events_ok = true;
+        }
+        CHECK(cco_restart_count == 2 && independent_events_ok,
+              "D17u-h 两台设备分别告警,事件保留真实 MAC 与帧号");
+
+        TopoState ambiguous;
+        ambiguous.note_restart_origin(0x0E, kTeiCco, MAC_CCO, 3, 2001, 1, false, true);
+        ambiguous.note_restart_origin(0x0E, kTeiCco, MAC_B, 7, 2002, 2, false, true);
+        CHECK(!ambiguous.note_restart_origin(0x0E, kTeiCco, 0, 4, 2003, 3, false, true)
+                  && count_kind(ambiguous, TopoEventKind::CcoRestart) == 0,
+              "D17u-i 候选值不同的无 MAC 样本不借用任一身份的基线");
+        CHECK(ambiguous.note_restart_origin(0x0E, kTeiCco, MAC_CCO, 4, 2004, 4, false, true)
+                  && !ambiguous.note_restart_origin(0x0E, kTeiCco, MAC_B, 7, 2005, 5, false, true),
+              "D17u-j 候选冲突后各带 MAC 样本仍分别使用 3 与 7 的基线");
+        CHECK(count_kind(ambiguous, TopoEventKind::CcoRestart) == 1,
+              "D17u-k 只有 MAC_CCO 的 3→4 产生重启事件");
+
+        TopoState separate_nids;
+        separate_nids.note_restart_origin(0x0E, kTeiCco, MAC_CCO, 3, 3001, 1, false, true);
+        separate_nids.note_restart_origin(0x14, kTeiCco, MAC_B, 3, 3002, 2, false, true);
+        CHECK(separate_nids.anomalies.isEmpty(),
+              "D17u-l 不同 NID 的 CCO MAC 不构成彼此的 NID 冲突");
+        TopoState multiple_nids;
+        multiple_nids.note_restart_origin(0x0E, kTeiCco, MAC_CCO, 1, 4001, 1, false, true);
+        multiple_nids.note_restart_origin(0x0E, kTeiCco, MAC_B, 1, 4002, 2, false, true);
+        multiple_nids.note_restart_origin(0x14, kTeiCco, MAC_A, 1, 4003, 3, false, true);
+        multiple_nids.note_restart_origin(0x14, kTeiCco, MAC_B, 1, 4004, 4, false, true);
+        nid_conflicts = 0;
+        for (const TopoAnomaly& a : multiple_nids.anomalies)
+            if (a.kind == TopoAnomalyKind::NidConflict) ++nid_conflicts;
+        CHECK(nid_conflicts == 2,
+              "D17u-m 同一状态内两个 NID 的冲突异常也分别保留");
+
+        TopoState no_counter;
+        no_counter.apply(frame(TopoEventKind::DiscoverList, 0x0E, 0,
+                               kRestartCountInvalid, 1, MAC_CCO));
+        no_counter.apply(frame(TopoEventKind::DiscoverList, 0x0E, 0,
+                               kRestartCountInvalid, 2, MAC_B));
+        nid_conflicts = 0;
+        for (const TopoAnomaly& a : no_counter.anomalies)
+            if (a.kind == TopoAnomalyKind::NidConflict) ++nid_conflicts;
+        CHECK(nid_conflicts == 1,
+              "D17u-n 即使没有重启计数,TEI=1 的不同 CCO MAC 仍记录 NID 冲突");
+    }
+    // D18(逐帧重启进历史回放,04531b9 遗留):普通数据帧触发的重启只走逐帧采样,
+    //     不进拓扑事件日志;回放必须按帧序合并两条日志重放,否则历史快照里重启全消失。
+    {
+        // 模拟 MainWindow 实时路径:帧1 关联确认(事件+采样),帧2 普通数据帧(仅采样)。
+        // 实时侧:事件侧与逐帧侧共用同一基线,同一次重启只报一次。
+        QHash<quint32, TopoState> live;
+        QVector<TopoLogItem> topo_log;
+        QVector<TopoRestartSample> restart_log;
+        TopoState& live_st = live[0x0E];
+        live_st.nid = 0x0E;
+        TopoEvent assoc1 = frame(TopoEventKind::AssocCnf, 0x0E, MAC_A, 2, 1);
+        assoc1.nodes.append({5, MAC_A});
+        live_st.apply(assoc1);
+        topo_log.append({1, assoc1});
+        live_st.note_restart_origin(0x0E, 5, MAC_A, 2, 1001, 1, false, true);
+        restart_log.append({1, 0x0E, 5, MAC_A, 2, 1001, false, true});
+        CHECK(count_restart_events(live_st) == 0, "D18a 帧1 实时只建基线不报");
+        CHECK(live_st.note_restart_origin(0x0E, 5, MAC_A, 3, 1002, 2, false, true),
+              "D18b 帧2 普通数据帧逐帧采样报 StaRestart");
+        restart_log.append({2, 0x0E, 5, MAC_A, 3, 1002, false, true});
+        CHECK(count_restart_events(live_st) == 1, "D18c 实时共 1 条 StaRestart");
+        // 回放到帧1:冻结快照里还没有重启(变化在帧2)
+        QHash<quint32, TopoState> hist;
+        qint64 replayed = -1;
+        replay_topo_logs(topo_log, restart_log, 1, replayed, hist);
+        CHECK(hist.contains(0x0E) && count_restart_events(hist[0x0E]) == 0,
+              "D18d 回放到帧1,快照里 0 条重启");
+        // 增量回放到帧2:快照里出现实时那 1 条,不多不少
+        replay_topo_logs(topo_log, restart_log, 2, replayed, hist);
+        CHECK(count_restart_events(hist[0x0E]) == 1, "D18e 增量回放到帧2,快照里 1 条 StaRestart");
+        bool desc_ok = false;
+        for (const TopoEvent& ev : hist[0x0E].events)
+            if (ev.kind == TopoEventKind::StaRestart)
+                desc_ok = ev.desc.contains(QStringLiteral("2→3")) && ev.frame_index == 2;
+        CHECK(desc_ok, "D18f 快照里的 StaRestart 文案 2→3 且来源帧为 2");
+        // 回拨到帧1 再重放到帧2:全量重建后仍为 1 条,不 double-apply
+        replay_topo_logs(topo_log, restart_log, 1, replayed, hist);
+        CHECK(count_restart_events(hist[0x0E]) == 0, "D18g 回拨到帧1,快照清回 0 条");
+        replay_topo_logs(topo_log, restart_log, 2, replayed, hist);
+        CHECK(count_restart_events(hist[0x0E]) == 1, "D18h 回拨后再重放到帧2,仍为 1 条");
+    }
+    // D24:离网清理 CCO 身份记忆 —— 同一 NID/MAC 复用为 STA 后不得误报 CcoRestart;
     //      其他 NID 的同 MAC 记忆必须保留。
     {
         TopoState st;
         const quint64 MAC_REUSE = 0x334455667788ULL;
         // 逐帧路径先以 TEI=1 识别为 CCO,建立身份记忆和 CCO 基线。
         CHECK(!st.note_restart_origin(0x0E, kTeiCco, MAC_REUSE, 2, 3001, 1, false, true),
-              "D17a 非 CCO 节点 MAC 被逐帧路径识别为 CCO时首帧建基线");
+              "D24a 非 CCO 节点 MAC 被逐帧路径识别为 CCO时首帧建基线");
         // 同 MAC 在另一 NID 下也建立 CCO 记忆,验证离网只删目标 NID。
         CHECK(!st.note_restart_origin(0x14, kTeiCco, MAC_REUSE, 7, 3002, 2, false, true),
-              "D17b 另一 NID 同 MAC 建立独立 CCO 基线");
+              "D24b 另一 NID 同 MAC 建立独立 CCO 基线");
         TopoEvent leave = frame(TopoEventKind::LeaveInd, 0x0E, 0, -1, 3);
         leave.leaves.append(MAC_REUSE);
         st.apply(leave);
         // 同一 NID、同一 MAC 作为 STA 首帧只建 STA 基线,下一次变化必须是 StaRestart。
         CHECK(st.note_restart_origin(0x0E, 5, MAC_REUSE, 4, 3003, 4, false, true),
-              "D17c 离网后 CCO/STA 同 MAC 记冲突,不误报重启");
+              "D24c 离网后 CCO/STA 同 MAC 记冲突,不误报重启");
         CHECK(st.note_restart_origin(0x0E, 5, MAC_REUSE, 5, 3004, 5, false, true),
-              "D17d 离网后同 NID 同 MAC 计数变化触发 StaRestart");
+              "D24d 离网后同 NID 同 MAC 计数变化触发 StaRestart");
         CHECK(count_kind(st, TopoEventKind::StaRestart) == 1
               && count_kind(st, TopoEventKind::CcoRestart) == 0,
-              "D17e MAC 复用后只报 StaRestart、不误报 CcoRestart");
+              "D24e MAC 复用后只报 StaRestart、不误报 CcoRestart");
         CHECK(st.note_restart_origin(0x14, kTeiCco, MAC_REUSE, 8, 3005, 6, false, true),
-              "D17f 其他 NID 的 CCO 记忆未被离网清理,仍报 CcoRestart");
+              "D24f 其他 NID 的 CCO 记忆未被离网清理,仍报 CcoRestart");
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1,
-              "D17g 其他 NID CCO 身份记忆保持独立");
+              "D24g 其他 NID CCO 身份记忆保持独立");
     }
 
-    // D18:真实 CCO 节点/TEI=1 索引 -> 离网 -> STA 普通帧先于关联确认。
+    // D25:真实 CCO 节点/TEI=1 索引 -> 离网 -> STA 普通帧先于关联确认。
     // 每次 CCO/STA 身份冲突都累计记录,最新有效信息覆盖旧索引/记忆,角色间不串基线。
     {
         TopoState st;
@@ -454,46 +675,46 @@ int main(int argc, char** argv) {
         TopoEvent learn = frame(TopoEventKind::DiscoverList, net, mac, 2, 1, mac);
         st.apply(learn);
         CHECK(st.mac_of(kTeiCco) == mac && st.mac_to_tei.value(key) == kTeiCco,
-              "D18a 创建真实 CCO 节点和索引");
+              "D25a 创建真实 CCO 节点和索引");
         TopoEvent leave = frame(TopoEventKind::LeaveInd, net, 0, -1, 2);
         leave.leaves.append(mac);
         st.apply(leave);
         st.note_restart_origin(net, 5, mac, 4, 1003, 3, false, true);
         CHECK(st.mac_to_tei.value(key) == 5 && st.mac_of(kTeiCco) == 0 && st.cco_mac == 0,
-              "D18b 普通 STA 帧覆盖旧 TEI=1 映射和 CCO 字段");
+              "D25b 普通 STA 帧覆盖旧 TEI=1 映射和 CCO 字段");
         CHECK(st.anomalies.size() == 1 && st.anomalies[0].kind == TopoAnomalyKind::MacMultipleTei
                   && st.anomalies[0].trips == 1 && st.anomalies[0].tei_old == 1
                   && st.anomalies[0].tei == 5,
-              "D18c 离线 CCO 与 STA 同 MAC 仍记录一次冲突");
+              "D25c 离线 CCO 与 STA 同 MAC 仍记录一次冲突");
         TopoEvent reassoc = frame(TopoEventKind::AssocCnf, net, mac, 4, 4);
         reassoc.nodes.append({5, mac});
         st.apply(reassoc);
         st.note_restart_origin(net, 5, mac, 5, 1005, 5, false, true);
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 0
                   && count_kind(st, TopoEventKind::StaRestart) == 1,
-              "D18d 关联后计数变化只报 STA,旧 CCO 身份不回灌");
-        CHECK(st.anomalies[0].trips == 1, "D18e 相同最新身份的后续帧不重复冲突");
+              "D25d 关联后计数变化只报 STA,旧 CCO 身份不回灌");
+        CHECK(st.anomalies[0].trips == 1, "D25e 相同最新身份的后续帧不重复冲突");
         st.note_restart_origin(net, 1, mac, 9, 1006, 6, false, true);
         CHECK(st.mac_to_tei.value(key) == 1 && st.cco_mac == mac
                   && st.anomalies[0].trips == 2 && st.anomalies[0].tei_old == 5
                   && st.anomalies[0].tei == 1,
-              "D18f 再次冲突继续记录并覆盖回 CCO");
+              "D25f 再次冲突继续记录并覆盖回 CCO");
         st.note_restart_origin(net, 1, mac, 10, 1007, 7, false, true);
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1,
-              "D18g CCO 新角色基线独立,后续变化正常报告");
+              "D25g CCO 新角色基线独立,后续变化正常报告");
         st.note_restart_origin(net, 5, mac, 12, 1008, 8, false, true);
         CHECK(st.mac_to_tei.value(key) == 5 && st.anomalies[0].trips == 3
                   && st.anomalies[0].last_frame == 8 && st.anomalies[0].tei_old == 1
                   && st.anomalies[0].tei == 5,
-              "D18h 第三次冲突继续累计并更新最近方向/帧号");
+              "D25h 第三次冲突继续累计并更新最近方向/帧号");
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1
                   && count_kind(st, TopoEventKind::StaRestart) == 1,
-              "D18i 角色切换本身不生成虚假重启");
+              "D25i 角色切换本身不生成虚假重启");
         st.note_restart_origin(net, 0, mac, 12, 1008, 8, false, true);
         CHECK(st.mac_to_tei.value(key) == 5 && st.anomalies[0].trips == 3,
-              "D18j 无源 TEI 回退最新 STA 身份,不恢复旧 CCO");
+              "D25j 无源 TEI 回退最新 STA 身份,不恢复旧 CCO");
     }
-    // D19:事件侧必须先学习当前映射再判重启;反复冲突沿用异常表 trips 累加。
+    // D26:事件侧必须先学习当前映射再判重启;反复冲突沿用异常表 trips 累加。
     {
         TopoState st;
         const quint64 mac = 0x334455667788ULL;
@@ -504,37 +725,37 @@ int main(int argc, char** argv) {
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 0
                   && count_kind(st, TopoEventKind::StaRestart) == 0
                   && st.anomalies.size() == 1 && st.anomalies[0].trips == 1,
-              "D19a 事件新 STA 身份先覆盖旧 CCO,不拿旧基线误报");
+              "D26a 事件新 STA 身份先覆盖旧 CCO,不拿旧基线误报");
         sta.restart_count = 9; sta.frame_index = 3; sta.epoch_ms = 1003;
         st.apply(sta);
         CHECK(count_kind(st, TopoEventKind::StaRestart) == 1 && st.anomalies[0].trips == 1,
-              "D19b 同角色事件继续正常检测重启");
+              "D26b 同角色事件继续正常检测重启");
         st.apply(frame(TopoEventKind::DiscoverList, 0x0E, mac, 3, 4, mac));
         CHECK(st.anomalies[0].trips == 2 && st.mac_of(5) == 0 && st.mac_of(1) == mac,
-              "D19c 事件 CCO 再次出现仍记冲突并覆盖节点");
+              "D26c 事件 CCO 再次出现仍记冲突并覆盖节点");
         sta.restart_count = 10; sta.frame_index = 5; sta.epoch_ms = 1005;
         st.apply(sta);
         CHECK(st.anomalies[0].trips == 3 && st.mac_of(1) == 0 && st.mac_of(5) == mac,
-              "D19d 事件再次切回 STA 继续累计冲突");
+              "D26d 事件再次切回 STA 继续累计冲突");
     }
-    // D20:无 RestartCount 的源角色也生效;广播/未知 TEI 不得覆盖有效身份。
+    // D27:无 RestartCount 的源角色也生效;广播/未知 TEI 不得覆盖有效身份。
     {
         TopoState st;
         st.note_restart_origin(0x0E, 1, MAC_A, 2, 1001, 1, false, true);
         CHECK(st.note_restart_origin(0x0E, 5, MAC_A, kRestartCountInvalid, 1002, 2, false, true),
-              "D20a 无重启计数仍记录 CCO/STA 冲突供 UI 刷新");
+              "D27a 无重启计数仍记录 CCO/STA 冲突供 UI 刷新");
         st.note_restart_origin(0x0E, kTeiBroadcast, MAC_A, kRestartCountInvalid, 1003, 3, false, true);
         st.note_restart_origin(0x0E, kTeiInvalid, MAC_A, kRestartCountInvalid, 1004, 4, false, true);
         CHECK(st.mac_to_tei.value(TopoState::nid_mac_key(0x0E, MAC_A)) == 5
                   && st.anomalies.size() == 1 && st.anomalies[0].trips == 1,
-              "D20b 广播/无效 TEI 不改变当前身份或新增冲突");
+              "D27b 广播/无效 TEI 不改变当前身份或新增冲突");
         st.note_restart_origin(0x0E, 5, MAC_A, 9, 1005, 5, false, true);
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 0
                   && count_kind(st, TopoEventKind::StaRestart) == 0,
-              "D20c 无计数的角色切换清理旧基线,新身份首个计数只建基线");
+              "D27c 无计数的角色切换清理旧基线,新身份首个计数只建基线");
     }
 
-    // D21:离网后的未知身份不能借残留 TEI=1 索引恢复 CCO;有效 CCO 重现仍可检测重启。
+    // D28:离网后的未知身份不能借残留 TEI=1 索引恢复 CCO;有效 CCO 重现仍可检测重启。
     {
         TopoState st;
         const quint32 net = 0x0E;
@@ -544,14 +765,15 @@ int main(int argc, char** argv) {
         st.apply(leave);
         st.note_restart_origin(net, 0, MAC_CCO, 3, 1003, 3, false, true);
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 0,
-              "D21a 未知源 TEI 不使用离线 CCO 索引恢复身份");
+              "D28a 未知源 TEI 不使用离线 CCO 索引恢复身份");
         st.note_restart_origin(net, 1, MAC_CCO, 4, 1004, 4, false, true);
         CHECK(count_kind(st, TopoEventKind::CcoRestart) == 1 && st.anomalies.isEmpty()
                   && st.nodes.value(1).status == NodeStatus::Online,
-              "D21b 同一 CCO 有效源 TEI 重现恢复在线并检测重启,不当作角色冲突");
+              "D28b 同一 CCO 有效源 TEI 重现恢复在线并检测重启,不当作角色冲突");
     }
 
-    // D22:关联请求不把已分配 TEI 的离线节点直接判在线;已入网请求及其他正向帧可恢复。
+    // D29:关联请求不把已分配 TEI 的离线节点直接判在线;已入网请求及其他正向帧可恢复。
+    // 复活要留痕:离线→在线跃迁在事件记录里留一条带原因的记录(只记跃迁,不每帧刷屏)。
     {
         TopoState st;
         const quint32 net = 0x0E;
@@ -562,12 +784,12 @@ int main(int argc, char** argv) {
         leave.leaves.append(MAC_A);
         st.apply(leave);
         CHECK(st.nodes.value(5).status == NodeStatus::Offline,
-              "D22a LeaveInd 后 STA 保持离线");
+              "D29a LeaveInd 后 STA 保持离线");
         st.note_restart_origin(net, 5, MAC_A, kRestartCountInvalid, 1002, 2, false, true,
                                TopoEventKind::LeaveInd);
         CHECK(st.nodes.value(5).status == NodeStatus::Offline
                   && st.nodes.value(5).last_seen_ms == leave.epoch_ms,
-              "D22b 离网指示对应帧不能复活节点");
+              "D29b 离网指示对应帧不能复活节点");
 
         // ChangeProxyReq 在 apply 中也只是记录请求;逐帧采样不能把离线 STA 复活。
         TopoEvent proxy_req = frame(TopoEventKind::ChangeProxyReq, net, MAC_A,
@@ -578,7 +800,19 @@ int main(int argc, char** argv) {
                                TopoEventKind::ChangeProxyReq);
         CHECK(st.nodes.value(5).status == NodeStatus::Online
                   && st.nodes.value(5).last_seen_ms == 1003,
-              "D22c 已入网 STA 的代理变更请求可恢复在线");
+              "D29c 已入网 STA 的代理变更请求可恢复在线");
+        // 复活要留痕:逐帧采样复活留 1 条带原因的事件记录(apply 未翻状态,无重复记)。
+        CHECK(count_revival_events(st) == 1,
+              "D29f 代理变更请求复活留 1 条复活原因记录");
+        bool proxy_revival_ok = false;
+        for (const TopoEvent& ev : st.events)
+            if (ev.desc.contains(QStringLiteral("节点恢复在线")))
+                proxy_revival_ok = ev.kind == TopoEventKind::ChangeProxyReq
+                    && ev.desc.contains(QStringLiteral("代理变更请求"))
+                    && ev.frame_index == 3 && ev.epoch_ms == 1003
+                    && ev.nodes.size() == 1 && ev.nodes[0].tei == 5
+                    && ev.nodes[0].mac == MAC_A;
+        CHECK(proxy_revival_ok, "D29g 复活记录带 kind/原因/帧号/节点");
 
         TopoEvent second_leave = frame(TopoEventKind::LeaveInd, net, 0,
                                        kRestartCountInvalid, 4);
@@ -588,7 +822,24 @@ int main(int argc, char** argv) {
                                TopoEventKind::Other);
         CHECK(st.nodes.value(5).status == NodeStatus::Online
                   && st.nodes.value(5).last_seen_ms == 1005,
-              "D22d 普通数据帧仍可恢复既有节点在线");
+              "D29d 普通数据帧仍可恢复既有节点在线");
+        CHECK(count_revival_events(st) == 2,
+              "D29h 普通数据帧复活再留 1 条,不多不少");
+        bool data_revival_ok = false;
+        for (const TopoEvent& ev : st.events)
+            if (ev.desc.contains(QStringLiteral("节点恢复在线"))
+                    && ev.kind == TopoEventKind::Other)
+                data_revival_ok = ev.desc.contains(QStringLiteral("普通数据帧"))
+                    && ev.frame_index == 5 && ev.epoch_ms == 1005
+                    && ev.nodes.size() == 1 && ev.nodes[0].tei == 5
+                    && ev.nodes[0].mac == MAC_A;
+        CHECK(data_revival_ok, "D29i 普通数据帧复活记录带原因普通数据帧");
+        // 已在线节点再收到普通数据帧只更新 last_seen,不重复记复活原因。
+        st.note_restart_origin(net, 5, MAC_A, kRestartCountInvalid, 1006, 6, false, true,
+                               TopoEventKind::Other);
+        CHECK(count_revival_events(st) == 2
+                  && st.nodes.value(5).last_seen_ms == 1006,
+              "D29j 已在线节点普通数据帧不重复记复活原因");
 
         // 关联请求只表示重新入网中,不能把节点标成在线。
         TopoEvent third_leave = frame(TopoEventKind::LeaveInd, net, 0,
@@ -603,10 +854,44 @@ int main(int argc, char** argv) {
                                TopoEventKind::AssocReq);
         CHECK(st.pending.contains(MAC_A) && !st.nodes.contains(5)
                   && st.pending.value(MAC_A).status == NodeStatus::OnlineGoing,
-              "D22e 关联请求仅建立入网中状态,不复活离线 TEI 节点");
+              "D29e 关联请求仅建立入网中状态,不复活离线 TEI 节点");
+    }
+    // D29k-o: apply() 的状态机翻转同样留复活记录(实机上 AssocCnf 带 (TEI,MAC) 先到 apply,
+    // 随后逐帧采样见已在线,不重复记)。
+    {
+        TopoState st;
+        const quint32 net = 0x0E;
+        TopoEvent joined = frame(TopoEventKind::AssocCnf, net, MAC_A, kRestartCountInvalid, 1);
+        joined.nodes.append({5, MAC_A});
+        st.apply(joined);
+        TopoEvent leave = frame(TopoEventKind::LeaveInd, net, 0, kRestartCountInvalid, 2);
+        leave.leaves.append(MAC_A);
+        st.apply(leave);
+        CHECK(st.nodes.value(5).status == NodeStatus::Offline,
+              "D29k 离网后 STA 离线");
+        TopoEvent cnf = frame(TopoEventKind::AssocCnf, net, MAC_A, kRestartCountInvalid, 3);
+        cnf.nodes.append({5, MAC_A});
+        st.apply(cnf);
+        CHECK(st.nodes.value(5).status == NodeStatus::Online,
+              "D29l 关联确认经 apply 复活节点");
+        bool apply_revival_ok = false;
+        for (const TopoEvent& ev : st.events)
+            if (ev.desc.contains(QStringLiteral("节点恢复在线")))
+                apply_revival_ok = ev.kind == TopoEventKind::AssocCnf
+                    && ev.desc.contains(QStringLiteral("关联确认"))
+                    && ev.frame_index == 3 && ev.epoch_ms == 1003
+                    && ev.nodes.size() == 1 && ev.nodes[0].tei == 5
+                    && ev.nodes[0].mac == MAC_A;
+        CHECK(apply_revival_ok, "D29m apply 复活记录带 kind/原因/帧号/节点");
+        CHECK(count_revival_events(st) == 1,
+              "D29n apply 复活只留 1 条记录");
+        st.note_restart_origin(net, 5, MAC_A, kRestartCountInvalid, 1003, 3, false, true,
+                               TopoEventKind::AssocCnf);
+        CHECK(count_revival_events(st) == 1,
+              "D29o apply 与逐帧采样同一复活不重复记");
     }
 
-    // D23:离线→入网中→在线/离网,以及只更新状态的权威来源。
+    // D30:离线→入网中→在线/离网,以及只更新状态的权威来源。
     {
         TopoState st;
         const quint32 net = 0x0F;
@@ -623,14 +908,14 @@ int main(int argc, char** argv) {
         st.apply(assoc_req);
         CHECK(!st.nodes.contains(5) && st.pending.contains(MAC_A)
                   && st.pending.value(MAC_A).status == NodeStatus::OnlineGoing,
-              "D23a 离线 STA 的关联请求转为入网中");
+              "D30a 离线 STA 的关联请求转为入网中");
 
         TopoEvent leave_pending = frame(TopoEventKind::LeaveInd, net, 0,
                                         kRestartCountInvalid, 4);
         leave_pending.leaves.append(MAC_A);
         st.apply(leave_pending);
         CHECK(!st.pending.contains(MAC_A),
-              "D23b 离网指示清除未完成的 pending 入网状态");
+              "D30b 离网指示清除未完成的 pending 入网状态");
 
         assoc_req.epoch_ms = 5;
         assoc_req.frame_index = 5;
@@ -640,7 +925,7 @@ int main(int argc, char** argv) {
         assoc_cnf.nodes.append({5, MAC_A});
         st.apply(assoc_cnf);
         CHECK(!st.pending.contains(MAC_A) && st.nodes.value(5).status == NodeStatus::Online,
-              "D23c 关联确认将 pending 节点提升为在线");
+              "D30c 关联确认将 pending 节点提升为在线");
     }
     {
         TopoState st;
@@ -657,7 +942,7 @@ int main(int argc, char** argv) {
         synthetic.routes.append({5, 2});
         st.apply(synthetic);
         CHECK(st.nodes.value(5).status == NodeStatus::Offline,
-              "D23d 非在线证据事件不把离线节点改为在线");
+              "D30d 非在线证据事件不把离线节点改为在线");
 
         TopoEvent proxy = frame(TopoEventKind::ChangeProxyCnf, net, 0,
                                 kRestartCountInvalid, 4);
@@ -666,7 +951,7 @@ int main(int argc, char** argv) {
         st.apply(proxy);
         CHECK(st.nodes.value(7).status == NodeStatus::Online
                   && st.nodes.value(7).last_seen_ms == proxy.epoch_ms,
-              "D23e 成功代理确认中的子 TEI 位图建立在线节点");
+              "D30e 成功代理确认中的子 TEI 位图建立在线节点");
 
         TopoEvent sta = frame(TopoEventKind::AssocCnf, net, MAC_B,
                               kRestartCountInvalid, 5);
@@ -683,7 +968,7 @@ int main(int argc, char** argv) {
         st.apply_channel_info(8, channel);
         CHECK(st.nodes.value(8).status == NodeStatus::Online
                   && st.nodes.value(8).last_seen_ms == channel.epoch_ms,
-              "D23f 离线节点发出有效信道报告后恢复在线");
+              "D30f 离线节点发出有效信道报告后恢复在线");
     }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);

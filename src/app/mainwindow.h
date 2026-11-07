@@ -42,12 +42,6 @@ class ProtocolTree;
 class TopoWindow;
 struct PacketEntry;
 
-/// @brief 拓扑事件回放日志条目(帧序号 → 事件;供 TOPO 历史回放调试)
-struct TopoLogItem {
-    qint64    frame_index = 0; ///< PacketEntry::index(1-based 全局帧序号)
-    TopoEvent event;           ///< 已填充 nid/epoch_ms/is_rf 的完整事件
-};
-
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -158,6 +152,7 @@ private:
     TopoWindow*    m_topo_window = nullptr;       ///< 拓扑独立窗口(懒创建)
     QHash<quint32, TopoState> m_topo_states;      ///< NID → 拓扑状态(实时累积)
     QVector<TopoLogItem> m_topo_log;              ///< 拓扑事件日志(帧序;供历史回放)
+    QVector<TopoRestartSample> m_topo_restart_log; ///< 逐帧重启采样日志(帧序;供历史回放)
     QHash<quint32, TopoState> m_topo_hist_states; ///< 回放快照:重放到选中帧的拓扑(冻结显示)
     bool   m_topo_hist_active = false;            ///< TOPO 历史回放(冻结)模式
     qint64 m_topo_hist_frame = 0;                 ///< 回放到的帧序号

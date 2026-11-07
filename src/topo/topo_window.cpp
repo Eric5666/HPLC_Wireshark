@@ -165,6 +165,7 @@ QString anomaly_kind_name(TopoAnomalyKind k) {
         case TopoAnomalyKind::TeiMultipleMac:          return trl::L("同一 TEI 多 MAC");
         case TopoAnomalyKind::RestartCountOscillation: return trl::L("重启次数振荡");
         case TopoAnomalyKind::LinkCountMismatch:       return trl::L("两链路计数不同");
+        case TopoAnomalyKind::NidConflict:             return trl::L("同一 NID 多 CCO MAC");
     }
     return trl::L("其他");
 }
@@ -187,18 +188,21 @@ struct I18nRegTopoWindow {
                          "Route change log (assoc conf / assoc ind / gather ind / proxy change req / proxy change / discover list / leave ind / CCO reboot / STA reboot)");
         trl::register_en("CCO重启", "CCO reboot");
         trl::register_en("STA重启", "STA reboot");
-        // 异常/冲突页签(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)
+        // 异常/冲突页签(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡 / NID 冲突)
         trl::register_en("路由变更", "Route Change");
         trl::register_en("异常/冲突", "Anomaly / Conflict");
-        trl::register_en("异常/冲突记录(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)", "Anomaly / conflict log (one MAC many TEIs / one TEI many MACs / restart-count oscillation)");
+        trl::register_en("异常/冲突记录(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡 / NID 冲突)", "Anomaly / conflict log (one MAC many TEIs / one TEI many MACs / restart-count oscillation / NID conflict)");
         trl::register_en("同一 MAC 多 TEI", "One MAC, Many TEIs");
         trl::register_en("同一 TEI 多 MAC", "One TEI, Many MACs");
         trl::register_en("重启次数振荡", "Restart-Count Oscillation");
         trl::register_en("两链路计数不同", "Link Count Mismatch");
+        trl::register_en("同一 NID 多 CCO MAC", "Multiple CCO MACs in One NID");
+        trl::register_en("同一 NID 下出现不同 CCO MAC", "Different CCO MACs Detected in One NID");
         trl::register_en("载波 / 无线", "PLC / RF");
         trl::register_en("次数", "Occurrences");
         // "次数"列分类型语义(A/B 冲突次数 / C 往返次数 / D 差异组合数)
         trl::register_en("冲突次数：同一主体反复冲突的累计次数", "Conflict Count: Cumulative Conflicts of the Same Subject");
+        trl::register_en("冲突次数：同一 NID 下每发现一个新的 CCO MAC 计一次", "Conflict Count: One for Each New CCO MAC Detected in the Same NID");
         trl::register_en("往返次数：回到出现过的取值才计，首次出现新值不计", "Round Trips: Counted Only When Returning to a Seen Value, the First Sighting of a New Value Is Not Counted");
         trl::register_en("%1(组合)", "%1 (combinations)");
         trl::register_en("差异组合数：每个不同的 (载波,无线) 取值组合各计一次", "Distinct Combinations: Each Different (PLC, RF) Value Pair Counted Once");
@@ -1022,6 +1026,12 @@ void TopoWindow::rebuild_anomaly_table() {
                                  .arg(trl::L("载波")).arg(a.value_from)
                                  .arg(trl::L("无线")).arg(a.value_to);
                     break;
+                case TopoAnomalyKind::NidConflict:
+                    tei_txt = QStringLiteral("-");
+                    mac_txt = QStringLiteral("%1→%2")
+                                  .arg(format_mac(a.mac_old), format_mac(a.mac));
+                    change = trl::L("同一 NID 下出现不同 CCO MAC");
+                    break;
             }
             QString medium = QStringLiteral("-");
             if (a.kind == TopoAnomalyKind::RestartCountOscillation)
@@ -1035,7 +1045,7 @@ void TopoWindow::rebuild_anomaly_table() {
             c0->setData(QVariant::fromValue(a.last_ms), Qt::UserRole + 1);
             c0->setData(QVariant::fromValue(a.first_frame), Qt::UserRole + 2);
             c0->setData(QVariant::fromValue(a.first_ms), Qt::UserRole + 3);
-            // "次数"列在四类里含义不同(A/B 冲突次数、C 往返次数、D 差异组合数):
+            // "次数"列在各类里含义不同(A/B/NID 冲突次数、C 往返次数、D 差异组合数):
             // 逐类给文本与说明,避免把"往返 20 次"误读成"重启 20 次"
             QString trips_txt = QString::number(a.trips);
             QString trips_tip;
@@ -1043,6 +1053,9 @@ void TopoWindow::rebuild_anomaly_table() {
                 case TopoAnomalyKind::MacMultipleTei:
                 case TopoAnomalyKind::TeiMultipleMac:
                     trips_tip = trl::L("冲突次数：同一主体反复冲突的累计次数");
+                    break;
+                case TopoAnomalyKind::NidConflict:
+                    trips_tip = trl::L("冲突次数：同一 NID 下每发现一个新的 CCO MAC 计一次");
                     break;
                 case TopoAnomalyKind::RestartCountOscillation:
                     trips_tip = trl::L("往返次数：回到出现过的取值才计，首次出现新值不计");

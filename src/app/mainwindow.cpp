@@ -517,6 +517,7 @@ void MainWindow::on_clear() {
     // 拓扑状态随报文清空(此前漏清会导致旧拓扑残留);回放日志/快照/回放水位同步清零
     m_topo_states.clear();
     m_topo_log.clear();
+    m_topo_restart_log.clear();
     m_topo_hist_states.clear();
     m_topo_hist_replayed = -1;
     m_topo_hist_active = false;
@@ -1014,10 +1015,26 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
                                          int(e.msdu.restart_count), e.epoch_ms, e.index))
                 topo_touched = true;
             // 重启归属(CCO/STA,方案 B):全帧采样(不再限于发现列表/关联请求),
-            // 基线按 (NID, 主体 MAC) 分键 —— CCO 的 TEI 固定为 1(南网规约/HDC2.0 5.3.3.1),
-            // 主体判定与变化比较都在 TopoState 内完成;src_mac==0 时不检测(宁可不报,也不串主体)。
+            // 基线按 (NID, 主体 MAC) 分键(CCO 归一到 (NID, 已知 cco_mac)) —— CCO 的 TEI 固定为 1
+            // (南网规约/HDC2.0 5.3.3.1),主体判定与变化比较都在 TopoState 内完成;
+            // src_mac==0 时只有判为 CCO 才检测(宁可不报,也不串主体)。
             // 注:与上面 apply() 事件侧的重启检测共用同一基线,不会重复报(同帧同主体第二次
             //     比较时基线已相等)。
+            // 逐帧采样记一条轻量日志(只记有效采样;变化与否都记——首帧只建基线,回放时
+            // 缺了它,后一帧的变化就报不出来),供 replay_topo_history() 按帧序重放;
+            // 普通数据帧的重启只走这条日志,不进 m_topo_log(重启事件本身不能进事件日志,
+            // 回放 apply() 会从基线重新推导一次,同一事件记两遍)。NID==0 不记。
+            // 采样 kind 一并记入:回放里离线复活原因须与实时一致(否则管理帧复活会被错记成普通数据帧)。
+            if (e.msdu.present && e.mpdu.net_id != 0
+                && int(e.msdu.restart_count) >= 0
+                && int(e.msdu.restart_count) != kRestartCountInvalid) {
+                m_topo_restart_log.append({e.index, e.mpdu.net_id,
+                                           quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
+                                           int(e.msdu.restart_count), e.epoch_ms,
+                                           e.meta.is_rf, true, e.msdu.topo_event.kind});
+                // 增量回放依赖日志严格按帧序追加;若乱序到达则重置回放水位,下次回放全量重建
+                if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
+            }
             if (e.msdu.present
                 && ts.note_restart_origin(e.mpdu.net_id, quint16(e.msdu.msdu_src_tei),
                                           e.msdu.msdu_src_mac, int(e.msdu.restart_count),
@@ -1174,33 +1191,13 @@ void MainWindow::update_topo_history(qint64 frame_index, qint64 frame_ms) {
     replay_topo_history();
 }
 
-/// @brief 按 m_topo_hist_frame 重放拓扑事件日志,生成冻结快照并显示
-/// @details 增量回放:m_topo_hist_replayed 记录快照已覆盖到的帧;
-///          目标帧更大时只 apply 差量区间(二分定位起点),目标更小时才全量重建。
-///          日志按帧序追加,乱序到达时 make_entry 已重置水位,此处兜底全量重建。
+/// @brief 按 m_topo_hist_frame 重放拓扑日志,生成冻结快照并显示
+/// @details 拓扑事件日志 + 逐帧重启采样日志按帧序合并重放(见 replay_topo_logs):
+///          增量回放只应用差量区间,目标帧更小时全量重建;普通数据帧触发的重启
+///          只在采样日志里,此前只重放事件日志时会在历史模式里消失。
 void MainWindow::replay_topo_history() {
-    // 点到更早的帧,或水位失效(初始 -1 / 日志乱序被重置):快照从零重建。
-    // 注意:水位失效时必须清快照,否则从头重放会 double-apply(事件表翻倍)。
-    if (m_topo_hist_replayed < 0 || m_topo_hist_frame < m_topo_hist_replayed) {
-        m_topo_hist_states.clear();
-        m_topo_hist_replayed = -1;
-    }
-    // 二分定位水位之后的第一条日志
-    int lo = 0, hi = m_topo_log.size();
-    while (lo < hi) {
-        const int mid = lo + (hi - lo) / 2;
-        if (m_topo_log[mid].frame_index <= m_topo_hist_replayed) lo = mid + 1;
-        else hi = mid;
-    }
-    for (int i = lo; i < m_topo_log.size(); ++i) {
-        const TopoLogItem& it = m_topo_log[i];
-        if (it.frame_index > m_topo_hist_frame)
-            break;  // 日志按帧序追加,后续事件不属于本次回放
-        // 网络标识符不完整(NID==0)的旧日志事件不回放(不建空状态)
-        if (it.event.nid == 0) continue;
-        m_topo_hist_states[it.event.nid].apply(it.event);
-    }
-    m_topo_hist_replayed = m_topo_hist_frame;
+    replay_topo_logs(m_topo_log, m_topo_restart_log, m_topo_hist_frame,
+                     m_topo_hist_replayed, m_topo_hist_states);
     m_topo_window->show_history(&m_topo_hist_states, m_topo_hist_active,
                                 m_topo_hist_frame, m_topo_hist_ms);
 }
