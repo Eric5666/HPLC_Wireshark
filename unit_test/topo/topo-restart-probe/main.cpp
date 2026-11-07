@@ -576,26 +576,30 @@ int main(int argc, char** argv) {
         st.apply(proxy_req);
         st.note_restart_origin(net, 5, MAC_A, kRestartCountInvalid, 1003, 3, false, true,
                                TopoEventKind::ChangeProxyReq);
-        CHECK(st.nodes.value(5).status == NodeStatus::Offline
-                  && st.nodes.value(5).last_seen_ms == leave.epoch_ms,
-              "D22c 代理变更请求不能单独恢复离线节点");
+        CHECK(st.nodes.value(5).status == NodeStatus::Online
+                  && st.nodes.value(5).last_seen_ms == 1003,
+              "D22c 已入网 STA 的代理变更请求可恢复在线");
 
-        st.note_restart_origin(net, 5, MAC_A, kRestartCountInvalid, 1004, 4, false, true,
+        TopoEvent second_leave = frame(TopoEventKind::LeaveInd, net, 0,
+                                       kRestartCountInvalid, 4);
+        second_leave.leaves.append(MAC_A);
+        st.apply(second_leave);
+        st.note_restart_origin(net, 5, MAC_A, kRestartCountInvalid, 1005, 5, false, true,
                                TopoEventKind::Other);
         CHECK(st.nodes.value(5).status == NodeStatus::Online
-                  && st.nodes.value(5).last_seen_ms == 1004,
+                  && st.nodes.value(5).last_seen_ms == 1005,
               "D22d 普通数据帧仍可恢复既有节点在线");
 
         // 关联请求只表示重新入网中,不能把节点标成在线。
-        TopoEvent second_leave = frame(TopoEventKind::LeaveInd, net, 0,
-                                       kRestartCountInvalid, 5);
-        second_leave.leaves.append(MAC_A);
-        st.apply(second_leave);
+        TopoEvent third_leave = frame(TopoEventKind::LeaveInd, net, 0,
+                                      kRestartCountInvalid, 6);
+        third_leave.leaves.append(MAC_A);
+        st.apply(third_leave);
         TopoEvent assoc_req = frame(TopoEventKind::AssocReq, net, MAC_A,
-                                    kRestartCountInvalid, 6);
+                                    kRestartCountInvalid, 7);
         assoc_req.nodes.append({0, MAC_A});
         st.apply(assoc_req);
-        st.note_restart_origin(net, 0, MAC_A, kRestartCountInvalid, 1006, 6, false, true,
+        st.note_restart_origin(net, 0, MAC_A, kRestartCountInvalid, 1008, 8, false, true,
                                TopoEventKind::AssocReq);
         CHECK(st.pending.contains(MAC_A) && !st.nodes.contains(5),
               "D22e 关联请求仅建立入网中状态,不复活离线 TEI 节点");

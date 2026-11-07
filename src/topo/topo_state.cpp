@@ -28,6 +28,7 @@ bool provides_online_evidence(TopoEventKind k) {
         case TopoEventKind::AssocCnf:
         case TopoEventKind::AssocGatherInd:
         case TopoEventKind::AssocInd:
+        case TopoEventKind::ChangeProxyReq:
         case TopoEventKind::ChangeProxyCnf:
         case TopoEventKind::SuccessRate:
         case TopoEventKind::Other:
@@ -356,8 +357,8 @@ bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src
     if (net_id == 0) return false;
     // 即使本帧没有重启计数,当前有效源 TEI/MAC 仍应覆盖旧角色并记录身份冲突。
     const bool conflict = index_mac(net_id, src_tei, src_mac, epoch_ms, frame_index);
-    // 关联/代理变更请求只表明请求正在发生,离网指示则是明确的离线证据;两者均不
-    // 能复活节点。关联确认、成功率及普通数据帧等正向证据可恢复既有节点,不新建节点。
+    // 关联请求只表示正在申请入网,不能复活节点;代理变更请求来自已入网 STA,可作为
+    // 在线证据。离网指示是明确的离线证据;关联确认、成功率及普通数据帧也可恢复节点。
     if (provides_online_evidence(frame_kind) && src_tei && src_mac) {
         auto nit = nodes.find(src_tei);
         if (nit != nodes.end() && nit->mac == src_mac) {
