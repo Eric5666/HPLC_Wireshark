@@ -1021,7 +1021,8 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             if (e.msdu.present
                 && ts.note_restart_origin(e.mpdu.net_id, quint16(e.msdu.msdu_src_tei),
                                           e.msdu.msdu_src_mac, int(e.msdu.restart_count),
-                                          e.epoch_ms, e.index, e.meta.is_rf, true))
+                                          e.epoch_ms, e.index, e.meta.is_rf, true,
+                                          e.msdu.topo_event.kind))
                 topo_touched = true;
             // 正在入网节点(pending,按 MAC):同样仅未判定时写入
             if (e.msdu.msdu_src_mac) {

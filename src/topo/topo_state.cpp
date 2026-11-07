@@ -21,6 +21,22 @@ struct I18nRegTopoState { I18nRegTopoState() {
 /// @brief 48-bit MAC 转冒号分隔小端字符串(唯一实现见 common/mac_format.h,本函数仅委托)
 inline QString topo_mac_str(quint64 v) { return format_mac_u64(v); }
 
+/// @brief 仅明确表示节点仍在网的帧可恢复在线状态;请求/离网帧不是在线证据。
+bool provides_online_evidence(TopoEventKind k) {
+    switch (k) {
+        case TopoEventKind::DiscoverList:
+        case TopoEventKind::AssocCnf:
+        case TopoEventKind::AssocGatherInd:
+        case TopoEventKind::AssocInd:
+        case TopoEventKind::ChangeProxyCnf:
+        case TopoEventKind::SuccessRate:
+        case TopoEventKind::Other:
+            return true;
+        default:
+            return false;
+    }
+}
+
 /// @brief 事件类型 → 节点入网状态(发起关联请求=正在入网,其余在网事件=已入网)
 NodeStatus status_for(TopoEventKind k) {
     switch (k) {
@@ -250,12 +266,9 @@ bool TopoState::index_mac(quint32 net_id, quint16 tei, quint64 mac, qint64 epoch
     }
     mac_to_tei[key] = tei;
     m_offline_macs.remove(key);
-    // 普通帧不凭空建拓扑节点;已有节点则同步最新 MAC,避免旧节点反复制造冲突。
-    if (nit != nodes.end()) {
-        nit->mac = mac;
-        nit->status = NodeStatus::Online;
-        nit->last_seen_ms = epoch_ms;
-    }
+    // 这里只学习最新身份,不改变节点在线状态。事件路径随后按事件语义更新状态;
+    // 逐帧路径只允许非请求帧作为在线证据,由 note_restart_origin 单独处理。
+    if (nit != nodes.end()) nit->mac = mac;
     if (tei == kTeiCco) {
         m_cco_macs.insert(key);
         if (nid == net_id) cco_mac = mac;
@@ -338,11 +351,20 @@ bool TopoState::note_restart_change(quint32 net_id, quint64 subject, bool is_cco
 
 bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src_mac, int rc,
                                     qint64 epoch_ms, qint64 frame_index,
-                                    bool is_rf, bool is_rf_known) {
+                                    bool is_rf, bool is_rf_known, TopoEventKind frame_kind) {
     // 网络标识符不完整(NID==0,两规约里 0 均无效)不采样:不建基线、不报重启。
     if (net_id == 0) return false;
     // 即使本帧没有重启计数,当前有效源 TEI/MAC 仍应覆盖旧角色并记录身份冲突。
     const bool conflict = index_mac(net_id, src_tei, src_mac, epoch_ms, frame_index);
+    // 关联/代理变更请求只表明请求正在发生,离网指示则是明确的离线证据;两者均不
+    // 能复活节点。关联确认、成功率及普通数据帧等正向证据可恢复既有节点,不新建节点。
+    if (provides_online_evidence(frame_kind) && src_tei && src_mac) {
+        auto nit = nodes.find(src_tei);
+        if (nit != nodes.end() && nit->mac == src_mac) {
+            nit->status = NodeStatus::Online;
+            nit->last_seen_ms = epoch_ms;
+        }
+    }
     if (rc < 0 || rc == kRestartCountInvalid) return conflict;
     // 当前有效源 TEI 优先;无有效源 TEI 时才回退本 NID 最近身份。
     const bool is_cco = resolve_is_cco(net_id, src_tei, src_mac, nullptr);

@@ -146,7 +146,8 @@ public:
     ///    Lua/JS 侧若按事件条数统计会随之变化。
     /// @return 是否新增了重启事件或记录了身份冲突(UI 刷新用)
     bool note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src_mac, int rc,
-                             qint64 epoch_ms, qint64 frame_index, bool is_rf, bool is_rf_known);
+                             qint64 epoch_ms, qint64 frame_index, bool is_rf, bool is_rf_known,
+                             TopoEventKind frame_kind = TopoEventKind::Other);
 
     /// @brief 应用一个拓扑事件,增量更新节点/路由/入网状态并记录事件
         /// @brief 逐帧接入方式兜底(方案②):仅对"已存在且接入方式未确定"的节点写入
