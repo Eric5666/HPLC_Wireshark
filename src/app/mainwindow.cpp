@@ -1025,9 +1025,14 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             // 普通数据帧的重启只走这条日志,不进 m_topo_log(重启事件本身不能进事件日志,
             // 回放 apply() 会从基线重新推导一次,同一事件记两遍)。NID==0 不记。
             // 采样 kind 一并记入:回放里离线复活原因须与实时一致(否则管理帧复活会被错记成普通数据帧)。
-            if (e.msdu.present && e.mpdu.net_id != 0
-                && int(e.msdu.restart_count) >= 0
-                && int(e.msdu.restart_count) != kRestartCountInvalid) {
+            // 例外:无重启计数的帧不进采样日志,但实时 note_restart_origin 仍会复活离线
+            // 节点(复活块在计数检查之前);只给真正复活的帧补记一条采样(rc=0xFF),
+            // 回放重走同一函数复现复活与原因。复活判定只在 note_restart_origin 里一处,
+            // 此处只认它报告的 did_revive,不另写一遍预判;该函数只操作本 NID 的状态,
+            // 同 TEI 在不同 NID 是不同节点,不会跨组复活。一次复活一条,不按帧刷屏。
+            const bool has_valid_rc = int(e.msdu.restart_count) >= 0
+                && int(e.msdu.restart_count) != kRestartCountInvalid;
+            if (e.msdu.present && e.mpdu.net_id != 0 && has_valid_rc) {
                 m_topo_restart_log.append({e.index, e.mpdu.net_id,
                                            quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
                                            int(e.msdu.restart_count), e.epoch_ms,
@@ -1035,12 +1040,20 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
                 // 增量回放依赖日志严格按帧序追加;若乱序到达则重置回放水位,下次回放全量重建
                 if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
             }
+            bool did_revive = false;
             if (e.msdu.present
                 && ts.note_restart_origin(e.mpdu.net_id, quint16(e.msdu.msdu_src_tei),
                                           e.msdu.msdu_src_mac, int(e.msdu.restart_count),
                                           e.epoch_ms, e.index, e.meta.is_rf, true,
-                                          e.msdu.topo_event.kind))
+                                          e.msdu.topo_event.kind, &did_revive))
                 topo_touched = true;
+            if (did_revive && !has_valid_rc) {
+                m_topo_restart_log.append({e.index, e.mpdu.net_id,
+                                           quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
+                                           kRestartCountInvalid, e.epoch_ms,
+                                           e.meta.is_rf, true, e.msdu.topo_event.kind});
+                if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
+            }
             // 正在入网节点(pending,按 MAC):同样仅未判定时写入
             if (e.msdu.msdu_src_mac) {
                 auto pit = ts.pending.find(e.msdu.msdu_src_mac);

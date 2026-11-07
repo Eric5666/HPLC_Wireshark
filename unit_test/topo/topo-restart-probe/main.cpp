@@ -14,6 +14,7 @@
 ///   D28   离网后的未知身份不能借残留 TEI=1 索引恢复 CCO;有效 CCO 重现仍可检测重启
 ///   D29   离线复活:关联请求不复活,白名单帧复活且留复活原因记录
 ///   D30   离线→入网中→在线/离网,以及只更新状态的权威来源
+///   D31   无重启计数复活的实时与回放一致:只给真正复活的帧补记 rc=0xFF 采样
 /// 用法:./probe ; exit 0 = 全部断言通过
 #include "topo_state.h"
 #include <QCoreApplication>
@@ -969,6 +970,129 @@ int main(int argc, char** argv) {
         CHECK(st.nodes.value(8).status == NodeStatus::Online
                   && st.nodes.value(8).last_seen_ms == channel.epoch_ms,
               "D30f 离线节点发出有效信道报告后恢复在线");
+    }
+
+    // D31:无重启计数的普通数据帧复活离线节点时,实时与回放必须一致。
+    //     rc=0xFF 的帧不进拓扑事件日志(kind==Other),也不进采样日志(只记有效计数),
+    //     但实时 note_restart_origin 仍会复活(复活块在计数检查之前)。收紧版:只给
+    //     真正复活的帧补记一条采样(rc=0xFF),回放重走同一函数复现复活与原因。
+    {
+        const quint32 net = 0x0E;
+        // 模拟 MainWindow 实时路径:帧1 关联确认(事件+采样),帧2 离网(事件),
+        // 帧3 普通数据帧 rc=0xFF(仅逐帧路径,复活了才补记采样)。
+        QHash<quint32, TopoState> live;
+        QVector<TopoLogItem> topo_log;
+        QVector<TopoRestartSample> restart_log;
+        TopoState& live_st = live[net];
+        live_st.nid = net;
+        TopoEvent joined = frame(TopoEventKind::AssocCnf, net, MAC_A, kRestartCountInvalid, 1);
+        joined.nodes.append({5, MAC_A});
+        live_st.apply(joined);
+        topo_log.append({1, joined});
+        TopoEvent leave = frame(TopoEventKind::LeaveInd, net, 0, kRestartCountInvalid, 2);
+        leave.leaves.append(MAC_A);
+        live_st.apply(leave);
+        topo_log.append({2, leave});
+        CHECK(live_st.nodes.value(5).status == NodeStatus::Offline,
+              "D31a LeaveInd 后 STA 离线");
+        bool did_revive = false;
+        live_st.note_restart_origin(net, 5, MAC_A, kRestartCountInvalid, 1003, 3, false, true,
+                                    TopoEventKind::Other, &did_revive);
+        CHECK(did_revive, "D31b 无计数普通数据帧复活时报告复活");
+        if (did_revive)
+            restart_log.append({3, net, 5, MAC_A, kRestartCountInvalid, 1003, false, true,
+                                TopoEventKind::Other});
+        CHECK(live_st.nodes.value(5).status == NodeStatus::Online
+                  && count_revival_events(live_st) == 1,
+              "D31c 实时复活在线且留 1 条复活记录");
+        // 回放到帧2:快照仍离线、无复活记录;增量回放到帧3:节点在线且记录与实时一致。
+        QHash<quint32, TopoState> hist;
+        qint64 replayed = -1;
+        replay_topo_logs(topo_log, restart_log, 2, replayed, hist);
+        CHECK(hist.contains(net) && hist[net].nodes.value(5).status == NodeStatus::Offline
+                  && count_revival_events(hist[net]) == 0,
+              "D31d 回放到帧2,快照仍离线、无复活记录");
+        replay_topo_logs(topo_log, restart_log, 3, replayed, hist);
+        CHECK(hist.contains(net) && hist[net].nodes.value(5).status == NodeStatus::Online,
+              "D31e 回放到帧3,快照节点在线");
+        bool hist_revival_ok = false;
+        for (const TopoEvent& ev : hist[net].events)
+            if (ev.desc.contains(QStringLiteral("节点恢复在线")))
+                hist_revival_ok = ev.kind == TopoEventKind::Other
+                    && ev.desc.contains(QStringLiteral("普通数据帧"))
+                    && ev.frame_index == 3 && ev.epoch_ms == 1003
+                    && ev.nodes.size() == 1 && ev.nodes[0].tei == 5
+                    && ev.nodes[0].mac == MAC_A;
+        CHECK(hist_revival_ok, "D31f 回放快照复活记录带 kind/原因/帧号/节点");
+        CHECK(count_revival_events(hist[net]) == 1,
+              "D31g 回放复活只留 1 条记录");
+        // 阴性对照:同样的事件日志但采样日志里没有这条采样,回放到帧3仍离线、无复活记录。
+        QVector<TopoRestartSample> empty_restart_log;
+        QHash<quint32, TopoState> hist2;
+        qint64 replayed2 = -1;
+        replay_topo_logs(topo_log, empty_restart_log, 3, replayed2, hist2);
+        CHECK(hist2.contains(net) && hist2[net].nodes.value(5).status == NodeStatus::Offline
+                  && count_revival_events(hist2[net]) == 0,
+              "D31h 无采样时回放到帧3仍离线、无复活记录");
+        // 已在线节点再收普通数据帧不报告复活、不重复记。
+        bool did_revive_again = true;
+        live_st.note_restart_origin(net, 5, MAC_A, kRestartCountInvalid, 1004, 4, false, true,
+                                    TopoEventKind::Other, &did_revive_again);
+        CHECK(!did_revive_again && count_revival_events(live_st) == 1
+                  && live_st.nodes.value(5).last_seen_ms == 1004,
+              "D31i 已在线节点普通数据帧不报告复活、不重复记");
+        // 离网指示帧不复活,也不报告复活。
+        TopoEvent leave2 = frame(TopoEventKind::LeaveInd, net, 0, kRestartCountInvalid, 5);
+        leave2.leaves.append(MAC_A);
+        live_st.apply(leave2);
+        bool did_revive_leave = true;
+        live_st.note_restart_origin(net, 5, MAC_A, kRestartCountInvalid, 1005, 6, false, true,
+                                    TopoEventKind::LeaveInd, &did_revive_leave);
+        CHECK(!did_revive_leave && live_st.nodes.value(5).status == NodeStatus::Offline,
+              "D31j 离网指示帧不复活、不报告复活");
+    }
+    // D31k-l:NID 隔离对照——0x0E 与 0x0F 各有一个 TEI=5 节点(不同 MAC),0x0E 的离线、
+    //        0x0F 的在线;一帧属于 0x0F 的 rc=0xFF 数据帧不得复活 0x0E 的节点。
+    {
+        QHash<quint32, TopoState> live;
+        QVector<TopoLogItem> topo_log;
+        QVector<TopoRestartSample> restart_log;
+        TopoEvent joined_e = frame(TopoEventKind::AssocCnf, 0x0E, MAC_A,
+                                   kRestartCountInvalid, 1);
+        joined_e.nodes.append({5, MAC_A});
+        live[0x0E].nid = 0x0E;
+        live[0x0E].apply(joined_e);
+        topo_log.append({1, joined_e});
+        TopoEvent leave_e = frame(TopoEventKind::LeaveInd, 0x0E, 0, kRestartCountInvalid, 2);
+        leave_e.leaves.append(MAC_A);
+        live[0x0E].apply(leave_e);
+        topo_log.append({2, leave_e});
+        TopoEvent joined_f = frame(TopoEventKind::AssocCnf, 0x0F, MAC_B,
+                                   kRestartCountInvalid, 3);
+        joined_f.nodes.append({5, MAC_B});
+        live[0x0F].nid = 0x0F;
+        live[0x0F].apply(joined_f);
+        topo_log.append({3, joined_f});
+        // 模拟 MainWindow 逐帧块:0x0F 的无计数数据帧走 0x0F 自己的状态,节点已在线,
+        // 不复活、不补记采样。
+        bool did_revive = true;
+        live[0x0F].note_restart_origin(0x0F, 5, MAC_B, kRestartCountInvalid, 1004, 4,
+                                       false, true, TopoEventKind::Other, &did_revive);
+        CHECK(!did_revive && restart_log.isEmpty()
+                  && live[0x0E].nodes.value(5).status == NodeStatus::Offline
+                  && live[0x0F].nodes.value(5).status == NodeStatus::Online,
+              "D31k 0x0F 在线节点的无计数数据帧不报告复活、不补记采样、不碰 0x0E");
+        // 即使采样日志里有一条 0x0F 的采样,回放也只作用于 0x0F,不碰 0x0E 的快照。
+        restart_log.append({4, 0x0F, 5, MAC_B, kRestartCountInvalid, 1004, false, true,
+                            TopoEventKind::Other});
+        QHash<quint32, TopoState> hist;
+        qint64 replayed = -1;
+        replay_topo_logs(topo_log, restart_log, 4, replayed, hist);
+        CHECK(hist.contains(0x0E) && hist[0x0E].nodes.value(5).status == NodeStatus::Offline
+                  && count_revival_events(hist[0x0E]) == 0
+                  && hist.contains(0x0F) && hist[0x0F].nodes.value(5).status == NodeStatus::Online
+                  && count_revival_events(hist[0x0F]) == 0,
+              "D31l 回放里 0x0F 采样不复活 0x0E 节点,两组快照互不串");
     }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);

@@ -532,7 +532,9 @@ bool TopoState::note_restart_change(quint32 net_id, quint64 subject, bool is_cco
 
 bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src_mac, int rc,
                                     qint64 epoch_ms, qint64 frame_index,
-                                    bool is_rf, bool is_rf_known, TopoEventKind frame_kind) {
+                                    bool is_rf, bool is_rf_known, TopoEventKind frame_kind,
+                                    bool* did_revive) {
+    if (did_revive) *did_revive = false;
     // 网络标识符不完整(NID==0,两规约里 0 均无效)不采样:不建基线、不报重启。
     if (net_id == 0) return false;
     // 先判身份再学映射:新 CCO MAC 首次出现要在进 m_cco_macs 前记 NID 冲突;
@@ -552,9 +554,11 @@ bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src
             const bool revived = (nit->status == NodeStatus::Offline);
             nit->status = NodeStatus::Online;
             nit->last_seen_ms = epoch_ms;
-            if (revived)
+            if (revived) {
                 append_revival_record(events, net_id, frame_kind, src_tei, src_mac,
                                       src_mac, epoch_ms, frame_index);
+                if (did_revive) *did_revive = true;
+            }
         }
     }
     if (rc < 0 || rc == kRestartCountInvalid) return conflict;
