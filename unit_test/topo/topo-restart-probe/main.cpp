@@ -15,6 +15,8 @@
 ///   D29   离线复活:关联请求不复活,白名单帧复活且留复活原因记录
 ///   D30   离线→入网中→在线/离网,以及只更新状态的权威来源
 ///   D31   无重启计数复活的实时与回放一致:只给真正复活的帧补记 rc=0xFF 采样
+///   D32   单跳帧信道观测复活的实时与回放一致:第三条信道日志重调 apply_channel_info,
+///         复活留 kind=ChannelInfo 的记录;同帧事件先、信道后
 /// 用法:./probe ; exit 0 = 全部断言通过
 #include "topo_state.h"
 #include <QCoreApplication>
@@ -604,6 +606,7 @@ int main(int argc, char** argv) {
         // 实时侧:事件侧与逐帧侧共用同一基线,同一次重启只报一次。
         QHash<quint32, TopoState> live;
         QVector<TopoLogItem> topo_log;
+        QVector<TopoChannelSample> channel_log;
         QVector<TopoRestartSample> restart_log;
         TopoState& live_st = live[0x0E];
         live_st.nid = 0x0E;
@@ -621,11 +624,11 @@ int main(int argc, char** argv) {
         // 回放到帧1:冻结快照里还没有重启(变化在帧2)
         QHash<quint32, TopoState> hist;
         qint64 replayed = -1;
-        replay_topo_logs(topo_log, restart_log, 1, replayed, hist);
+        replay_topo_logs(topo_log, channel_log, restart_log, 1, replayed, hist);
         CHECK(hist.contains(0x0E) && count_restart_events(hist[0x0E]) == 0,
               "D18d 回放到帧1,快照里 0 条重启");
         // 增量回放到帧2:快照里出现实时那 1 条,不多不少
-        replay_topo_logs(topo_log, restart_log, 2, replayed, hist);
+        replay_topo_logs(topo_log, channel_log, restart_log, 2, replayed, hist);
         CHECK(count_restart_events(hist[0x0E]) == 1, "D18e 增量回放到帧2,快照里 1 条 StaRestart");
         bool desc_ok = false;
         for (const TopoEvent& ev : hist[0x0E].events)
@@ -633,9 +636,9 @@ int main(int argc, char** argv) {
                 desc_ok = ev.desc.contains(QStringLiteral("2→3")) && ev.frame_index == 2;
         CHECK(desc_ok, "D18f 快照里的 StaRestart 文案 2→3 且来源帧为 2");
         // 回拨到帧1 再重放到帧2:全量重建后仍为 1 条,不 double-apply
-        replay_topo_logs(topo_log, restart_log, 1, replayed, hist);
+        replay_topo_logs(topo_log, channel_log, restart_log, 1, replayed, hist);
         CHECK(count_restart_events(hist[0x0E]) == 0, "D18g 回拨到帧1,快照清回 0 条");
-        replay_topo_logs(topo_log, restart_log, 2, replayed, hist);
+        replay_topo_logs(topo_log, channel_log, restart_log, 2, replayed, hist);
         CHECK(count_restart_events(hist[0x0E]) == 1, "D18h 回拨后再重放到帧2,仍为 1 条");
     }
     // D24:离网清理 CCO 身份记忆 —— 同一 NID/MAC 复用为 STA 后不得误报 CcoRestart;
@@ -982,6 +985,7 @@ int main(int argc, char** argv) {
         // 帧3 普通数据帧 rc=0xFF(仅逐帧路径,复活了才补记采样)。
         QHash<quint32, TopoState> live;
         QVector<TopoLogItem> topo_log;
+        QVector<TopoChannelSample> channel_log;
         QVector<TopoRestartSample> restart_log;
         TopoState& live_st = live[net];
         live_st.nid = net;
@@ -1008,11 +1012,11 @@ int main(int argc, char** argv) {
         // 回放到帧2:快照仍离线、无复活记录;增量回放到帧3:节点在线且记录与实时一致。
         QHash<quint32, TopoState> hist;
         qint64 replayed = -1;
-        replay_topo_logs(topo_log, restart_log, 2, replayed, hist);
+        replay_topo_logs(topo_log, channel_log, restart_log, 2, replayed, hist);
         CHECK(hist.contains(net) && hist[net].nodes.value(5).status == NodeStatus::Offline
                   && count_revival_events(hist[net]) == 0,
               "D31d 回放到帧2,快照仍离线、无复活记录");
-        replay_topo_logs(topo_log, restart_log, 3, replayed, hist);
+        replay_topo_logs(topo_log, channel_log, restart_log, 3, replayed, hist);
         CHECK(hist.contains(net) && hist[net].nodes.value(5).status == NodeStatus::Online,
               "D31e 回放到帧3,快照节点在线");
         bool hist_revival_ok = false;
@@ -1027,10 +1031,11 @@ int main(int argc, char** argv) {
         CHECK(count_revival_events(hist[net]) == 1,
               "D31g 回放复活只留 1 条记录");
         // 阴性对照:同样的事件日志但采样日志里没有这条采样,回放到帧3仍离线、无复活记录。
+        QVector<TopoChannelSample> empty_channel_log;
         QVector<TopoRestartSample> empty_restart_log;
         QHash<quint32, TopoState> hist2;
         qint64 replayed2 = -1;
-        replay_topo_logs(topo_log, empty_restart_log, 3, replayed2, hist2);
+        replay_topo_logs(topo_log, empty_channel_log, empty_restart_log, 3, replayed2, hist2);
         CHECK(hist2.contains(net) && hist2[net].nodes.value(5).status == NodeStatus::Offline
                   && count_revival_events(hist2[net]) == 0,
               "D31h 无采样时回放到帧3仍离线、无复活记录");
@@ -1056,6 +1061,7 @@ int main(int argc, char** argv) {
     {
         QHash<quint32, TopoState> live;
         QVector<TopoLogItem> topo_log;
+        QVector<TopoChannelSample> channel_log;
         QVector<TopoRestartSample> restart_log;
         TopoEvent joined_e = frame(TopoEventKind::AssocCnf, 0x0E, MAC_A,
                                    kRestartCountInvalid, 1);
@@ -1087,12 +1093,182 @@ int main(int argc, char** argv) {
                             TopoEventKind::Other});
         QHash<quint32, TopoState> hist;
         qint64 replayed = -1;
-        replay_topo_logs(topo_log, restart_log, 4, replayed, hist);
+        replay_topo_logs(topo_log, channel_log, restart_log, 4, replayed, hist);
         CHECK(hist.contains(0x0E) && hist[0x0E].nodes.value(5).status == NodeStatus::Offline
                   && count_revival_events(hist[0x0E]) == 0
                   && hist.contains(0x0F) && hist[0x0F].nodes.value(5).status == NodeStatus::Online
                   && count_revival_events(hist[0x0F]) == 0,
               "D31l 回放里 0x0F 采样不复活 0x0E 节点,两组快照互不串");
+    }
+    // D32:单跳帧信道观测复活离线节点时,实时与回放必须一致。
+    //     信道观测只走第三条信道日志,不进拓扑事件日志(kind==Other)也不进采样日志
+    //     (rc=0xFF 无计数);回放重调 apply_channel_info 复现 Online 翻转、last_seen
+    //     与邻居数据;复活离线节点时留一条复活记录(kind=ChannelInfo,原因“信道观测”)。
+    {
+        const quint32 net = 0x0E;
+        // 模拟 MainWindow 实时路径:帧1 关联确认 TEI=8 入网,帧2 关联确认 TEI=5 入网
+        // (邻居节点,供 RSSI 落地),帧3 离网 TEI=8,帧4 单跳信道观测复活,帧5 同节点已在线
+        // 时再观测(不重复记),帧6 同帧既有离网事件又有信道观测(事件先、信道后)。
+        QHash<quint32, TopoState> live;
+        QVector<TopoLogItem> topo_log;
+        QVector<TopoChannelSample> channel_log;
+        QVector<TopoRestartSample> restart_log;
+        TopoState& live_st = live[net];
+        live_st.nid = net;
+        TopoEvent joined8 = frame(TopoEventKind::AssocCnf, net, MAC_B, kRestartCountInvalid, 1);
+        joined8.nodes.append({8, MAC_B});
+        live_st.apply(joined8);
+        topo_log.append({1, joined8});
+        TopoEvent joined5 = frame(TopoEventKind::AssocCnf, net, MAC_A, kRestartCountInvalid, 2);
+        joined5.nodes.append({5, MAC_A});
+        live_st.apply(joined5);
+        topo_log.append({2, joined5});
+        TopoEvent leave = frame(TopoEventKind::LeaveInd, net, 0, kRestartCountInvalid, 3);
+        leave.leaves.append(MAC_B);
+        live_st.apply(leave);
+        topo_log.append({3, leave});
+        CHECK(live_st.nodes.value(8).status == NodeStatus::Offline,
+              "D32a LeaveInd 后 TEI=8 离线");
+        TopoEvent channel4 = frame(TopoEventKind::Other, net, MAC_B, kRestartCountInvalid, 4);
+        channel4.proxy_tei = 1;
+        channel4.proxy_up_rate = 90;
+        channel4.neighbor_rates.append({5, 90});
+        channel4.neighbor_snrs.append({5, 12});
+        channel4.rssi_entries.append({5, -70});
+        live_st.apply_channel_info(8, channel4);
+        channel_log.append({4, net, 8, 1004, channel4});
+        CHECK(live_st.nodes.value(8).status == NodeStatus::Online
+                  && live_st.nodes.value(8).last_seen_ms == 1004,
+              "D32b 信道观测复活离线节点在线且 last_seen 已写");
+        CHECK(live_st.neighbor_rates.value(8).value(5) == 90
+                  && live_st.neighbor_snrs.value(8).value(5) == 12
+                  && live_st.nodes.value(5).rssi_dbm == -70
+                  && live_st.nodes.value(5).rssi_known,
+              "D32c 信道观测的邻居接收率/SNR/RSSI 已落地");
+        bool live_revival_ok = false;
+        for (const TopoEvent& ev : live_st.events)
+            if (ev.desc.contains(QStringLiteral("节点恢复在线")))
+                live_revival_ok = ev.kind == TopoEventKind::ChannelInfo
+                    && ev.desc.contains(QStringLiteral("信道观测"))
+                    && ev.frame_index == 4 && ev.epoch_ms == 1004
+                    && ev.nodes.size() == 1 && ev.nodes[0].tei == 8
+                    && ev.nodes[0].mac == MAC_B && ev.sender_mac == MAC_B
+                    && ev.nid == net;
+        CHECK(live_revival_ok && count_revival_events(live_st) == 1,
+              "D32d 信道观测复活只留 1 条记录,kind/原因/帧号/节点正确");
+        // 回放到帧3:快照仍离线、无邻居数据、无复活记录;增量回放到帧4:节点在线且记录与实时一致。
+        QHash<quint32, TopoState> hist;
+        qint64 replayed = -1;
+        replay_topo_logs(topo_log, channel_log, restart_log, 3, replayed, hist);
+        CHECK(hist.contains(net) && hist[net].nodes.value(8).status == NodeStatus::Offline
+                  && hist[net].neighbor_rates.value(8).isEmpty()
+                  && count_revival_events(hist[net]) == 0,
+              "D32e 回放到帧3,快照仍离线、无邻居数据、无复活记录");
+        replay_topo_logs(topo_log, channel_log, restart_log, 4, replayed, hist);
+        CHECK(hist.contains(net) && hist[net].nodes.value(8).status == NodeStatus::Online
+                  && hist[net].nodes.value(8).last_seen_ms == 1004
+                  && hist[net].neighbor_rates.value(8).value(5) == 90
+                  && hist[net].neighbor_snrs.value(8).value(5) == 12
+                  && hist[net].nodes.value(5).rssi_dbm == -70
+                  && hist[net].nodes.value(5).rssi_known,
+              "D32f 回放到帧4,快照节点在线且 last_seen/邻居数据已落地");
+        bool hist_revival_ok = false;
+        for (const TopoEvent& ev : hist[net].events)
+            if (ev.desc.contains(QStringLiteral("节点恢复在线")))
+                hist_revival_ok = ev.kind == TopoEventKind::ChannelInfo
+                    && ev.desc.contains(QStringLiteral("信道观测"))
+                    && ev.frame_index == 4 && ev.epoch_ms == 1004
+                    && ev.nodes.size() == 1 && ev.nodes[0].tei == 8
+                    && ev.nodes[0].mac == MAC_B && ev.sender_mac == MAC_B
+                    && ev.nid == net;
+        CHECK(hist_revival_ok && count_revival_events(hist[net]) == 1,
+              "D32g 回放快照复活记录与实时一致,只 1 条");
+        // 阴性对照:同样的事件日志但信道日志为空,回放到帧4仍离线、无邻居数据、无复活记录。
+        QVector<TopoChannelSample> empty_channel_log;
+        QHash<quint32, TopoState> hist2;
+        qint64 replayed2 = -1;
+        replay_topo_logs(topo_log, empty_channel_log, restart_log, 4, replayed2, hist2);
+        CHECK(hist2.contains(net) && hist2[net].nodes.value(8).status == NodeStatus::Offline
+                  && hist2[net].neighbor_rates.value(8).isEmpty()
+                  && count_revival_events(hist2[net]) == 0,
+              "D32h 无信道观测时回放到帧4仍离线、无邻居数据、无复活记录");
+        // 已在线节点再收信道观测:不重复记复活原因,邻居数据照常更新。
+        TopoEvent channel5 = frame(TopoEventKind::Other, net, MAC_B, kRestartCountInvalid, 5);
+        channel5.proxy_tei = 1;
+        channel5.proxy_up_rate = 88;
+        channel5.neighbor_rates.append({5, 88});
+        live_st.apply_channel_info(8, channel5);
+        channel_log.append({5, net, 8, 1005, channel5});
+        replay_topo_logs(topo_log, channel_log, restart_log, 5, replayed, hist);
+        CHECK(count_revival_events(live_st) == 1
+                  && live_st.neighbor_rates.value(8).value(5) == 88
+                  && count_revival_events(hist[net]) == 1
+                  && hist[net].neighbor_rates.value(8).value(5) == 88,
+              "D32i 已在线节点信道观测不重复记复活原因,邻居数据照常更新");
+        // 同帧顺序:帧6 既有离网事件又有信道观测,事件先应用、信道后应用,最终在线且再记 1 条。
+        TopoEvent leave6 = frame(TopoEventKind::LeaveInd, net, 0, kRestartCountInvalid, 6);
+        leave6.leaves.append(MAC_B);
+        live_st.apply(leave6);
+        topo_log.append({6, leave6});
+        TopoEvent channel6 = frame(TopoEventKind::Other, net, MAC_B, kRestartCountInvalid, 6);
+        channel6.proxy_tei = 1;
+        channel6.proxy_up_rate = 85;
+        channel6.neighbor_rates.append({5, 85});
+        live_st.apply_channel_info(8, channel6);
+        channel_log.append({6, net, 8, 1006, channel6});
+        replay_topo_logs(topo_log, channel_log, restart_log, 6, replayed, hist);
+        CHECK(live_st.nodes.value(8).status == NodeStatus::Online
+                  && count_revival_events(live_st) == 2
+                  && hist.contains(net) && hist[net].nodes.value(8).status == NodeStatus::Online
+                  && count_revival_events(hist[net]) == 2,
+              "D32j 同帧离网事件在先、信道观测在后,最终在线且各记 1 条");
+    }
+    // D32k-l:NID 隔离对照——0x0E 与 0x0F 各有一个 TEI=8 节点(不同 MAC),0x0E 的离线、
+    //        0x0F 的在线;一帧属于 0x0F 的信道观测不得碰 0x0E 的快照,也不得给它记复活记录。
+    {
+        const quint64 MAC_D = 0x5566778899AAULL;
+        QHash<quint32, TopoState> live;
+        QVector<TopoLogItem> topo_log;
+        QVector<TopoChannelSample> channel_log;
+        QVector<TopoRestartSample> restart_log;
+        TopoEvent joined_e = frame(TopoEventKind::AssocCnf, 0x0E, MAC_B, kRestartCountInvalid, 1);
+        joined_e.nodes.append({8, MAC_B});
+        live[0x0E].nid = 0x0E;
+        live[0x0E].apply(joined_e);
+        topo_log.append({1, joined_e});
+        TopoEvent leave_e = frame(TopoEventKind::LeaveInd, 0x0E, 0, kRestartCountInvalid, 2);
+        leave_e.leaves.append(MAC_B);
+        live[0x0E].apply(leave_e);
+        topo_log.append({2, leave_e});
+        TopoEvent joined_f = frame(TopoEventKind::AssocCnf, 0x0F, MAC_D, kRestartCountInvalid, 3);
+        joined_f.nodes.append({8, MAC_D});
+        live[0x0F].nid = 0x0F;
+        live[0x0F].apply(joined_f);
+        topo_log.append({3, joined_f});
+        // 模拟 MainWindow 信道块:0x0F 的信道观测只走 0x0F 自己的状态;节点已在线,不复活、
+        // 不记复活记录,但邻居数据照常落地。
+        TopoEvent channel_f = frame(TopoEventKind::Other, 0x0F, MAC_D, kRestartCountInvalid, 4);
+        channel_f.proxy_tei = 1;
+        channel_f.proxy_up_rate = 90;
+        channel_f.neighbor_rates.append({5, 90});
+        live[0x0F].apply_channel_info(8, channel_f);
+        channel_log.append({4, 0x0F, 8, 1004, channel_f});
+        CHECK(live[0x0E].nodes.value(8).status == NodeStatus::Offline
+                  && count_revival_events(live[0x0E]) == 0
+                  && live[0x0F].nodes.value(8).status == NodeStatus::Online
+                  && count_revival_events(live[0x0F]) == 0
+                  && live[0x0F].neighbor_rates.value(8).value(5) == 90,
+              "D32k 0x0F 在线节点的信道观测不复活、不记记录、不碰 0x0E,邻居数据只落本组");
+        QHash<quint32, TopoState> hist;
+        qint64 replayed = -1;
+        replay_topo_logs(topo_log, channel_log, restart_log, 4, replayed, hist);
+        CHECK(hist.contains(0x0E) && hist[0x0E].nodes.value(8).status == NodeStatus::Offline
+                  && count_revival_events(hist[0x0E]) == 0
+                  && hist[0x0E].neighbor_rates.value(8).isEmpty()
+                  && hist.contains(0x0F) && hist[0x0F].nodes.value(8).status == NodeStatus::Online
+                  && count_revival_events(hist[0x0F]) == 0
+                  && hist[0x0F].neighbor_rates.value(8).value(5) == 90,
+              "D32l 回放里 0x0F 信道观测不碰 0x0E 快照,两组互不串");
     }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);

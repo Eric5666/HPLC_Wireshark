@@ -27,6 +27,7 @@ struct I18nRegTopoState { I18nRegTopoState() {
     trl::register_en("代理变更", "Proxy change");
     trl::register_en("成功率上报", "Success Rate Report");
     trl::register_en("普通数据帧", "Ordinary Data Frame");
+    trl::register_en("信道观测", "Channel Observation");
 } } i18n_reg_topo_state;
 
 /// @brief 48-bit MAC 转冒号分隔小端字符串(唯一实现见 common/mac_format.h,本函数仅委托)
@@ -43,6 +44,7 @@ bool provides_online_evidence(TopoEventKind k) {
         case TopoEventKind::ChangeProxyCnf:
         case TopoEventKind::SuccessRate:
         case TopoEventKind::Other:
+        case TopoEventKind::ChannelInfo:
             return true;
         default:
             return false;
@@ -59,6 +61,7 @@ QString online_evidence_name(TopoEventKind k) {
         case TopoEventKind::ChangeProxyReq: return trl::L("代理变更请求");
         case TopoEventKind::ChangeProxyCnf: return trl::L("代理变更");
         case TopoEventKind::SuccessRate:    return trl::L("成功率上报");
+        case TopoEventKind::ChannelInfo:    return trl::L("信道观测");
         default:                            return trl::L("普通数据帧");
     }
 }
@@ -203,6 +206,7 @@ TopoState* ensure_restart_sample_state(QHash<quint32, TopoState>& states,
 }
 
 void replay_topo_logs(const QVector<TopoLogItem>& topo_log,
+                      const QVector<TopoChannelSample>& channel_log,
                       const QVector<TopoRestartSample>& restart_log,
                       qint64 target_frame, qint64& replayed_frame,
                       QHash<quint32, TopoState>& hist_states) {
@@ -212,12 +216,18 @@ void replay_topo_logs(const QVector<TopoLogItem>& topo_log,
         hist_states.clear();
         replayed_frame = -1;
     }
-    // 二分定位水位之后的第一条日志(两条日志都严格按帧序追加)
+    // 二分定位水位之后的第一条日志(三条日志都严格按帧序追加)
     int topo_i = 0, topo_hi = topo_log.size();
     while (topo_i < topo_hi) {
         const int mid = topo_i + (topo_hi - topo_i) / 2;
         if (topo_log[mid].frame_index <= replayed_frame) topo_i = mid + 1;
         else topo_hi = mid;
+    }
+    int channel_i = 0, channel_hi = channel_log.size();
+    while (channel_i < channel_hi) {
+        const int mid = channel_i + (channel_hi - channel_i) / 2;
+        if (channel_log[mid].frame_index <= replayed_frame) channel_i = mid + 1;
+        else channel_hi = mid;
     }
     int restart_i = 0, restart_hi = restart_log.size();
     while (restart_i < restart_hi) {
@@ -225,19 +235,37 @@ void replay_topo_logs(const QVector<TopoLogItem>& topo_log,
         if (restart_log[mid].frame_index <= replayed_frame) restart_i = mid + 1;
         else restart_hi = mid;
     }
-    // 两条日志按帧序合并重放:同帧先应用拓扑事件再采样重启,与 MainWindow::make_entry
-    // 的实时顺序一致(事件侧先,逐帧侧后)。两侧共用同一基线,同一次重启只报一次;
-    // 逐帧采样只建基线的首帧也必须重放,否则后一帧的变化在快照里报不出来。
+    // 三条日志按帧序合并重放:同帧先应用拓扑事件,再信道观测,最后采样重启,与
+    // MainWindow::make_entry 的实时顺序一致(事件侧先,信道侧中,逐帧侧后)。两侧共用同一基线,
+    // 同一次重启只报一次;逐帧采样只建基线的首帧也必须重放,否则后一帧的变化在快照里报不出来。
     // 不能把重启事件本身也 append 进拓扑事件日志:回放 apply() 会从基线重新推导一次
     // 重启,同一事件会被记两遍。
     while (true) {
         const bool has_topo = topo_i < topo_log.size()
             && topo_log[topo_i].frame_index <= target_frame;
+        const bool has_channel = channel_i < channel_log.size()
+            && channel_log[channel_i].frame_index <= target_frame;
         const bool has_restart = restart_i < restart_log.size()
             && restart_log[restart_i].frame_index <= target_frame;
-        if (!has_topo && !has_restart) break;
-        if (has_restart
-            && (!has_topo || restart_log[restart_i].frame_index < topo_log[topo_i].frame_index)) {
+        if (!has_topo && !has_channel && !has_restart) break;
+        // 同帧取最早者;帧号相等时拓扑事件优先,其次信道观测,最后逐帧采样。
+        if (has_topo
+            && (!has_channel || topo_log[topo_i].frame_index <= channel_log[channel_i].frame_index)
+            && (!has_restart || topo_log[topo_i].frame_index <= restart_log[restart_i].frame_index)) {
+            const TopoLogItem& it = topo_log[topo_i++];
+            // 网络标识符不完整(NID==0)的旧日志事件不回放(不建空状态)
+            if (it.event.nid == 0) continue;
+            hist_states[it.event.nid].apply(it.event);
+        } else if (has_channel
+                   && (!has_restart || channel_log[channel_i].frame_index <= restart_log[restart_i].frame_index)) {
+            const TopoChannelSample& s = channel_log[channel_i++];
+            // 网络标识符不完整(NID==0)的观测不重放(不建空状态),与实时口径一致;
+            // 实时侧无状态时跳过(不建占位),回放同样只对已有快照状态应用。
+            if (s.net_id == 0) continue;
+            auto hit = hist_states.find(s.net_id);
+            if (hit == hist_states.end()) continue;
+            hit->apply_channel_info(s.reporter_tei, s.event);
+        } else {
             const TopoRestartSample& s = restart_log[restart_i++];
             // 网络标识符不完整(NID==0)的采样不重放(不建空状态),与实时口径一致
             if (s.net_id == 0) continue;
@@ -247,11 +275,6 @@ void replay_topo_logs(const QVector<TopoLogItem>& topo_log,
             hs.note_restart_origin(s.net_id, s.src_tei, s.src_mac, s.restart_count,
                                    s.epoch_ms, s.frame_index, s.is_rf, s.is_rf_known,
                                    s.frame_kind);
-        } else {
-            const TopoLogItem& it = topo_log[topo_i++];
-            // 网络标识符不完整(NID==0)的旧日志事件不回放(不建空状态)
-            if (it.event.nid == 0) continue;
-            hist_states[it.event.nid].apply(it.event);
         }
     }
     replayed_frame = target_frame;
@@ -880,10 +903,18 @@ void TopoState::apply_channel_info(quint16 reporter_tei, const TopoEvent& e) {
         || !e.rssi_entries.isEmpty();
     if (!has_observation) return;
     // 有效帧携带该 reporter 的信道/站点属性,可证明其在线;同时恢复离线状态。
+    // 离线→在线才是复活:留一条带原因的事件记录(kind=ChannelInfo,原因“信道观测”),
+    // 已在线帧不重复记;回放重调同一函数,记录与实时一致。
     TopoNode& reporter = nodes[reporter_tei];
     if (reporter.tei == 0) reporter.tei = reporter_tei;
+    const bool revived = (reporter.status == NodeStatus::Offline);
+    const quint64 reporter_mac = reporter.mac;
     reporter.status = NodeStatus::Online;
     reporter.last_seen_ms = e.epoch_ms;
+    if (revived)
+        append_revival_record(events, nid, TopoEventKind::ChannelInfo, reporter_tei,
+                              reporter_mac ? reporter_mac : e.sender_mac,
+                              e.sender_mac, e.epoch_ms, e.frame_index);
     // 站点属性(表217/表126):代理上行/下行接收率、最小接收率、RF 跳数、角色 + parent_tei 校正
     // 站点属性直报的代理 TEI 比路由推导权威;节点不存在时据此建占位(站点属性自带 proxy/role 身份)
     if (e.proxy_tei != kTeiInvalid) {

@@ -518,6 +518,7 @@ void MainWindow::on_clear() {
     m_topo_states.clear();
     m_topo_log.clear();
     m_topo_restart_log.clear();
+    m_topo_channel_log.clear();
     m_topo_hist_states.clear();
     m_topo_hist_replayed = -1;
     m_topo_hist_active = false;
@@ -976,6 +977,10 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
         apply_one_topo_event(te);
     }
     // RFDL 单跳帧(kind=Other,不走事件门):邻居信道信息(接收率/SNR/RSSI)按发送方 FCH src_tei 键控落地
+    // 信道观测只走信道日志,不进 m_topo_log;回放重调 apply_channel_info 复现 Online 翻转、
+    // last_seen 与邻居数据。解析器不填 topo_event.epoch_ms/frame_index(只在 apply_one_topo_event
+    // 里补),这里沿用同一做法先补帧时刻与帧号,否则实时与回放的 last_seen 都会写 0、复活记录的
+    // 帧号会是 -1(回放双击追溯会错);信道日志里存的 TopoEvent 拷贝也在补填之后,同样带这两个值。
     if (e.msdu.simple_head && e.msdu.present
         && (!e.msdu.topo_event.neighbor_rates.isEmpty()
             || !e.msdu.topo_event.neighbor_snrs.isEmpty()
@@ -983,7 +988,13 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             || e.msdu.topo_event.proxy_tei != kTeiInvalid)) {
         auto ts_it = m_topo_states.find(e.mpdu.net_id);
         if (e.mpdu.net_id != 0 && ts_it != m_topo_states.end()) {
+            e.msdu.topo_event.epoch_ms = e.epoch_ms;
+            e.msdu.topo_event.frame_index = e.index;
             ts_it.value().apply_channel_info(e.mpdu.src_tei, e.msdu.topo_event);
+            m_topo_channel_log.append({e.index, e.mpdu.net_id, e.mpdu.src_tei,
+                                       e.epoch_ms, e.msdu.topo_event});
+            // 增量回放依赖日志严格按帧序追加;若乱序到达则重置回放水位,下次回放全量重建
+            if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
             if (m_topo_window) m_topo_window->mark_dirty();
         }
     }
@@ -1205,11 +1216,12 @@ void MainWindow::update_topo_history(qint64 frame_index, qint64 frame_ms) {
 }
 
 /// @brief 按 m_topo_hist_frame 重放拓扑日志,生成冻结快照并显示
-/// @details 拓扑事件日志 + 逐帧重启采样日志按帧序合并重放(见 replay_topo_logs):
+/// @details 拓扑事件日志 + 信道观测日志 + 逐帧重启采样日志按帧序合并重放(见 replay_topo_logs):
 ///          增量回放只应用差量区间,目标帧更小时全量重建;普通数据帧触发的重启
-///          只在采样日志里,此前只重放事件日志时会在历史模式里消失。
+///          只在采样日志里,此前只重放事件日志时会在历史模式里消失;单跳帧的信道观测
+///          只在信道日志里,此前同样会消失。
 void MainWindow::replay_topo_history() {
-    replay_topo_logs(m_topo_log, m_topo_restart_log, m_topo_hist_frame,
+    replay_topo_logs(m_topo_log, m_topo_channel_log, m_topo_restart_log, m_topo_hist_frame,
                      m_topo_hist_replayed, m_topo_hist_states);
     m_topo_window->show_history(&m_topo_hist_states, m_topo_hist_active,
                                 m_topo_hist_frame, m_topo_hist_ms);

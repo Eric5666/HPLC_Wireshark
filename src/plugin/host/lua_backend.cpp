@@ -64,6 +64,7 @@ const char* topo_kind_name_lua(TopoEventKind k) {
     case TopoEventKind::SuccessRate:    return "successRate";
     case TopoEventKind::CcoRestart:     return "ccoRestart";
     case TopoEventKind::StaRestart:     return "staRestart";
+    case TopoEventKind::ChannelInfo:    return "channelInfo";
     default:                           return "other";
     }
 }

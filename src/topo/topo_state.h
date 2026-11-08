@@ -302,17 +302,34 @@ struct TopoRestartSample {
                                                      ///  即普通数据帧;仅内存日志用,不序列化)
 };
 
-/// @brief 历史回放:拓扑事件日志 + 逐帧重启采样日志按帧序合并重放到目标帧,生成冻结快照
+/// @brief 单跳帧信道观测日志条目(帧序号 → 一次信道观测;供 TOPO 历史回放)
+/// @details 只记有信道观测的单跳帧(与 MainWindow 逐帧块里调 apply_channel_info 完全
+///          相同的守卫:simple_head + present + 邻居/rssi/proxy 数据);普通数据帧的信道
+///          观测只走这条日志,不进拓扑事件日志(事件门只认 kind != Other)。回放时重调
+///          apply_channel_info,复现 Online 翻转、last_seen 与邻居接收率/SNR/RSSI;
+///          复活离线节点时留一条复活记录(kind=ChannelInfo,原因“信道观测”),回放重调
+///          同一函数,记录与实时一致。仅内存日志用,不序列化。
+struct TopoChannelSample {
+    qint64 frame_index = 0;   ///< PacketEntry::index(1-based 全局帧序号)
+    quint32 net_id = 0;       ///< 帧的 NID(0=无效,不记不重放)
+    quint16 reporter_tei = 0; ///< 帧头发送方 TEI(apply_channel_info 的 reporter)
+    qint64 epoch_ms = 0;      ///< 帧时刻(epoch ms;回放写 last_seen 用,与 event.epoch_ms 相同)
+    TopoEvent event;          ///< 已填充 epoch_ms 的完整信道观测事件(回放用)
+};
+
+/// @brief 历史回放:拓扑事件日志 + 信道观测日志 + 逐帧重启采样日志按帧序合并重放到目标帧,生成冻结快照
 /// @details 增量回放:replayed_frame 记录快照已覆盖到的帧;目标帧更大时只应用差量区间,
-///          目标更小时(或水位失效)全量重建。两条日志都严格按帧序追加;同帧先应用拓扑
-///          事件再采样重启,与 MainWindow::make_entry 的实时顺序一致,两侧共用同一基线,
+///          目标更小时(或水位失效)全量重建。三条日志都严格按帧序追加;同帧先应用拓扑
+///          事件,再信道观测,最后采样重启,与 MainWindow::make_entry 的实时顺序一致,两侧共用同一基线,
 ///          同一次重启只报一次。NID==0 的日志条目不重放。
 /// @param[in] topo_log 拓扑事件日志(帧序)
+/// @param[in] channel_log 单跳帧信道观测日志(帧序)
 /// @param[in] restart_log 逐帧重启采样日志(帧序)
 /// @param[in] target_frame 回放到该帧序号(含)
 /// @param[in,out] replayed_frame 回放水位:快照已覆盖到的帧(-1=需全量重建;调用后置为目标帧)
 /// @param[out] hist_states 回放快照:重放到目标帧的拓扑(冻结显示用)
 void replay_topo_logs(const QVector<TopoLogItem>& topo_log,
+                      const QVector<TopoChannelSample>& channel_log,
                       const QVector<TopoRestartSample>& restart_log,
                       qint64 target_frame, qint64& replayed_frame,
                       QHash<quint32, TopoState>& hist_states);

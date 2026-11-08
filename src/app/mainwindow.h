@@ -153,6 +153,7 @@ private:
     QHash<quint32, TopoState> m_topo_states;      ///< NID → 拓扑状态(实时累积)
     QVector<TopoLogItem> m_topo_log;              ///< 拓扑事件日志(帧序;供历史回放)
     QVector<TopoRestartSample> m_topo_restart_log; ///< 逐帧重启采样日志(帧序;供历史回放)
+    QVector<TopoChannelSample> m_topo_channel_log; ///< 单跳帧信道观测日志(帧序;供历史回放)
     QHash<quint32, TopoState> m_topo_hist_states; ///< 回放快照:重放到选中帧的拓扑(冻结显示)
     bool   m_topo_hist_active = false;            ///< TOPO 历史回放(冻结)模式
     qint64 m_topo_hist_frame = 0;                 ///< 回放到的帧序号

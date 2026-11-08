@@ -154,6 +154,7 @@ QString event_kind_name(TopoEventKind k) {
         case TopoEventKind::LeaveInd:       return trl::L("离线指示");
         case TopoEventKind::CcoRestart:     return trl::L("CCO重启");
         case TopoEventKind::StaRestart:     return trl::L("STA重启");
+        case TopoEventKind::ChannelInfo:    return trl::L("信道观测");
         default:                            return trl::L("其他");
     }
 }
