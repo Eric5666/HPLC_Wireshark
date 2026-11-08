@@ -231,6 +231,9 @@ struct I18nRegTopoWindow {
         trl::register_en("在线", "Online");
         trl::register_en("入网中", "Joining");
         trl::register_en("离线", "Offline");
+        // 在网节点数汇总(用户 2026-11-06 定稿口径:主数仅 Online 的 STA,不含 CCO)
+        trl::register_en("在网节点：%1（入网中 %2 / 离线 %3）", "Online Nodes: %1 (Joining %2 / Offline %3)");
+        trl::register_en("在网节点：—", "Online Nodes: —");
         trl::register_en("发现列表", "Discover list");
         trl::register_en("关联请求", "Assoc request");
         trl::register_en("关联确认", "Assoc confirm");
@@ -775,6 +778,13 @@ TopoWindow::TopoWindow(QWidget* parent) : QWidget(parent) {
     m_mode_label = new QLabel(trl::L("实时"), this);
     m_mode_label->setStyleSheet(QStringLiteral("QLabel { color: palette(highlight); font-weight: bold; }"));
     top_lay->addWidget(m_mode_label);
+    // 在网节点数汇总:顶部工具栏 NID 下拉框旁、模式标签附近(用户 2026-11-06 定稿:
+    // 低调样式——普通工具栏文字,背景透明、无底色/无边框/无阴影/无颜色区分,
+    // 唯一强调是加粗);口径见 TopoState::online_counts():仅 Online 的 STA,
+    // 不含 CCO/入网中/离线。
+    m_count_label = new QLabel(trl::L("在网节点：—"), this);
+    m_count_label->setStyleSheet(QStringLiteral("QLabel { font-weight: bold; }"));
+    top_lay->addWidget(m_count_label);
     m_btn_live = new QPushButton(trl::L("回到实时"), this);
     m_btn_live->setVisible(false);
     connect(m_btn_live, &QPushButton::clicked, this, [this] {
@@ -1099,6 +1109,8 @@ void TopoWindow::rebuild_all() {
     rebuild_routes_table();
     rebuild_teimac_table();
     rebuild_anomaly_table();
+    // 在网节点数汇总(与图/表同源 view_states(),历史回放自动读冻结快照)
+    update_count_label();
 }
 
 void TopoWindow::show_history(const QHash<quint32, TopoState>* hist, bool active,
@@ -1135,6 +1147,26 @@ void TopoWindow::update_mode_ui() {
     else if (!m_hist_mode)
         m_mode_label->setText(trl::L("实时"));
     m_btn_live->setVisible(m_hist_mode || m_pause_live);
+}
+
+void TopoWindow::update_count_label() {
+    if (!m_count_label) return;
+    const TopoState* st = nullptr;
+    if (const auto* states = view_states()) {
+        auto it = states->constFind(m_current_nid);
+        if (it != states->constEnd()) st = &it.value();
+    }
+    // 无数据(无该 NID 状态 / 仅有 RestartCount 采样基线)显示 —,不显示 0,
+    // 避免把"没抓到网络"误读成"0 个在线节点"。
+    if (!st || !st->has_topology_content()) {
+        m_count_label->setText(trl::L("在网节点：—"));
+        return;
+    }
+    const TopoOnlineCounts counts = st->online_counts();
+    m_count_label->setText(trl::L("在网节点：%1（入网中 %2 / 离线 %3）")
+                               .arg(counts.online)
+                               .arg(counts.online_going)
+                               .arg(counts.offline));
 }
 
 void TopoWindow::pause_live() {

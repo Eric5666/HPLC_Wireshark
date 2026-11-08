@@ -55,6 +55,7 @@
 |---|---|---|---|---|---|
 | topo/topo-pco-probe | 邻居明细弹窗 PCO 行加粗+琥珀色标记 | ./build.sh | ./build/pco_probe | 无（合成数据） | PASS 17/17，`RESULT: 0 failures`，exit 0 |
 | topo/topo-nid-probe | NID 下拉 refresh/set_current_nid 逻辑的 Qt  standalone 复刻 | ./build.sh | ./build/probe/nid_probe | 无（合成数据） | `RESULT: ALL PASS`，exit 0。注意：它是独立复刻，不链接仓库源码；其与当前 `set_current_nid` 实现的保真度此前曾被标记需同步，见本用例 README |
+| topo/topo-online-count-probe | TOPO 在网节点数 `TopoState::online_counts()`（仅 Online 的 STA，不含 CCO/入网中/离线） | ./build.sh | ./build/online_count_probe | 无（合成数据） | 11 组断言（T1–T11），`RESULT: ALL PASS`，exit 0。只链 `topo_state.cpp`，不链 `topo_window.cpp` |
 | topo/topo-restart-probe | TopoState 重启检测、弱路径、双模认定等 12 个探针程序 | ./build.sh | ./build/\<probe\>（12 个，见本用例 README） | 无（合成数据） | 12/12 构建通过，运行 exit 0；其中 10 个打印 `ALL PASS`/`PROBE PASS`，`m2_probe` 打印 CCO 介质状态行，`pb0_gate_probe` 静默 |
 | topo/topo-route-verify | NW_2026 拓扑路由扫描：对 MPDU 流逐帧打印 topo 事件 | ./build.sh | ./build/probe/topo_scan \<mpdus.bin\> [verbose_idx] | 长度前缀 MPDU 流；大文件 `mpdus.bin`（8.3M）未入库，见原位置 `~/workspace/topo-route-verify/mpdus.bin`；另有单帧 `user_frame_container.bin` / `user_frame_mpdu.bin`（已入库） | exit 0，stderr `scanned 45827 frames`（以原数据集实测） |
 | filter/mac-filter-probe | 主界面 MAC 形状过滤 token 展开为 TEI 或 | ./build.sh | ./build/mac_filter_probe | 无（合成数据 + 模型内建映射表） | 特性已合入 main（合并提交 `12d1cbc`）：对 main 源码构建运行 **47/47，`RESULT: 0 failures`，exit 0**（合入前 main 为 28/47，缺特性所致） |

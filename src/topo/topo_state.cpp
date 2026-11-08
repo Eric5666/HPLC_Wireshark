@@ -1021,6 +1021,22 @@ QHash<quint16, int> TopoState::compute_levels() const {
     return lv;
 }
 
+TopoOnlineCounts TopoState::online_counts() const {
+    TopoOnlineCounts counts;
+    for (auto it = nodes.constBegin(); it != nodes.constEnd(); ++it) {
+        if (it.key() == kTeiCco) continue;  // CCO(TEI 固定为 1)不计入在网节点数
+        switch (it.value().status) {
+            case NodeStatus::Online: ++counts.online; break;
+            case NodeStatus::OnlineGoing: ++counts.online_going; break;
+            case NodeStatus::Offline: ++counts.offline; break;
+        }
+    }
+    // 正在入网但尚未分配 TEI 的节点只存在于 pending(关联请求阶段),
+    // 与 nodes 里的 OnlineGoing 互不重叠,直接累加不重复计数。
+    counts.online_going += pending.size();
+    return counts;
+}
+
 quint64 TopoState::mac_of(quint16 tei) const {
     auto it = nodes.constFind(tei);
     return it == nodes.constEnd() ? 0 : it->mac;

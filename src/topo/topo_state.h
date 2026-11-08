@@ -97,6 +97,15 @@ inline size_t qHash(const NidMacKey &k, size_t seed = 0) {
     return h;
 }
 
+/// @brief 在网节点数汇总(用户 2026-11-06 定稿口径)
+/// @details 主数 online 仅统计 status == Online 的 STA,不含 CCO、不含入网中、
+///          不含离线;入网中 online_going 含 pending(TEI 未分配的关联请求节点)。
+struct TopoOnlineCounts {
+    int online = 0;       ///< 已入网 STA 数(不含 CCO TEI=1)
+    int online_going = 0; ///< 正在入网 STA 数(nodes 的 OnlineGoing + pending)
+    int offline = 0;      ///< 离线 STA 数(不含 CCO TEI=1)
+};
+
 /// @brief 单个 NID 网络的拓扑状态(节点 + 路由 + 事件历史)
 class TopoState {
 public:
@@ -122,6 +131,14 @@ public:
         return first_seen_frame >= 0 || !nodes.isEmpty() || !pending.isEmpty()
             || !events.isEmpty() || !anomalies.isEmpty();
     }
+
+    /// @brief 在网节点数汇总(用户 2026-11-06 定稿口径)
+    /// @details 主数 online 仅统计 status == Online 的 STA:不含 CCO(TEI 固定为 1,
+    ///          kTeiCco)、不含入网中(OnlineGoing / pending)、不含离线;入网中和离线
+    ///          另行给出,供 TOPO 窗口显示"在网节点:N(入网中 X / 离线 Y)"。
+    ///          TEI 复用等异常按 TEI 数计,不去重、不扣减(与拓扑图图标数一致)。
+    /// @return 当前 NID 的 TopoOnlineCounts(本 TopoState 只属一个 NID,切 NID 不串数)
+    TopoOnlineCounts online_counts() const;
 
     /// @brief 逐帧重启次数采样:同一 (TEI, 介质) 的取值回到曾经出现过的值即记一条往返振荡
     /// @details 判据(用户口径):任意一次反向变化即记。以该 (TEI, 介质) 已出现过的取值集合
