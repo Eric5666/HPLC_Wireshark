@@ -181,6 +181,35 @@ jobs:
             "./$p"
           done
 
+      - name: Topo PCO / online-count / NID / route-sample regression
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          # 复用/重建 Qt symlink farm(逐条守卫,已存在则跳过)
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake6 -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake6 -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake6 -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake6 -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          (cd unit_test/topo/topo-online-count-probe && bash build.sh)
+          unit_test/topo/topo-online-count-probe/build/online_count_probe
+
+          (cd unit_test/topo/topo-pco-probe && bash build.sh)
+          unit_test/topo/topo-pco-probe/build/pco_probe
+
+          (cd unit_test/topo/topo-nid-probe && bash build.sh)
+          unit_test/topo/topo-nid-probe/build/probe/nid_probe
+
+          # route-verify:主数据集 mpdus.bin 未入库,CI 只跑已入库的两个小样例
+          (cd unit_test/topo/topo-route-verify && bash build.sh)
+          (cd unit_test/topo/topo-route-verify && ./build/probe/topo_scan user_frame_container.bin)
+          (cd unit_test/topo/topo-route-verify && ./build/probe/topo_scan user_frame_mpdu.bin)
+
       - name: NW APP business ID / direction regression (SPLC 表9 / 表8)
         env:
           QT_QPA_PLATFORM: offscreen
