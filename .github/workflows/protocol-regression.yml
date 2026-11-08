@@ -23,15 +23,17 @@ concurrency:
 jobs:
   linux-regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install Qt and build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ make qt6-base-dev libqt6serialport6-dev
+      - name: Install Qt 6.11.3 and build dependencies
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.3'
+          modules: 'qtserialport'
+          cache: true
 
       - name: Hard-only source convention checks
         run: |
@@ -74,7 +76,7 @@ jobs:
         run: |
           mkdir -p build/nw-debug
           cd build/nw-debug
-          qmake6 ../../unit_test/ci/nw-mme-test/nw_mme_test.pro CONFIG+=debug CONFIG-=release SANITIZERS=address,undefined 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
+          qmake ../../unit_test/ci/nw-mme-test/nw_mme_test.pro CONFIG+=debug CONFIG-=release SANITIZERS=address,undefined 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
           make -j2
           ./nw_mme_test
 
@@ -82,7 +84,7 @@ jobs:
         run: |
           mkdir -p build/nw-release
           cd build/nw-release
-          qmake6 ../../unit_test/ci/nw-mme-test/nw_mme_test.pro CONFIG+=release CONFIG-=debug 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
+          qmake ../../unit_test/ci/nw-mme-test/nw_mme_test.pro CONFIG+=release CONFIG-=debug 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
           make -j2
           ./nw_mme_test
 
@@ -90,7 +92,7 @@ jobs:
         run: |
           mkdir -p build/roundtrip
           cd build/roundtrip
-          qmake6 ../../unit_test/ci/roundtrip/roundtrip.pro CONFIG+=release CONFIG-=debug
+          qmake ../../unit_test/ci/roundtrip/roundtrip.pro CONFIG+=release CONFIG-=debug
           make -j2
           ./roundtrip "$GITHUB_WORKSPACE/unit_test/ci/roundtrip/roundtrip_test.bin" "$GITHUB_WORKSPACE/unit_test/ci/roundtrip/roundtrip_test.txt"
 
@@ -100,7 +102,7 @@ jobs:
           cd unit_test/ci/nw2026-type1-test
           mkdir -p build/type1
           cd build/type1
-          qmake6 ../../nw2026_type1_test.pro CONFIG+=release CONFIG-=debug 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
+          qmake ../../nw2026_type1_test.pro CONFIG+=release CONFIG-=debug 'QMAKE_CXXFLAGS+=-Wall -Wextra -Werror'
           make -j2
           cd "$GITHUB_WORKSPACE"
           ./unit_test/ci/nw2026-type1-test/build/type1/nw2026_type1_test
@@ -112,20 +114,21 @@ jobs:
           set -e
           QT_ROOT="$RUNNER_TEMP/qt-root"
           mkdir -p "$QT_ROOT"
-          # qmake6 -query 任一键返回空/不存在时直接报明确错误,
+          # qmake -query 任一键返回空/不存在时直接报明确错误,
           # 否则下面会抛 "failed to create symbolic link" 这种难懂的错误。
-          for key in QT_HOST_BINS QT_INSTALL_LIBEXECS QT_INSTALL_HEADERS QT_INSTALL_LIBS; do
-            value=$(qmake6 -query "$key" || true)
+          for key in QT_HOST_BINS QT_INSTALL_LIBEXECS QT_INSTALL_HEADERS QT_INSTALL_LIBS QT_INSTALL_PLUGINS; do
+            value=$(qmake -query "$key" || true)
             if [ -z "$value" ] || [ ! -d "$value" ]; then
-              echo "::error::qmake6 -query $key 返回空或目录不存在: '$value'"
+              echo "::error::qmake -query $key 返回空或目录不存在: '$value'"
               exit 1
             fi
             echo "$key=$value"
           done
-          ln -s "$(qmake6 -query QT_HOST_BINS)" "$QT_ROOT/bin"
-          ln -s "$(qmake6 -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
-          ln -s "$(qmake6 -query QT_INSTALL_HEADERS)" "$QT_ROOT/include"
-          ln -s "$(qmake6 -query QT_INSTALL_LIBS)" "$QT_ROOT/lib"
+          ln -s "$(qmake -query QT_HOST_BINS)" "$QT_ROOT/bin"
+          ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          ln -s "$(qmake -query QT_INSTALL_HEADERS)" "$QT_ROOT/include"
+          ln -s "$(qmake -query QT_INSTALL_LIBS)" "$QT_ROOT/lib"
+          ln -s "$(qmake -query QT_INSTALL_PLUGINS)" "$QT_ROOT/plugins"
           export QT_ROOT
           export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
 
@@ -148,23 +151,24 @@ jobs:
         run: |
           set -e
           # Qt symlink farm:上一步建过就复用(同一 runner 同一 workspace),
-          # 没建过(单独重跑本步)就在这里按 qmake6 -query 重建一次。
+          # 没建过(单独重跑本步)就在这里按 qmake -query 重建一次。
           QT_ROOT="$RUNNER_TEMP/qt-root"
           mkdir -p "$QT_ROOT"
-          for key in QT_HOST_BINS QT_INSTALL_LIBEXECS QT_INSTALL_HEADERS QT_INSTALL_LIBS; do
-            value=$(qmake6 -query "$key" || true)
+          for key in QT_HOST_BINS QT_INSTALL_LIBEXECS QT_INSTALL_HEADERS QT_INSTALL_LIBS QT_INSTALL_PLUGINS; do
+            value=$(qmake -query "$key" || true)
             if [ -z "$value" ] || [ ! -d "$value" ]; then
-              echo "::error::qmake6 -query $key 返回空或目录不存在: '$value'"
+              echo "::error::qmake -query $key 返回空或目录不存在: '$value'"
               exit 1
             fi
             echo "$key=$value"
           done
           # 逐条建链接:上一步(或本步重跑)已建过就跳过,避免 ln 报 File exists 把步骤搞红,
           # 也避免"只看 include/QtCore 是否存在"在部分残留时误判为全覆盖。
-          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake6 -query QT_HOST_BINS)"        "$QT_ROOT/bin"
-          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake6 -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
-          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake6 -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
-          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake6 -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)" "$QT_ROOT/plugins"
           export QT_ROOT
           export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
 
@@ -181,6 +185,36 @@ jobs:
             "./$p"
           done
 
+      - name: Topo PCO / online-count / NID / route-sample regression
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          # 复用/重建 Qt symlink farm(逐条守卫,已存在则跳过)
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)" "$QT_ROOT/plugins"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          (cd unit_test/topo/topo-online-count-probe && bash build.sh)
+          unit_test/topo/topo-online-count-probe/build/online_count_probe
+
+          (cd unit_test/topo/topo-pco-probe && bash build.sh)
+          unit_test/topo/topo-pco-probe/build/pco_probe
+
+          (cd unit_test/topo/topo-nid-probe && bash build.sh)
+          unit_test/topo/topo-nid-probe/build/probe/nid_probe
+
+          # route-verify:主数据集 mpdus.bin 未入库,CI 只跑已入库的两个小样例
+          (cd unit_test/topo/topo-route-verify && bash build.sh)
+          (cd unit_test/topo/topo-route-verify && ./build/probe/topo_scan user_frame_container.bin)
+          (cd unit_test/topo/topo-route-verify && ./build/probe/topo_scan user_frame_mpdu.bin)
+
       - name: NW APP business ID / direction regression (SPLC 表9 / 表8)
         env:
           QT_QPA_PLATFORM: offscreen
@@ -189,10 +223,11 @@ jobs:
           # 复用/重建 Qt symlink farm(逐条守卫,已存在则跳过)
           QT_ROOT="$RUNNER_TEMP/qt-root"
           mkdir -p "$QT_ROOT"
-          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake6 -query QT_HOST_BINS)"        "$QT_ROOT/bin"
-          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake6 -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
-          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake6 -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
-          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake6 -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)" "$QT_ROOT/plugins"
           export QT_ROOT
           export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
 

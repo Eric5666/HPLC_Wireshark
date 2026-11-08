@@ -563,14 +563,14 @@ db_path=
 
 | 组件 | 版本 |
 |------|------|
-| Qt | 6.11.2 mingw_64 |
+| Qt | 6.11.3 mingw_64 |
 | MinGW | 13.1.0 |
 | 构建 | qmake + mingw32-make |
 
 构建：
 
 ```bash
-export PATH="/c/Qt/Tools/mingw1310_64/bin:/c/Qt/6.11.2/mingw_64/bin:$PATH"
+export PATH="/c/Qt/Tools/mingw1310_64/bin:/c/Qt/6.11.3/mingw_64/bin:$PATH"
 qmake BPLC_STA_Monitor.pro
 mingw32-make -j4
 ```

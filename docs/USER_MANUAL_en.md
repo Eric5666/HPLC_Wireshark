@@ -555,14 +555,14 @@ Environment:
 
 | Component | Version |
 |-----------|---------|
-| Qt | 6.11.2 mingw_64 |
+| Qt | 6.11.3 mingw_64 |
 | MinGW | 13.1.0 |
 | Build | qmake + mingw32-make |
 
 Build:
 
 ```bash
-export PATH="/c/Qt/Tools/mingw1310_64/bin:/c/Qt/6.11.2/mingw_64/bin:$PATH"
+export PATH="/c/Qt/Tools/mingw1310_64/bin:/c/Qt/6.11.3/mingw_64/bin:$PATH"
 qmake BPLC_STA_Monitor.pro
 mingw32-make -j4
 ```

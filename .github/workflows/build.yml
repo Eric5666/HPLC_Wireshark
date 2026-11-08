@@ -46,14 +46,14 @@ jobs:
           fi
           echo "版本 v$V 与仓库一致,校验通过"
 
-      - name: 安装 Qt 6.11.2 + MinGW 13.1.0
+      - name: 安装 Qt 6.11.3 + MinGW 13.1.0
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.11.2'
+          version: '6.11.3'
           arch: 'win64_mingw'
           tools: 'tools_mingw1310'
           modules: 'qtserialport'
-          # Qt 6.11 起 Windows 仓库改成分编译器子目录(qt6_6112/qt6_6112_mingw/),
+          # Qt 6.11 起 Windows 仓库改成分编译器子目录(qt6_6113/qt6_6113_mingw/),
           # aqtinstall 3.3.0(默认)不认新布局会报 "Failed to locate XML data"。
           # 修复已合入上游(miurahr/aqtinstall#1000)但未发布,先从 master 指定提交安装,
           # 等 install-qt-action 默认 aqtinstall >= 3.4 后可删掉这行。
@@ -196,10 +196,10 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "解析版本: v$V"
 
-      - name: 安装 Qt 6.11.2
+      - name: 安装 Qt 6.11.3
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.11.2'
+          version: '6.11.3'
           modules: 'qtserialport'
           cache: true
 
@@ -254,10 +254,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: 安装 Qt 6.11.2
+      - name: 安装 Qt 6.11.3
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.11.2'
+          version: '6.11.3'
           modules: 'qtserialport'
           cache: true
 
