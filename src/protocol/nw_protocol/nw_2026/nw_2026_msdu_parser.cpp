@@ -276,7 +276,7 @@ struct MMeI18nReg {
         trl::register_en("QPSK(2比特)", "QPSK (2 bits)");
         trl::register_en("16QAM(4比特)", "16QAM (4 bits)");
         trl::register_en("64QAM(6比特)", "64QAM (6 bits)");
-        trl::register_en("正常重启", "Normal Boot");
+        trl::register_en("正常重启", "Normal Restart");
         trl::register_en("关联请求成功", "Association Success");
         trl::register_en("站点不在白名单中", "STA Not in Whitelist");
         trl::register_en("加入站点个数超过上限", "STA Count Exceeds Limit");
@@ -358,6 +358,7 @@ struct MMeI18nReg {
         trl::register_en("校验数据缺失（已有%1/4字节）", "CRC data missing (%1/4 bytes available)");
         // 拓扑事件变更说明(TOPO 路由变更表 desc)
         trl::register_en("关联请求: STA %1 正在入网", "Assoc request: STA %1 joining");
+        trl::register_en("关联请求: STA %1 正在入网（%2）", "Assoc request: STA %1 joining (%2)");
         trl::register_en("关联确认: STA TEI=%1 入网 代理=%2", "Assoc confirm: STA TEI=%1 joined, proxy=%2");
         trl::register_en("关联指示: STA TEI=%1 入网 代理=%2", "Assoc indication: STA TEI=%1 joined, proxy=%2");
         trl::register_en("关联汇总: %1 个站点入网 代理=%2", "Assoc gather: %1 stations joined, proxy=%2");
@@ -367,6 +368,9 @@ struct MMeI18nReg {
         trl::register_en("代理变更(批量): %1 个站点代理→%2", "Proxy change (batch): %1 stations proxy→%2");
         trl::register_en("离线指示: STA TEI=%1 离线", "Leave indication: STA TEI=%1 left");
         trl::register_en("延迟离线指示: %1 个站点离线", "Delayed leave indication: %1 stations left");
+        trl::register_en("断电事件: TEI=%1 断电离线", "Power Off Event: TEI=%1 Power Off");
+        trl::register_en("断电事件: STA %1 断电离线", "Power Off Event: STA %1 Power Off");
+        trl::register_en("上电事件: STA %1 上电", "Power On Event: STA %1 Power On");
         // MAC 帧头字段释义(6.2.1 表3/表5/表6/表8)
         trl::register_en("长帧头(32B)", "Long header (32B)");
         trl::register_en("短帧头(12B)", "Short header (12B)");
@@ -384,6 +388,7 @@ struct MMeI18nReg {
         trl::register_en("在位图(第%1字节)", "In Bitmap (Byte %1)");
         trl::register_en("SNID[%1]", "SNID[%1]");
         trl::register_en("子站点 TEI=%1", "SubSTA TEI=%1");
+        trl::register_en("断电 TEI=%1", "Power Off TEI=%1");
         trl::register_en("可发现站点 TEI=%1", "DiscoverableSTA TEI=%1");
         trl::register_en("发现站点 TEI=%1", "DiscoverySTA TEI=%1");
         trl::register_en(" (载波 %1-%2)", " (carrier %1-%2)");
@@ -942,6 +947,111 @@ static void set_msdu_type_text(QVector<MsduFieldNode>& nodes, const QString& tex
 }
 
 
+/// 停上电事件上报体字段(规约 §9.6.3,表340/341;相对 APP Data 起点)
+static const FieldSpec kPowerEventBitmapSpec[] = {
+    { "EventType", 0, 0, 8, Fmt::DEC },
+    { "StartTEI",  1, 0, 16, Fmt::DEC },
+};
+static const int kPowerEventBitmapSpecN = int(sizeof(kPowerEventBitmapSpec)/sizeof(kPowerEventBitmapSpec[0]));
+static const FieldSpec kPowerEventAddrHeadSpec[] = {
+    { "EventType",  0, 0, 8, Fmt::DEC },
+    { "MeterCount", 1, 0, 16, Fmt::DEC },
+};
+static const int kPowerEventAddrHeadSpecN = int(sizeof(kPowerEventAddrHeadSpec)/sizeof(kPowerEventAddrHeadSpec[0]));
+static const FieldSpec kPowerEventMeterSpec[] = {
+    { "MeterAddr",  0, 0, 48, Fmt::MAC },
+    { "PowerState", 6, 0, 8, Fmt::DEC },
+};
+static const int kPowerEventMeterSpecN = int(sizeof(kPowerEventMeterSpec)/sizeof(kPowerEventMeterSpec[0]));
+
+/// 停上电事件类型(表340/341:1 位图停电,3 地址停电,4 地址上电;0/2 保留)
+static const char* kPowerEventTypeZh[] = {
+    "保留", "停电事件(位图)", "保留", "停电事件(地址)", "上电事件(地址)" };
+/// 带电状态(表341:0 停电,1 未停电)
+static const char* kPowerStateZh[] = { "停电", "未停电" };
+
+/// @brief 停上电事件上报体解码(规约 §9.6.3,表340/341):APP Data 从 app[12] 起。
+/// @details 位图方式:事件类型 1=停电,起始 TEI(2B) + 节点位图(LSB 在前,bit=1 表示
+///          TEI=起始 TEI+位号的节点断电;TEI 为 12-bit,超限位跳过);地址方式:事件类型
+///          3=停电/4=上电,电表个数(2B),每只电表地址 6B + 带电状态 1B(0=停电,1=未停电;
+///          逐只表的状态为准,帧级类型只定格式)。受影响节点 = 体内点名的节点,不是上报方
+///          STA 本身;第一节点填 out.topo_event,其余填 out.topo_extra_events(各事件
+///          sender_mac 随事件对象填,主事件的由 parse() 末尾统一补)。未知事件类型/截断体
+///          直接忽略(不产事件)。
+static void parse_power_on_off(MsduInfo& out, const QByteArray& app, int rel_base) {
+    const QByteArray body = app.mid(12);
+    if (body.size() < 3) return;   // 两种格式体头都至少 3B(类型 1B + TEI/个数 2B)
+    const quint8 ev_type = (quint8)get_bits(body, 0, 0, 8);
+    if (ev_type != 1 && ev_type != 3 && ev_type != 4) return;
+    auto add_power_event = [&](TopoEventKind kind, quint16 tei, quint64 mac,
+                               const QString& desc) {
+        TopoEvent ev;
+        ev.kind = kind;
+        ev.nodes.append({tei, mac});
+        if (kind == TopoEventKind::PowerOff && mac) ev.leaves.append(mac);
+        ev.desc = desc;
+        if (out.topo_event.kind == TopoEventKind::Other) {
+            out.topo_event = ev;
+        } else {
+            ev.sender_mac = out.msdu_src_mac;
+            out.topo_extra_events.append(ev);
+        }
+    };
+    MsduFieldNode& pg = group(out.tree, QStringLiteral("Power On/Off Event"));
+    pg.rel_start = rel_base + 12; pg.rel_len = body.size();
+    if (ev_type == 1) {
+        // 位图方式(表340):起始 TEI + 节点位图
+        const quint16 start_tei = (quint16)get_bits(body, 1, 0, 16);
+        add_fields(pg.children, body, 0, kPowerEventBitmapSpec, kPowerEventBitmapSpecN,
+                   rel_base + 12);
+        translate_enum_i18n(pg.children, "EventType", kPowerEventTypeZh, 5);
+        if (!start_tei || start_tei > 4095) return;   // 起始 TEI 非法则整段位图不可信
+        const int bm_len = body.size() - 3;
+        for (int i = 0; i < bm_len; ++i) {
+            const quint8 byte = (quint8)body[3 + i];
+            if (!byte) continue;   // 空字节不显示
+            for (int j = 0; j < 8; ++j) {
+                if (!(byte & (1u << j))) continue;
+                const quint16 tei = (quint16)(start_tei + 8 * i + j);
+                if (!tei || tei > 4095) continue;   // TEI 0=广播/保留,12-bit 上限 4095
+                MsduFieldNode bn;
+                bn.name = trl::L("断电 TEI=%1").arg(tei);
+                bn.value = trl::L("在位图(第%1字节)").arg(i);
+                bn.rel_start = rel_base + 12 + 3 + i; bn.rel_len = 1;
+                pg.children.append(bn);
+                add_power_event(TopoEventKind::PowerOff, tei, 0,
+                                trl::L("断电事件: TEI=%1 断电离线").arg(tei));
+            }
+        }
+        return;
+    }
+    // 地址方式(表341):电表个数 + 每只电表地址 6B + 带电状态 1B
+    const quint16 meter_count = (quint16)get_bits(body, 1, 0, 16);
+    add_fields(pg.children, body, 0, kPowerEventAddrHeadSpec, kPowerEventAddrHeadSpecN,
+               rel_base + 12);
+    translate_enum_i18n(pg.children, "EventType", kPowerEventTypeZh, 5);
+    for (int i = 0; i < meter_count; ++i) {
+        const int off = 3 + 7 * i;
+        if (off + 7 > body.size()) break;   // 尾部截断:只解完整的表项
+        const quint64 meter_mac = get_bits(body, off, 0, 48);
+        const quint8 power_state = (quint8)get_bits(body, off + 6, 0, 8);
+        MsduFieldNode& mg = group(pg.children, QStringLiteral("Meter[%1]").arg(i));
+        mg.rel_start = rel_base + 12 + off; mg.rel_len = 7;
+        add_fields(mg.children, body, off, kPowerEventMeterSpec, kPowerEventMeterSpecN,
+                   rel_base + 12);
+        translate_enum_i18n(mg.children, "PowerState", kPowerStateZh, 2);
+        if (power_state > 1) continue;      // 带电状态只认 0=停电/1=未停电
+        if (!meter_mac) continue;           // 地址为 0 的表项不进拓扑
+        if (power_state == 0) {
+            add_power_event(TopoEventKind::PowerOff, 0, meter_mac,
+                            trl::L("断电事件: STA %1 断电离线").arg(mac_str(meter_mac)));
+        } else {
+            add_power_event(TopoEventKind::PowerOn, 0, meter_mac,
+                            trl::L("上电事件: STA %1 上电").arg(mac_str(meter_mac)));
+        }
+    }
+}
+
 static void parse_app(MsduInfo& out, const QByteArray& app, int rel_base, quint16 msdu_type) {
     if (app.size() < 12) { out.summary = trl::L("应用报文(截断)"); return; }
     // 通道控制信息(表1,4B):报文端口号 + 报文标识符 + 保留
@@ -1002,6 +1112,11 @@ static void parse_app(MsduInfo& out, const QByteArray& app, int rel_base, quint1
     out.summary = trl::L("应用层报文 (%1)").arg(bid_disp);
     // 业务数据单元(业务报文头之后,含业务扩展域)统一以"APP Data"字段展示
     append_payload_hex(out, app, 12, -1, QStringLiteral("APP Data"), rel_base);
+    // 停上电事件上报(表9 主动上报:0x13 端口 + BID 0x01;规约 §9.6.3):体从 APP Data 起,
+    // 位图/地址两种格式都解,产 TopoEvent 进拓扑;其余应用帧不解体。
+    if (port_num == 0x13 && packet_type == NW_2026_PacketType::EventReport
+        && business_id == static_cast<quint8>(NW_2026_EventReportBid::PowerOnOff))
+        parse_power_on_off(out, app, rel_base);
 }
 
 
@@ -1626,6 +1741,15 @@ static void parse_single_hop(MsduInfo& out, const QByteArray& body) {
     out.present = true;
 }
 
+/// @brief 系统启动原因(SPLC 表86)后缀:只在版本信息字节实际存在时追加。
+/// @details 只有 0=正常重启有定义,其他值保留,不追加。
+///          版本信息在 MMe 数据 mme 偏移 52 起,BootReason = mme[52]。
+static QString boot_reason_suffix(const QByteArray& mme) {
+    if (mme.size() <= 52) return QString();
+    if (static_cast<quint8>(mme[52]) != 0) return QString();
+    return trl::L("正常重启");
+}
+
 }  // namespace
 
 MsduInfo NW_2026_MsduParser::parse(const QByteArray& body) {
@@ -1769,6 +1893,9 @@ MsduInfo NW_2026_MsduParser::parse(const QByteArray& body) {
                     out.topo_event.restart_count = (int)out.restart_count;
                 out.topo_event.desc = trl::L("关联请求: STA %1 正在入网")
                     .arg(mac_str(sta_mac));
+                if (const QString reason = boot_reason_suffix(mme); !reason.isEmpty())
+                    out.topo_event.desc = trl::L("关联请求: STA %1 正在入网（%2）")
+                        .arg(mac_str(sta_mac)).arg(reason);
             }
             // 厂家附加数据(报文体 byte 28-45)与版本信息(46-55)按布局顺序渲染,
             // 尾段(56-67)排在其后,字段树顺序与报文字节序一致

@@ -17,6 +17,8 @@
 ///   D31   无重启计数复活的实时与回放一致:只给真正复活的帧补记 rc=0xFF 采样
 ///   D32   单跳帧信道观测复活的实时与回放一致:第三条信道日志重调 apply_channel_info,
 ///         复活留 kind=ChannelInfo 的记录;同帧事件先、信道后
+///   D33   停上电事件上报:断电算离线(LeaveInd 同款),断电/上电都记录,上电只记录不改状态
+///         不复活;位图按 TEI 点名、地址按电表地址点名;不存在的节点跳过;NID 隔离
 /// 用法:./probe ; exit 0 = 全部断言通过
 #include "topo_state.h"
 #include <QCoreApplication>
@@ -1269,6 +1271,175 @@ int main(int argc, char** argv) {
                   && count_revival_events(hist[0x0F]) == 0
                   && hist[0x0F].neighbor_rates.value(8).value(5) == 90,
               "D32l 回放里 0x0F 信道观测不碰 0x0E 快照,两组互不串");
+    }
+
+    // D33:停上电事件上报进 TOPO——断电算离线(LeaveInd 同款),断电/上电都记录,
+    //     上电只记录、不改状态、不复活。位图方式按 TEI 点名(解析层填 {TEI,0}),
+    //     地址方式按电表地址点名(解析层填 {0,MAC} + leaves)。
+    {
+        const quint32 net = 0x0E;
+        QHash<quint32, TopoState> live;
+        QVector<TopoLogItem> topo_log;
+        QVector<TopoChannelSample> channel_log;
+        QVector<TopoRestartSample> restart_log;
+        TopoState& live_st = live[net];
+        live_st.nid = net;
+        TopoEvent joined5 = frame(TopoEventKind::AssocCnf, net, MAC_A, kRestartCountInvalid, 1);
+        joined5.nodes.append({5, MAC_A});
+        live_st.apply(joined5);
+        topo_log.append({1, joined5});
+        TopoEvent joined8 = frame(TopoEventKind::AssocCnf, net, MAC_B, kRestartCountInvalid, 2);
+        joined8.nodes.append({8, MAC_B});
+        live_st.apply(joined8);
+        topo_log.append({2, joined8});
+        CHECK(live_st.nodes.value(5).status == NodeStatus::Online
+                  && live_st.nodes.value(8).status == NodeStatus::Online,
+              "D33a 关联确认后 TEI=5/8 均在线");
+        // 帧3:位图断电 TEI=8(上报方 MAC_A,受影响节点不是上报方)。
+        TopoEvent off8 = frame(TopoEventKind::PowerOff, net, MAC_A, kRestartCountInvalid, 3);
+        off8.nodes.append({8, 0});
+        off8.desc = QStringLiteral("断电事件: TEI=8 断电离线");
+        live_st.apply(off8);
+        topo_log.append({3, off8});
+        CHECK(live_st.nodes.value(8).status == NodeStatus::Offline
+                  && live_st.nodes.value(5).status == NodeStatus::Online
+                  && count_kind(live_st, TopoEventKind::PowerOff) == 1,
+              "D33b 位图断电后 TEI=8 离线、TEI=5 仍在线,留 1 条断电记录");
+        // 回放到帧2:两节点都在线、无断电记录;增量回放到帧3:TEI=8 离线且记录一致。
+        QHash<quint32, TopoState> hist;
+        qint64 replayed = -1;
+        replay_topo_logs(topo_log, channel_log, restart_log, 2, replayed, hist);
+        CHECK(hist.contains(net) && hist[net].nodes.value(8).status == NodeStatus::Online
+                  && count_kind(hist[net], TopoEventKind::PowerOff) == 0,
+              "D33c 回放到帧2,TEI=8 仍在线、无断电记录");
+        replay_topo_logs(topo_log, channel_log, restart_log, 3, replayed, hist);
+        bool hist_off_ok = false;
+        for (const TopoEvent& ev : hist[net].events)
+            if (ev.kind == TopoEventKind::PowerOff)
+                hist_off_ok = ev.desc.contains(QStringLiteral("断电"))
+                    && ev.frame_index == 3 && ev.epoch_ms == 1003
+                    && ev.nodes.size() == 1 && ev.nodes[0].tei == 8
+                    && ev.sender_mac == MAC_A && ev.nid == net;
+        CHECK(hist.contains(net) && hist[net].nodes.value(8).status == NodeStatus::Offline
+                  && hist_off_ok && count_kind(hist[net], TopoEventKind::PowerOff) == 1,
+              "D33d 回放到帧3,TEI=8 离线且断电记录带说明/帧号/节点");
+        // 帧4:地址上电 TEI=8 的电表(MAC_B),离线节点只记录、不复活。
+        TopoEvent on8 = frame(TopoEventKind::PowerOn, net, MAC_CCO, kRestartCountInvalid, 4);
+        on8.nodes.append({0, MAC_B});
+        on8.desc = QStringLiteral("上电事件: STA 66:55:44:33:22:11 上电");
+        live_st.apply(on8);
+        topo_log.append({4, on8});
+        CHECK(live_st.nodes.value(8).status == NodeStatus::Offline
+                  && count_kind(live_st, TopoEventKind::PowerOn) == 1
+                  && count_revival_events(live_st) == 0,
+              "D33e 地址上电后离线节点仍离线,只留记录、不复活");
+        // 帧5:地址上电 TEI=5 的电表(MAC_A),在线节点只记录、状态不变。
+        TopoEvent on5 = frame(TopoEventKind::PowerOn, net, MAC_CCO, kRestartCountInvalid, 5);
+        on5.nodes.append({0, MAC_A});
+        on5.desc = QStringLiteral("上电事件: STA ff:ee:dd:cc:bb:aa 上电");
+        live_st.apply(on5);
+        topo_log.append({5, on5});
+        CHECK(live_st.nodes.value(5).status == NodeStatus::Online
+                  && count_kind(live_st, TopoEventKind::PowerOn) == 2
+                  && count_revival_events(live_st) == 0,
+              "D33f 地址上电后在线节点仍在线,上电记录累计 2 条、不复活");
+        // 帧6:地址断电 TEI=5 的电表(MAC_A,leaves 走 LeaveInd 同款路径)。
+        TopoEvent off5 = frame(TopoEventKind::PowerOff, net, MAC_CCO, kRestartCountInvalid, 6);
+        off5.nodes.append({0, MAC_A});
+        off5.leaves.append(MAC_A);
+        off5.desc = QStringLiteral("断电事件: STA ff:ee:dd:cc:bb:aa 断电离线");
+        live_st.apply(off5);
+        topo_log.append({6, off5});
+        CHECK(live_st.nodes.value(5).status == NodeStatus::Offline
+                  && count_kind(live_st, TopoEventKind::PowerOff) == 2,
+              "D33g 地址断电后 TEI=5 离线,断电记录累计 2 条");
+        // 帧7/8:两节点重新入网(关联确认复活,各留 1 条复活记录);
+        // 帧9:位图一帧报两节点断电(首事件 + extra 事件)。
+        TopoEvent rejoin5 = frame(TopoEventKind::AssocCnf, net, MAC_A, kRestartCountInvalid, 7);
+        rejoin5.nodes.append({5, MAC_A});
+        live_st.apply(rejoin5);
+        topo_log.append({7, rejoin5});
+        TopoEvent rejoin8 = frame(TopoEventKind::AssocCnf, net, MAC_B, kRestartCountInvalid, 8);
+        rejoin8.nodes.append({8, MAC_B});
+        live_st.apply(rejoin8);
+        topo_log.append({8, rejoin8});
+        TopoEvent off5b = frame(TopoEventKind::PowerOff, net, MAC_A, kRestartCountInvalid, 9);
+        off5b.nodes.append({5, 0});
+        off5b.desc = QStringLiteral("断电事件: TEI=5 断电离线");
+        live_st.apply(off5b);
+        topo_log.append({9, off5b});
+        TopoEvent off8b = frame(TopoEventKind::PowerOff, net, MAC_A, kRestartCountInvalid, 9);
+        off8b.nodes.append({8, 0});
+        off8b.desc = QStringLiteral("断电事件: TEI=8 断电离线");
+        live_st.apply(off8b);
+        topo_log.append({9, off8b});
+        CHECK(live_st.nodes.value(5).status == NodeStatus::Offline
+                  && live_st.nodes.value(8).status == NodeStatus::Offline
+                  && count_kind(live_st, TopoEventKind::PowerOff) == 4,
+              "D33h 位图一帧两节点断电(首事件+extra),两节点均离线、记录累计 4 条");
+        replay_topo_logs(topo_log, channel_log, restart_log, 9, replayed, hist);
+        CHECK(hist.contains(net) && hist[net].nodes.value(5).status == NodeStatus::Offline
+                  && hist[net].nodes.value(8).status == NodeStatus::Offline
+                  && count_kind(hist[net], TopoEventKind::PowerOff) == 4
+                  && count_kind(hist[net], TopoEventKind::PowerOn) == 2
+                  && count_revival_events(hist[net]) == 2,
+              "D33i 回放到帧9,两节点离线且断电/上电记录与实时一致,复活记录只来自帧7/8 重入网");
+    }
+    // D33j-m:不存在的节点跳过(不凭空建)、NID 隔离。
+    {
+        const quint64 MAC_D = 0x5566778899AAULL;
+        const quint64 MAC_UNKNOWN = 0xDEADBEEF0001ULL;
+        QHash<quint32, TopoState> live;
+        QVector<TopoLogItem> topo_log;
+        QVector<TopoChannelSample> channel_log;
+        QVector<TopoRestartSample> restart_log;
+        TopoEvent joined_e = frame(TopoEventKind::AssocCnf, 0x0E, MAC_A, kRestartCountInvalid, 1);
+        joined_e.nodes.append({5, MAC_A});
+        live[0x0E].nid = 0x0E;
+        live[0x0E].apply(joined_e);
+        topo_log.append({1, joined_e});
+        TopoEvent joined_f = frame(TopoEventKind::AssocCnf, 0x0F, MAC_D, kRestartCountInvalid, 2);
+        joined_f.nodes.append({5, MAC_D});
+        live[0x0F].nid = 0x0F;
+        live[0x0F].apply(joined_f);
+        topo_log.append({2, joined_f});
+        // 帧3:位图断电 TEI=9(0x0E 下从未入网)。
+        TopoEvent off9 = frame(TopoEventKind::PowerOff, 0x0E, MAC_A, kRestartCountInvalid, 3);
+        off9.nodes.append({9, 0});
+        off9.desc = QStringLiteral("断电事件: TEI=9 断电离线");
+        live[0x0E].apply(off9);
+        topo_log.append({3, off9});
+        CHECK(!live[0x0E].nodes.contains(9)
+                  && live[0x0E].nodes.value(5).status == NodeStatus::Online
+                  && count_kind(live[0x0E], TopoEventKind::PowerOff) == 1,
+              "D33j 位图断电不存在的 TEI=9 不建节点,TEI=5 仍在线、记录仍留 1 条");
+        // 帧4:地址断电未知 MAC(0x0E 下从未入网)。
+        TopoEvent off_unknown = frame(TopoEventKind::PowerOff, 0x0E, MAC_CCO, kRestartCountInvalid, 4);
+        off_unknown.nodes.append({0, MAC_UNKNOWN});
+        off_unknown.leaves.append(MAC_UNKNOWN);
+        off_unknown.desc = QStringLiteral("断电事件: STA 01:00:ef:be:ad:de 断电离线");
+        live[0x0E].apply(off_unknown);
+        topo_log.append({4, off_unknown});
+        CHECK(live[0x0E].nodes.size() == 1
+                  && count_kind(live[0x0E], TopoEventKind::PowerOff) == 2,
+              "D33k 地址断电未知 MAC 不建节点,断电记录累计 2 条");
+        // 帧5:位图断电 TEI=5(0x0E),0x0F 的 TEI=5 不受影响。
+        TopoEvent off5_e = frame(TopoEventKind::PowerOff, 0x0E, MAC_A, kRestartCountInvalid, 5);
+        off5_e.nodes.append({5, 0});
+        off5_e.desc = QStringLiteral("断电事件: TEI=5 断电离线");
+        live[0x0E].apply(off5_e);
+        topo_log.append({5, off5_e});
+        CHECK(live[0x0E].nodes.value(5).status == NodeStatus::Offline
+                  && live[0x0F].nodes.value(5).status == NodeStatus::Online,
+              "D33l 位图断电只离线本 NID 的 TEI=5,另一 NID 同 TEI 仍在线");
+        QHash<quint32, TopoState> hist;
+        qint64 replayed = -1;
+        replay_topo_logs(topo_log, channel_log, restart_log, 5, replayed, hist);
+        CHECK(hist.contains(0x0E) && hist[0x0E].nodes.value(5).status == NodeStatus::Offline
+                  && !hist[0x0E].nodes.contains(9) && hist[0x0E].nodes.size() == 1
+                  && count_kind(hist[0x0E], TopoEventKind::PowerOff) == 3
+                  && hist.contains(0x0F) && hist[0x0F].nodes.value(5).status == NodeStatus::Online,
+              "D33m 回放里不存在的节点同样不建、两 NID 快照互不串");
     }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);

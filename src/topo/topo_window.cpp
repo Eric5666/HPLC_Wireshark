@@ -155,6 +155,8 @@ QString event_kind_name(TopoEventKind k) {
         case TopoEventKind::CcoRestart:     return trl::L("CCO重启");
         case TopoEventKind::StaRestart:     return trl::L("STA重启");
         case TopoEventKind::ChannelInfo:    return trl::L("信道观测");
+        case TopoEventKind::PowerOff:       return trl::L("断电事件");
+        case TopoEventKind::PowerOn:        return trl::L("上电事件");
         default:                            return trl::L("其他");
     }
 }
@@ -185,8 +187,8 @@ struct I18nRegTopoWindow {
         trl::register_en("搜索 TEI / MAC…", "Search TEI / MAC…");
         trl::register_en("筛选(时间/类型/说明)…", "Filter (time/type/description)…");
         trl::register_en("TEI → MAC 映射", "TEI → MAC mapping");
-        trl::register_en("路由变更记录(关联确认/关联指示/关联汇总指示/代理变更请求/代理变更/发现列表/离线指示/CCO重启/STA重启)",
-                         "Route change log (assoc conf / assoc ind / gather ind / proxy change req / proxy change / discover list / leave ind / CCO reboot / STA reboot)");
+        trl::register_en("路由变更记录(关联确认/关联指示/关联汇总指示/代理变更请求/代理变更/发现列表/离线指示/CCO重启/STA重启/断电事件/上电事件)",
+                         "Route change log (assoc conf / assoc ind / gather ind / proxy change req / proxy change / discover list / leave ind / CCO reboot / STA reboot / power off event / power on event)");
         trl::register_en("CCO重启", "CCO reboot");
         trl::register_en("STA重启", "STA reboot");
         // 异常/冲突页签(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡 / NID 冲突)

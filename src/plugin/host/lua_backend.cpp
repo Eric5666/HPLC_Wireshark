@@ -65,6 +65,8 @@ const char* topo_kind_name_lua(TopoEventKind k) {
     case TopoEventKind::CcoRestart:     return "ccoRestart";
     case TopoEventKind::StaRestart:     return "staRestart";
     case TopoEventKind::ChannelInfo:    return "channelInfo";
+    case TopoEventKind::PowerOff:       return "powerOff";
+    case TopoEventKind::PowerOn:        return "powerOn";
     default:                           return "other";
     }
 }

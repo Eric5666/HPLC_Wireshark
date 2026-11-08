@@ -28,6 +28,8 @@ struct I18nRegTopoState { I18nRegTopoState() {
     trl::register_en("成功率上报", "Success Rate Report");
     trl::register_en("普通数据帧", "Ordinary Data Frame");
     trl::register_en("信道观测", "Channel Observation");
+    trl::register_en("断电事件", "Power Off Event");
+    trl::register_en("上电事件", "Power On Event");
 } } i18n_reg_topo_state;
 
 /// @brief 48-bit MAC 转冒号分隔小端字符串(唯一实现见 common/mac_format.h,本函数仅委托)
@@ -86,9 +88,15 @@ void append_revival_record(QVector<TopoEvent>& events, quint32 nid, TopoEventKin
 }
 
 /// @brief 事件类型 → 状态更新;未明确表示在线/入网的事件不改状态。
+/// @details 断电事件明确表示离线(PowerOff→Offline);上电事件只记录,不改状态
+///          (PowerOn 不进 provides_online_evidence,绝不复活离线节点)。
 bool status_for(TopoEventKind k, NodeStatus& status) {
     if (k == TopoEventKind::AssocReq) {
         status = NodeStatus::OnlineGoing;
+        return true;
+    }
+    if (k == TopoEventKind::PowerOff) {
+        status = NodeStatus::Offline;
         return true;
     }
     if (provides_online_evidence(k)) {
@@ -820,6 +828,24 @@ void TopoState::apply(const TopoEvent& e) {
             if (!n.is_rf_known) { n.is_rf = (e.link_type == LinkTypeRf); n.is_rf_known = true; }
         }
     }
+    // 断电事件上报(位图方式,表340):按 TEI 标记已存在节点离线,与 LeaveInd 同款
+    // 处理(清 pending、清 CCO 身份记忆、记 m_offline_macs);MAC 未知(位图只给 TEI),
+    // 故不走下方 e.leaves 循环(地址方式的电表 MAC 在解析层已填 leaves,走那条)。
+    // 不存在的 TEI 直接跳过,不凭空建节点;上电事件(PowerOn)不改状态,不进此块。
+    if (e.kind == TopoEventKind::PowerOff) {
+        for (const TeiMacPair& p : e.nodes) {
+            if (!p.tei) continue;   // 地址方式只有 MAC,走 leaves 循环
+            auto nit = nodes.find(p.tei);
+            if (nit == nodes.end()) continue;
+            if (nit.value().mac) {
+                pending.remove(nit.value().mac);
+                m_cco_macs.remove(nid_mac_key(e.nid, nit.value().mac));
+                m_offline_macs.insert(nid_mac_key(e.nid, nit.value().mac));
+            }
+            nit.value().status = NodeStatus::Offline;
+            nit.value().last_seen_ms = e.epoch_ms;
+        }
+    }
     // 离网节点(按 (NID, MAC) 匹配,标记离线):先走 MAC→TEI 索引 O(1),索引不一致时回退线性扫描
     for (quint64 mac : e.leaves) {
         if (!mac) continue;
@@ -879,6 +905,8 @@ void TopoState::apply(const TopoEvent& e) {
         case TopoEventKind::ChangeProxyReq:
         case TopoEventKind::ChangeProxyCnf:
         case TopoEventKind::LeaveInd:
+        case TopoEventKind::PowerOff:
+        case TopoEventKind::PowerOn:
             events.append(e);
             break;
         case TopoEventKind::DiscoverList:
