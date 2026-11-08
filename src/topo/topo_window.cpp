@@ -154,6 +154,9 @@ QString event_kind_name(TopoEventKind k) {
         case TopoEventKind::LeaveInd:       return trl::L("离线指示");
         case TopoEventKind::CcoRestart:     return trl::L("CCO重启");
         case TopoEventKind::StaRestart:     return trl::L("STA重启");
+        case TopoEventKind::ChannelInfo:    return trl::L("信道观测");
+        case TopoEventKind::PowerOff:       return trl::L("断电事件");
+        case TopoEventKind::PowerOn:        return trl::L("上电事件");
         default:                            return trl::L("其他");
     }
 }
@@ -165,6 +168,7 @@ QString anomaly_kind_name(TopoAnomalyKind k) {
         case TopoAnomalyKind::TeiMultipleMac:          return trl::L("同一 TEI 多 MAC");
         case TopoAnomalyKind::RestartCountOscillation: return trl::L("重启次数振荡");
         case TopoAnomalyKind::LinkCountMismatch:       return trl::L("两链路计数不同");
+        case TopoAnomalyKind::NidConflict:             return trl::L("同一 NID 多 CCO MAC");
     }
     return trl::L("其他");
 }
@@ -183,22 +187,25 @@ struct I18nRegTopoWindow {
         trl::register_en("搜索 TEI / MAC…", "Search TEI / MAC…");
         trl::register_en("筛选(时间/类型/说明)…", "Filter (time/type/description)…");
         trl::register_en("TEI → MAC 映射", "TEI → MAC mapping");
-        trl::register_en("路由变更记录(关联确认/关联指示/关联汇总指示/代理变更请求/代理变更/发现列表/离线指示/CCO重启/STA重启)",
-                         "Route change log (assoc conf / assoc ind / gather ind / proxy change req / proxy change / discover list / leave ind / CCO reboot / STA reboot)");
+        trl::register_en("路由变更记录(关联确认/关联指示/关联汇总指示/代理变更请求/代理变更/发现列表/离线指示/CCO重启/STA重启/断电事件/上电事件)",
+                         "Route change log (assoc conf / assoc ind / gather ind / proxy change req / proxy change / discover list / leave ind / CCO reboot / STA reboot / power off event / power on event)");
         trl::register_en("CCO重启", "CCO reboot");
         trl::register_en("STA重启", "STA reboot");
-        // 异常/冲突页签(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)
+        // 异常/冲突页签(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡 / NID 冲突)
         trl::register_en("路由变更", "Route Change");
         trl::register_en("异常/冲突", "Anomaly / Conflict");
-        trl::register_en("异常/冲突记录(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)", "Anomaly / conflict log (one MAC many TEIs / one TEI many MACs / restart-count oscillation)");
+        trl::register_en("异常/冲突记录(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡 / NID 冲突)", "Anomaly / conflict log (one MAC many TEIs / one TEI many MACs / restart-count oscillation / NID conflict)");
         trl::register_en("同一 MAC 多 TEI", "One MAC, Many TEIs");
         trl::register_en("同一 TEI 多 MAC", "One TEI, Many MACs");
         trl::register_en("重启次数振荡", "Restart-Count Oscillation");
         trl::register_en("两链路计数不同", "Link Count Mismatch");
+        trl::register_en("同一 NID 多 CCO MAC", "Multiple CCO MACs in One NID");
+        trl::register_en("同一 NID 下出现不同 CCO MAC", "Different CCO MACs Detected in One NID");
         trl::register_en("载波 / 无线", "PLC / RF");
         trl::register_en("次数", "Occurrences");
         // "次数"列分类型语义(A/B 冲突次数 / C 往返次数 / D 差异组合数)
         trl::register_en("冲突次数：同一主体反复冲突的累计次数", "Conflict Count: Cumulative Conflicts of the Same Subject");
+        trl::register_en("冲突次数：同一 NID 下每发现一个新的 CCO MAC 计一次", "Conflict Count: One for Each New CCO MAC Detected in the Same NID");
         trl::register_en("往返次数：回到出现过的取值才计，首次出现新值不计", "Round Trips: Counted Only When Returning to a Seen Value, the First Sighting of a New Value Is Not Counted");
         trl::register_en("%1(组合)", "%1 (combinations)");
         trl::register_en("差异组合数：每个不同的 (载波,无线) 取值组合各计一次", "Distinct Combinations: Each Different (PLC, RF) Value Pair Counted Once");
@@ -224,6 +231,9 @@ struct I18nRegTopoWindow {
         trl::register_en("在线", "Online");
         trl::register_en("入网中", "Joining");
         trl::register_en("离线", "Offline");
+        // 在网节点数汇总(用户 2026-11-06 定稿口径:主数仅 Online 的 STA,不含 CCO)
+        trl::register_en("在网节点：%1（入网中 %2 / 离线 %3）", "Online Nodes: %1 (Joining %2 / Offline %3)");
+        trl::register_en("在网节点：—", "Online Nodes: —");
         trl::register_en("发现列表", "Discover list");
         trl::register_en("关联请求", "Assoc request");
         trl::register_en("关联确认", "Assoc confirm");
@@ -768,6 +778,13 @@ TopoWindow::TopoWindow(QWidget* parent) : QWidget(parent) {
     m_mode_label = new QLabel(trl::L("实时"), this);
     m_mode_label->setStyleSheet(QStringLiteral("QLabel { color: palette(highlight); font-weight: bold; }"));
     top_lay->addWidget(m_mode_label);
+    // 在网节点数汇总:顶部工具栏 NID 下拉框旁、模式标签附近(用户 2026-11-06 定稿:
+    // 低调样式——普通工具栏文字,背景透明、无底色/无边框/无阴影/无颜色区分,
+    // 唯一强调是加粗);口径见 TopoState::online_counts():仅 Online 的 STA,
+    // 不含 CCO/入网中/离线。
+    m_count_label = new QLabel(trl::L("在网节点：—"), this);
+    m_count_label->setStyleSheet(QStringLiteral("QLabel { font-weight: bold; }"));
+    top_lay->addWidget(m_count_label);
     m_btn_live = new QPushButton(trl::L("回到实时"), this);
     m_btn_live->setVisible(false);
     connect(m_btn_live, &QPushButton::clicked, this, [this] {
@@ -1022,6 +1039,12 @@ void TopoWindow::rebuild_anomaly_table() {
                                  .arg(trl::L("载波")).arg(a.value_from)
                                  .arg(trl::L("无线")).arg(a.value_to);
                     break;
+                case TopoAnomalyKind::NidConflict:
+                    tei_txt = QStringLiteral("-");
+                    mac_txt = QStringLiteral("%1→%2")
+                                  .arg(format_mac(a.mac_old), format_mac(a.mac));
+                    change = trl::L("同一 NID 下出现不同 CCO MAC");
+                    break;
             }
             QString medium = QStringLiteral("-");
             if (a.kind == TopoAnomalyKind::RestartCountOscillation)
@@ -1035,7 +1058,7 @@ void TopoWindow::rebuild_anomaly_table() {
             c0->setData(QVariant::fromValue(a.last_ms), Qt::UserRole + 1);
             c0->setData(QVariant::fromValue(a.first_frame), Qt::UserRole + 2);
             c0->setData(QVariant::fromValue(a.first_ms), Qt::UserRole + 3);
-            // "次数"列在四类里含义不同(A/B 冲突次数、C 往返次数、D 差异组合数):
+            // "次数"列在各类里含义不同(A/B/NID 冲突次数、C 往返次数、D 差异组合数):
             // 逐类给文本与说明,避免把"往返 20 次"误读成"重启 20 次"
             QString trips_txt = QString::number(a.trips);
             QString trips_tip;
@@ -1043,6 +1066,9 @@ void TopoWindow::rebuild_anomaly_table() {
                 case TopoAnomalyKind::MacMultipleTei:
                 case TopoAnomalyKind::TeiMultipleMac:
                     trips_tip = trl::L("冲突次数：同一主体反复冲突的累计次数");
+                    break;
+                case TopoAnomalyKind::NidConflict:
+                    trips_tip = trl::L("冲突次数：同一 NID 下每发现一个新的 CCO MAC 计一次");
                     break;
                 case TopoAnomalyKind::RestartCountOscillation:
                     trips_tip = trl::L("往返次数：回到出现过的取值才计，首次出现新值不计");
@@ -1083,6 +1109,8 @@ void TopoWindow::rebuild_all() {
     rebuild_routes_table();
     rebuild_teimac_table();
     rebuild_anomaly_table();
+    // 在网节点数汇总(与图/表同源 view_states(),历史回放自动读冻结快照)
+    update_count_label();
 }
 
 void TopoWindow::show_history(const QHash<quint32, TopoState>* hist, bool active,
@@ -1119,6 +1147,26 @@ void TopoWindow::update_mode_ui() {
     else if (!m_hist_mode)
         m_mode_label->setText(trl::L("实时"));
     m_btn_live->setVisible(m_hist_mode || m_pause_live);
+}
+
+void TopoWindow::update_count_label() {
+    if (!m_count_label) return;
+    const TopoState* st = nullptr;
+    if (const auto* states = view_states()) {
+        auto it = states->constFind(m_current_nid);
+        if (it != states->constEnd()) st = &it.value();
+    }
+    // 无数据(无该 NID 状态 / 仅有 RestartCount 采样基线)显示 —,不显示 0,
+    // 避免把"没抓到网络"误读成"0 个在线节点"。
+    if (!st || !st->has_topology_content()) {
+        m_count_label->setText(trl::L("在网节点：—"));
+        return;
+    }
+    const TopoOnlineCounts counts = st->online_counts();
+    m_count_label->setText(trl::L("在网节点：%1（入网中 %2 / 离线 %3）")
+                               .arg(counts.online)
+                               .arg(counts.online_going)
+                               .arg(counts.offline));
 }
 
 void TopoWindow::pause_live() {

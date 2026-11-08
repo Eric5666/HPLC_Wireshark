@@ -165,6 +165,11 @@ private:
     void rebuild_all();
     void rebuild_routes_table();
     void rebuild_teimac_table();
+    /// @brief 刷新在网节点数汇总标签(当前 NID 的 TopoState;无数据时显示 —)
+    /// @details 与图/三张表同源(view_states()):实时读实时表,历史回放读冻结快照,
+    ///          故回放模式下数字自动冻结,不跟随新帧;刷新走既有 rebuild_all(),
+    ///          不另起定时器。
+    void update_count_label();
     /// @brief 重建「异常/冲突」表(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)
     void rebuild_anomaly_table();
     /// @brief 一次性把本窗口各表(邻居/TEI-MAC、路由变更、异常/冲突)列宽按内容重排
@@ -181,6 +186,7 @@ private:
 
     NidComboBox*        m_nid_combo;
     QLabel*             m_mode_label = nullptr;  ///< 模式标签:实时 / 历史回放 @ #N
+    QLabel*             m_count_label = nullptr; ///< 在网节点数汇总:顶部工具栏 NID 下拉框旁
     QPushButton*        m_btn_live = nullptr;    ///< 回到实时按钮(仅回放模式可见)
     TopoGraphWidget*    m_graph;
     QTableView*         m_routes_table;
