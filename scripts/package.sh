@@ -11,7 +11,7 @@ if [ -z "$VER" ]; then
     echo "错误: 无法从 BPLC_STA_Monitor.pro 解析 VERSION, 请显式传入版本号" >&2
     exit 2
 fi
-QTDIR="/c/Qt/6.11.2/mingw_64"
+QTDIR="/c/Qt/6.11.3/mingw_64"
 TOOLDIR="/c/Qt/Tools/mingw1310_64/bin"
 
 export PATH="$TOOLDIR:$QTDIR/bin:$PATH"

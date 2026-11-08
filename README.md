@@ -122,12 +122,12 @@ hplc & beacon          HPLC 信标(排除 HRF)
 
 | 组件   | 版本 |
 |--------|------|
-| Qt     | 6.11.2(mingw_64) |
+| Qt     | 6.11.3(mingw_64) |
 | 编译器 | MinGW 13.1.0 |
 | 构建   | qmake + mingw32-make(非 shadow 构建) |
 
 ```bash
-export PATH="/c/Qt/Tools/mingw1310_64/bin:/c/Qt/6.11.2/mingw_64/bin:$PATH"
+export PATH="/c/Qt/Tools/mingw1310_64/bin:/c/Qt/6.11.3/mingw_64/bin:$PATH"
 qmake BPLC_STA_Monitor.pro
 mingw32-make -j4
 # 产物:release/BPLC_STA_Monitor.exe
@@ -349,8 +349,8 @@ data = [dlen 2B LE][ts 4B LE][phr_mcs 1B][option 1B][channel 1B][isRF 1B][MPDU..
 
 | 工具 | 用途 | 获取方式 |
 |------|------|----------|
-| Qt 6.11.2 mingw_64 + MinGW 13.1.0 | 编译(qmake/mingw32-make) | Qt 在线安装器 |
-| `windeployqt`(Qt 自带) | 收集 Qt 运行库 DLL 到 release/ | 随 Qt 安装,`<Qt>\6.11.2\mingw_64\bin\windeployqt.exe` |
+| Qt 6.11.3 mingw_64 + MinGW 13.1.0 | 编译(qmake/mingw32-make) | Qt 在线安装器 |
+| `windeployqt`(Qt 自带) | 收集 Qt 运行库 DLL 到 release/ | 随 Qt 安装,`<Qt>\6.11.3\mingw_64\bin\windeployqt.exe` |
 | NSIS 3.x | 安装包制作 | <https://nsis.sourceforge.io/Download>(便携 zip 解压到工程 `tools/nsis-3.09/` 即可,免安装) |
 | Python 3 + Pillow | 重新生成应用图标(可选) | `pip install pillow` |
 | GitHub 账号 + PAT | 发布 release / 上传安装包(仓库需公开才能被免鉴权拉取) | GitHub Settings → Developer settings |
