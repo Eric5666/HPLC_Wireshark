@@ -961,9 +961,7 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
         // 帧级源只属于首站/首段,盖到多站/级联后续事件上会串归属,留 0 的
         // 事件由 TopoState 回落到该事件 nodes 首条。
         m_topo_states[e.mpdu.net_id].apply(te);
-        m_topo_log.append({e.index, te});
-        // 增量回放依赖日志严格按帧序追加;若乱序到达则重置回放水位,下次回放全量重建
-        if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
+        insert_topo_log_entry(m_topo_log, TopoLogItem{e.index, te}, m_topo_hist_replayed);
         // 拓扑窗口节流刷新:仅置脏标志,由 TopoWindow 定时器批量刷新(防高频卡顿)
         // (历史回放模式下 mark_dirty 会被 TopoWindow 忽略,保持冻结)
         if (m_topo_window)
@@ -991,10 +989,10 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             e.msdu.topo_event.epoch_ms = e.epoch_ms;
             e.msdu.topo_event.frame_index = e.index;
             ts_it.value().apply_channel_info(e.mpdu.src_tei, e.msdu.topo_event);
-            m_topo_channel_log.append({e.index, e.mpdu.net_id, e.mpdu.src_tei,
-                                       e.epoch_ms, e.msdu.topo_event});
-            // 增量回放依赖日志严格按帧序追加;若乱序到达则重置回放水位,下次回放全量重建
-            if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
+            insert_topo_log_entry(m_topo_channel_log,
+                                  TopoChannelSample{e.index, e.mpdu.net_id, e.mpdu.src_tei,
+                                                    e.epoch_ms, e.msdu.topo_event},
+                                  m_topo_hist_replayed);
             if (m_topo_window) m_topo_window->mark_dirty();
         }
     }
@@ -1044,12 +1042,12 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             const bool has_valid_rc = int(e.msdu.restart_count) >= 0
                 && int(e.msdu.restart_count) != kRestartCountInvalid;
             if (e.msdu.present && e.mpdu.net_id != 0 && has_valid_rc) {
-                m_topo_restart_log.append({e.index, e.mpdu.net_id,
-                                           quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
-                                           int(e.msdu.restart_count), e.epoch_ms,
-                                           e.meta.is_rf, true, e.msdu.topo_event.kind});
-                // 增量回放依赖日志严格按帧序追加;若乱序到达则重置回放水位,下次回放全量重建
-                if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
+                insert_topo_log_entry(m_topo_restart_log,
+                                      TopoRestartSample{e.index, e.mpdu.net_id,
+                                                        quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
+                                                        int(e.msdu.restart_count), e.epoch_ms,
+                                                        e.meta.is_rf, true, e.msdu.topo_event.kind},
+                                      m_topo_hist_replayed);
             }
             bool did_revive = false;
             if (e.msdu.present
@@ -1059,11 +1057,12 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
                                           e.msdu.topo_event.kind, &did_revive))
                 topo_touched = true;
             if (did_revive && !has_valid_rc) {
-                m_topo_restart_log.append({e.index, e.mpdu.net_id,
-                                           quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
-                                           kRestartCountInvalid, e.epoch_ms,
-                                           e.meta.is_rf, true, e.msdu.topo_event.kind});
-                if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
+                insert_topo_log_entry(m_topo_restart_log,
+                                      TopoRestartSample{e.index, e.mpdu.net_id,
+                                                        quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
+                                                        kRestartCountInvalid, e.epoch_ms,
+                                                        e.meta.is_rf, true, e.msdu.topo_event.kind},
+                                      m_topo_hist_replayed);
             }
             // 正在入网节点(pending,按 MAC):同样仅未判定时写入
             if (e.msdu.msdu_src_mac) {
