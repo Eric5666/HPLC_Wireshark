@@ -19,7 +19,7 @@
 ///         复活留 kind=ChannelInfo 的记录;同帧事件先、信道后
 ///   D33   停上电事件上报:断电算离线(LeaveInd 同款),断电/上电都记录,上电只记录不改状态
 ///         不复活;位图按 TEI 点名、地址按电表地址点名;不存在的节点跳过;NID 隔离
-///   D34   拓扑/信道/重启日志乱序稳定排序;水位推进后迟到记录使快照失效并全量重建
+///   D34   三类日志单调帧序追加、同帧稳定顺序与增量回放
 /// 用法:./probe ; exit 0 = 全部断言通过
 #include "topo_state.h"
 #include <QCoreApplication>
@@ -644,40 +644,40 @@ int main(int argc, char** argv) {
         replay_topo_logs(topo_log, channel_log, restart_log, 2, replayed, hist);
         CHECK(count_restart_events(hist[0x0E]) == 1, "D18h 回拨后再重放到帧2,仍为 1 条");
     }
-    // D34:三类日志按帧序稳定插入;已回放范围中出现迟到记录时,水位失效并重建快照。
+    // D34:单调帧序追加与同帧稳定顺序;新帧在回放水位之后时增量应用。
     {
         qint64 replayed = -1;
         QVector<TopoLogItem> topo_log;
-        TopoEvent topo9a; topo9a.sender_mac = MAC_A;
         TopoEvent topo2;  topo2.sender_mac = MAC_B;
         TopoEvent topo6;  topo6.sender_mac = MAC_CCO;
+        TopoEvent topo9a; topo9a.sender_mac = MAC_A;
         TopoEvent topo9b; topo9b.sender_mac = MAC_B + 1;
-        insert_topo_log_entry(topo_log, TopoLogItem{9, topo9a}, replayed);
-        insert_topo_log_entry(topo_log, TopoLogItem{2, topo2}, replayed);
-        insert_topo_log_entry(topo_log, TopoLogItem{6, topo6}, replayed);
-        insert_topo_log_entry(topo_log, TopoLogItem{9, topo9b}, replayed);
+        append_topo_log_entry(topo_log, TopoLogItem{2, topo2}, replayed);
+        append_topo_log_entry(topo_log, TopoLogItem{6, topo6}, replayed);
+        append_topo_log_entry(topo_log, TopoLogItem{9, topo9a}, replayed);
+        append_topo_log_entry(topo_log, TopoLogItem{9, topo9b}, replayed);
         CHECK(topo_log.size() == 4 && topo_log[0].frame_index == 2
                   && topo_log[1].frame_index == 6 && topo_log[2].frame_index == 9
                   && topo_log[3].frame_index == 9
                   && topo_log[2].event.sender_mac == MAC_A
                   && topo_log[3].event.sender_mac == MAC_B + 1,
-              "D34a 拓扑迟到帧按序插入且同帧保留到达顺序");
+              "D34a 拓扑日志单调追加且同帧保留调用顺序");
 
         QVector<TopoChannelSample> channel_log;
-        insert_topo_log_entry(channel_log, TopoChannelSample{9, 0x0E, 5, 1009, TopoEvent{}}, replayed);
-        insert_topo_log_entry(channel_log, TopoChannelSample{2, 0x0E, 5, 1002, TopoEvent{}}, replayed);
-        insert_topo_log_entry(channel_log, TopoChannelSample{6, 0x0E, 5, 1006, TopoEvent{}}, replayed);
+        append_topo_log_entry(channel_log, TopoChannelSample{2, 0x0E, 5, 1002, TopoEvent{}}, replayed);
+        append_topo_log_entry(channel_log, TopoChannelSample{6, 0x0E, 5, 1006, TopoEvent{}}, replayed);
+        append_topo_log_entry(channel_log, TopoChannelSample{9, 0x0E, 5, 1009, TopoEvent{}}, replayed);
         CHECK(channel_log.size() == 3 && channel_log[0].frame_index == 2
                   && channel_log[1].frame_index == 6 && channel_log[2].frame_index == 9,
-              "D34b 信道日志迟到帧按帧号排序");
+              "D34b 信道日志单调追加");
 
         QVector<TopoRestartSample> restart_log;
-        insert_topo_log_entry(restart_log, TopoRestartSample{9, 0x0E, 5, MAC_A, 4, 1009, false, true}, replayed);
-        insert_topo_log_entry(restart_log, TopoRestartSample{2, 0x0E, 5, MAC_A, 2, 1002, false, true}, replayed);
-        insert_topo_log_entry(restart_log, TopoRestartSample{6, 0x0E, 5, MAC_A, 3, 1006, false, true}, replayed);
+        append_topo_log_entry(restart_log, TopoRestartSample{2, 0x0E, 5, MAC_A, 2, 1002, false, true}, replayed);
+        append_topo_log_entry(restart_log, TopoRestartSample{6, 0x0E, 5, MAC_A, 3, 1006, false, true}, replayed);
+        append_topo_log_entry(restart_log, TopoRestartSample{9, 0x0E, 5, MAC_A, 4, 1009, false, true}, replayed);
         CHECK(restart_log.size() == 3 && restart_log[0].frame_index == 2
                   && restart_log[1].frame_index == 6 && restart_log[2].frame_index == 9,
-              "D34c 重启日志迟到帧按帧号排序");
+              "D34c 重启日志单调追加");
     }
     {
         const quint32 net = 0x0E;
@@ -686,22 +686,19 @@ int main(int argc, char** argv) {
                                  kRestartCountInvalid, 1);
         joined.nodes.append({5, MAC_A});
         qint64 replayed = -1;
-        insert_topo_log_entry(topo_log, TopoLogItem{1, joined}, replayed);
-        // 保留一个尚未进入目标快照的未来日志,确保迟到条目需插入而不是简单尾部追加。
-        TopoEvent future; future.kind = TopoEventKind::Other;
-        insert_topo_log_entry(topo_log, TopoLogItem{4, future}, replayed);
+        append_topo_log_entry(topo_log, TopoLogItem{1, joined}, replayed);
         QHash<quint32, TopoState> hist;
-        replay_topo_logs(topo_log, {}, {}, 3, replayed, hist);
-        CHECK(replayed == 3 && hist[net].nodes.value(5).status == NodeStatus::Online,
-              "D34d 初次回放已推进到帧3");
-        TopoEvent late_leave = frame(TopoEventKind::LeaveInd, net, 0,
-                                     kRestartCountInvalid, 2);
-        late_leave.leaves.append(MAC_A);
-        insert_topo_log_entry(topo_log, TopoLogItem{2, late_leave}, replayed);
-        CHECK(replayed == -1, "D34e 已回放范围内的迟到拓扑事件使水位失效");
-        replay_topo_logs(topo_log, {}, {}, 3, replayed, hist);
-        CHECK(replayed == 3 && hist[net].nodes.value(5).status == NodeStatus::Offline,
-              "D34f 拓扑水位失效后全量重建纳入迟到离网事件");
+        replay_topo_logs(topo_log, {}, {}, 1, replayed, hist);
+        CHECK(replayed == 1 && hist[net].nodes.value(5).status == NodeStatus::Online,
+              "D34d 首帧回放建立在线节点");
+        TopoEvent leave = frame(TopoEventKind::LeaveInd, net, 0,
+                                kRestartCountInvalid, 2);
+        leave.leaves.append(MAC_A);
+        append_topo_log_entry(topo_log, TopoLogItem{2, leave}, replayed);
+        CHECK(replayed == 1, "D34e 追加新帧不使较早水位失效");
+        replay_topo_logs(topo_log, {}, {}, 2, replayed, hist);
+        CHECK(replayed == 2 && hist[net].nodes.value(5).status == NodeStatus::Offline,
+              "D34f 按序增量回放应用离网事件");
     }
     {
         const quint32 net = 0x0E;
@@ -710,40 +707,35 @@ int main(int argc, char** argv) {
                                  kRestartCountInvalid, 1);
         joined.nodes.append({5, MAC_A});
         qint64 replayed = -1;
-        insert_topo_log_entry(topo_log, TopoLogItem{1, joined}, replayed);
+        append_topo_log_entry(topo_log, TopoLogItem{1, joined}, replayed);
+        QHash<quint32, TopoState> hist;
+        replay_topo_logs(topo_log, {}, {}, 1, replayed, hist);
+        TopoEvent channel; channel.proxy_up_rate = 77;
         QVector<TopoChannelSample> channel_log;
-        TopoEvent future_channel; future_channel.proxy_up_rate = 88;
-        insert_topo_log_entry(channel_log,
-                              TopoChannelSample{4, net, 5, 1004, future_channel}, replayed);
-        QHash<quint32, TopoState> hist;
-        replay_topo_logs(topo_log, channel_log, {}, 3, replayed, hist);
-        TopoEvent late_channel; late_channel.proxy_up_rate = 77;
-        insert_topo_log_entry(channel_log,
-                              TopoChannelSample{2, net, 5, 1002, late_channel}, replayed);
-        replay_topo_logs(topo_log, channel_log, {}, 3, replayed, hist);
-        CHECK(replayed == 3 && hist[net].nodes.value(5).proxy_up_rate == 77,
-              "D34g 水位推进后迟到信道观测触发重建并应用");
+        append_topo_log_entry(channel_log, TopoChannelSample{2, net, 5, 1002, channel}, replayed);
+        replay_topo_logs(topo_log, channel_log, {}, 2, replayed, hist);
+        CHECK(replayed == 2 && hist[net].nodes.value(5).proxy_up_rate == 77,
+              "D34g 按序增量回放应用信道观测");
     }
     {
         const quint32 net = 0x0E;
         QVector<TopoLogItem> topo_log;
-        TopoEvent joined = frame(TopoEventKind::AssocCnf, net, MAC_A, 2, 1);
+        TopoEvent joined = frame(TopoEventKind::AssocCnf, net, MAC_A,
+                                 kRestartCountInvalid, 1);
         joined.nodes.append({5, MAC_A});
         qint64 replayed = -1;
-        insert_topo_log_entry(topo_log, TopoLogItem{1, joined}, replayed);
+        append_topo_log_entry(topo_log, TopoLogItem{1, joined}, replayed);
         QVector<TopoRestartSample> restart_log;
-        insert_topo_log_entry(restart_log,
+        append_topo_log_entry(restart_log,
                               TopoRestartSample{1, net, 5, MAC_A, 2, 1001, false, true}, replayed);
-        insert_topo_log_entry(restart_log,
-                              TopoRestartSample{4, net, 5, MAC_A, 4, 1004, false, true}, replayed);
         QHash<quint32, TopoState> hist;
-        replay_topo_logs(topo_log, {}, restart_log, 3, replayed, hist);
-        insert_topo_log_entry(restart_log,
+        replay_topo_logs(topo_log, {}, restart_log, 1, replayed, hist);
+        append_topo_log_entry(restart_log,
                               TopoRestartSample{2, net, 5, MAC_A, 3, 1002, false, true}, replayed);
-        replay_topo_logs(topo_log, {}, restart_log, 3, replayed, hist);
-        CHECK(replayed == 3 && count_restart_events(hist[net]) == 1
+        replay_topo_logs(topo_log, {}, restart_log, 2, replayed, hist);
+        CHECK(replayed == 2 && count_restart_events(hist[net]) == 1
                   && hist[net].events.last().frame_index == 2,
-              "D34h 水位推进后迟到重启采样触发重建并按时间派生事件");
+              "D34h 按序增量回放从重启采样派生事件");
     }
     // D24:离网清理 CCO 身份记忆 —— 同一 NID/MAC 复用为 STA 后不得误报 CcoRestart;
     //      其他 NID 的同 MAC 记忆必须保留。

@@ -961,7 +961,7 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
         // 帧级源只属于首站/首段,盖到多站/级联后续事件上会串归属,留 0 的
         // 事件由 TopoState 回落到该事件 nodes 首条。
         m_topo_states[e.mpdu.net_id].apply(te);
-        insert_topo_log_entry(m_topo_log, TopoLogItem{e.index, te}, m_topo_hist_replayed);
+        append_topo_log_entry(m_topo_log, TopoLogItem{e.index, te}, m_topo_hist_replayed);
         // 拓扑窗口节流刷新:仅置脏标志,由 TopoWindow 定时器批量刷新(防高频卡顿)
         // (历史回放模式下 mark_dirty 会被 TopoWindow 忽略,保持冻结)
         if (m_topo_window)
@@ -989,7 +989,7 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             e.msdu.topo_event.epoch_ms = e.epoch_ms;
             e.msdu.topo_event.frame_index = e.index;
             ts_it.value().apply_channel_info(e.mpdu.src_tei, e.msdu.topo_event);
-            insert_topo_log_entry(m_topo_channel_log,
+            append_topo_log_entry(m_topo_channel_log,
                                   TopoChannelSample{e.index, e.mpdu.net_id, e.mpdu.src_tei,
                                                     e.epoch_ms, e.msdu.topo_event},
                                   m_topo_hist_replayed);
@@ -1042,7 +1042,7 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             const bool has_valid_rc = int(e.msdu.restart_count) >= 0
                 && int(e.msdu.restart_count) != kRestartCountInvalid;
             if (e.msdu.present && e.mpdu.net_id != 0 && has_valid_rc) {
-                insert_topo_log_entry(m_topo_restart_log,
+                append_topo_log_entry(m_topo_restart_log,
                                       TopoRestartSample{e.index, e.mpdu.net_id,
                                                         quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
                                                         int(e.msdu.restart_count), e.epoch_ms,
@@ -1057,7 +1057,7 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
                                           e.msdu.topo_event.kind, &did_revive))
                 topo_touched = true;
             if (did_revive && !has_valid_rc) {
-                insert_topo_log_entry(m_topo_restart_log,
+                append_topo_log_entry(m_topo_restart_log,
                                       TopoRestartSample{e.index, e.mpdu.net_id,
                                                         quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
                                                         kRestartCountInvalid, e.epoch_ms,

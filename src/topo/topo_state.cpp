@@ -218,7 +218,7 @@ void replay_topo_logs(const QVector<TopoLogItem>& topo_log,
                       const QVector<TopoRestartSample>& restart_log,
                       qint64 target_frame, qint64& replayed_frame,
                       QHash<quint32, TopoState>& hist_states) {
-    // 点到更早的帧,或水位失效(初始 -1 / 日志乱序被重置):快照从零重建。
+    // 点到更早的帧,或新增记录覆盖已回放范围使水位失效(初始 -1):快照从零重建。
     // 注意:水位失效时必须清快照,否则从头重放会 double-apply(事件表翻倍)。
     if (replayed_frame < 0 || target_frame < replayed_frame) {
         hist_states.clear();
