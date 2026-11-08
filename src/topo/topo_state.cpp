@@ -25,9 +25,10 @@ QString anomaly_key(quint32 net_id, const TopoAnomaly& anomaly) {
     return QString();
 }
 
-void append_event(QVector<TopoEvent>& events, const TopoEvent& event) {
-    if (events.size() == kMaxRecentEventsPerNetwork) events.remove(0);
-    events.append(event);
+void append_event(TopoState& state, const TopoEvent& event) {
+    if (state.events.size() == kMaxRecentEventsPerNetwork) state.events.remove(0);
+    state.events.append(event);
+    state.has_event_history = true;
 }
 
 
@@ -97,7 +98,7 @@ QString online_evidence_name(TopoEventKind k) {
 ///        只在真正 Offline→Online 跃迁时记一条,已在线帧不重复记;
 ///        kind=证据帧 kind、desc=复活原因、nodes=复活节点,复用 TopoEvent 现有字段,
 ///        不新增字段、不动序列化;回放重走同一路径,记录与实时一致。
-void append_revival_record(QVector<TopoEvent>& events, quint32 nid, TopoEventKind kind,
+void append_revival_record(TopoState& state, quint32 nid, TopoEventKind kind,
                            quint16 tei, quint64 mac, quint64 sender_mac,
                            qint64 epoch_ms, qint64 frame_index) {
     TopoEvent re;
@@ -108,7 +109,7 @@ void append_revival_record(QVector<TopoEvent>& events, quint32 nid, TopoEventKin
     re.epoch_ms = epoch_ms;
     re.frame_index = frame_index;
     re.desc = trl::L("节点恢复在线（%1）").arg(online_evidence_name(kind));
-    append_event(events, re);
+    append_event(state, re);
 }
 
 /// @brief 事件类型 → 状态更新;未明确表示在线/入网的事件不改状态。
@@ -159,6 +160,10 @@ static void assign_link_type(TopoNode& n, const TopoEvent& e) {
 }
 
 } // namespace
+
+QString topo_anomaly_merge_key(quint32 net_id, const TopoAnomaly& anomaly) {
+    return anomaly_key(net_id, anomaly);
+}
 
 void TopoState::note_anomaly(quint32 net_id, TopoAnomalyKind kind,
                             quint16 tei, quint64 mac, quint64 mac_old,
@@ -575,7 +580,7 @@ bool TopoState::note_restart_change(quint32 net_id, quint64 subject, bool is_cco
                   ? trl::L("警告CCO重启过！重启次数 %1→%2").arg(prev).arg(rc)
                   : trl::L("警告STA重启过！STA %1 重启次数 %2→%3")
                         .arg(topo_mac_str(subject)).arg(prev).arg(rc);
-    append_event(events, re);
+    append_event(*this, re);
     return true;
 }
 
@@ -604,7 +609,7 @@ bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src
             nit->status = NodeStatus::Online;
             nit->last_seen_ms = epoch_ms;
             if (revived) {
-                append_revival_record(events, net_id, frame_kind, src_tei, src_mac,
+                append_revival_record(*this, net_id, frame_kind, src_tei, src_mac,
                                       src_mac, epoch_ms, frame_index);
                 if (did_revive) *did_revive = true;
             }
@@ -653,7 +658,7 @@ void TopoState::apply(const TopoEvent& e) {
                 node.parent_tei = new_hop;
                 node.last_seen_ms = e.epoch_ms;
                 if (node.status == NodeStatus::Offline)
-                    append_revival_record(events, e.nid, TopoEventKind::DiscoverList,
+                    append_revival_record(*this, e.nid, TopoEventKind::DiscoverList,
                                           tei, node.mac, e.sender_mac,
                                           e.epoch_ms, e.frame_index);
                 node.status = NodeStatus::Online;
@@ -676,7 +681,7 @@ void TopoState::apply(const TopoEvent& e) {
         cco.mac = e.cco_mac;
         cco.parent_tei = 0;
         if (cco.status == NodeStatus::Offline)
-            append_revival_record(events, e.nid, e.kind, 1, e.cco_mac, e.sender_mac,
+            append_revival_record(*this, e.nid, e.kind, 1, e.cco_mac, e.sender_mac,
                                   e.epoch_ms, e.frame_index);
         cco.status = NodeStatus::Online;
         cco.last_seen_ms = e.epoch_ms;
@@ -718,7 +723,7 @@ void TopoState::apply(const TopoEvent& e) {
         n.mac = p.mac;
         if (has_event_status) {
             if (n.status == NodeStatus::Offline && event_status == NodeStatus::Online)
-                append_revival_record(events, e.nid, e.kind, p.tei, p.mac, e.sender_mac,
+                append_revival_record(*this, e.nid, e.kind, p.tei, p.mac, e.sender_mac,
                                       e.epoch_ms, e.frame_index);
             n.status = event_status;
         }
@@ -785,7 +790,7 @@ void TopoState::apply(const TopoEvent& e) {
         n.parent_tei = r.second;
         if (has_event_status) {
             if (n.status == NodeStatus::Offline && event_status == NodeStatus::Online)
-                append_revival_record(events, e.nid, e.kind, r.first, n.mac, e.sender_mac,
+                append_revival_record(*this, e.nid, e.kind, r.first, n.mac, e.sender_mac,
                                       e.epoch_ms, e.frame_index);
             n.status = event_status;
         }
@@ -837,7 +842,7 @@ void TopoState::apply(const TopoEvent& e) {
             TopoNode& n = nodes[ctei];
             n.tei = ctei;
             if (n.status == NodeStatus::Offline)
-                append_revival_record(events, e.nid, TopoEventKind::ChangeProxyCnf,
+                append_revival_record(*this, e.nid, TopoEventKind::ChangeProxyCnf,
                                       ctei, n.mac, e.sender_mac,
                                       e.epoch_ms, e.frame_index);
             n.status = NodeStatus::Online; // 成功确认中的子 TEI 位图是当前在网证据
@@ -925,13 +930,13 @@ void TopoState::apply(const TopoEvent& e) {
         case TopoEventKind::LeaveInd:
         case TopoEventKind::PowerOff:
         case TopoEventKind::PowerOn:
-            append_event(events, e);
+            append_event(*this, e);
             break;
         case TopoEventKind::DiscoverList:
             if (up_route_changed) {
                 TopoEvent ev = e;
                 if (!up_route_desc.isEmpty()) ev.desc = up_route_desc;
-                append_event(events, ev);
+                append_event(*this, ev);
             }
             break;
         default:
@@ -958,7 +963,7 @@ void TopoState::apply_channel_info(quint16 reporter_tei, const TopoEvent& e) {
     reporter.status = NodeStatus::Online;
     reporter.last_seen_ms = e.epoch_ms;
     if (revived)
-        append_revival_record(events, nid, TopoEventKind::ChannelInfo, reporter_tei,
+        append_revival_record(*this, nid, TopoEventKind::ChannelInfo, reporter_tei,
                               reporter_mac ? reporter_mac : e.sender_mac,
                               e.sender_mac, e.epoch_ms, e.frame_index);
     // 站点属性(表217/表126):代理上行/下行接收率、最小接收率、RF 跳数、角色 + parent_tei 校正

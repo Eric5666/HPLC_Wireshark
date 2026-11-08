@@ -1084,6 +1084,10 @@ void MainWindow::update_topo_history(qint64 frame_index, qint64 frame_ms) {
     m_topo_hist_active = (m_model && frame_index < m_model->total_count());
     if (!m_topo_window || !m_topo_window->isVisible())
         return;  // TOPO 窗口未打开:只记模式,打开时再重放同步
+    if (!m_topo_hist_active) {
+        on_topo_request_live();  // 最新帧直接回实时,不可等待一个会被历史态守卫丢弃的异步快照
+        return;
+    }
     replay_topo_history();
 }
 
@@ -1100,8 +1104,13 @@ void MainWindow::replay_topo_history() {
 
 void MainWindow::on_topo_history_ready(quint64 request_id, qint64 target_frame, qint64 target_ms,
                                        bool active, const TopoStateMap& states) {
-    if (request_id != m_topo_request_id || !m_topo_window || !m_topo_hist_active) return;
+    if (request_id != m_topo_request_id || !m_topo_window) return;
     if (target_frame != m_topo_hist_frame || target_ms != m_topo_hist_ms) return;
+    if (!active) {
+        on_topo_request_live();
+        return;
+    }
+    if (!m_topo_hist_active) return;
     m_topo_window->show_history(states, active, target_frame, target_ms);
 }
 
@@ -1110,6 +1119,8 @@ void MainWindow::on_topo_request_live() {
     m_topo_hist_active = false;
     if (m_topo_window)
         m_topo_window->show_live();
+    if (m_topo_controller)
+        m_topo_controller->request_live_snapshot();
 }
 
 /// @brief TOPO 路由变更表双击某行 → 进入历史追溯并冻结在该行对应的帧

@@ -86,12 +86,13 @@ bool TopoReplayWorker::open_store() {
                          "CREATE INDEX IF NOT EXISTS topo_frames_order "
                          "ON topo_frames(frame_index,id);"
                          "CREATE TABLE IF NOT EXISTS topo_anomalies ("
-                         "nid INTEGER NOT NULL, kind INTEGER NOT NULL, tei INTEGER NOT NULL,"
-                         "tei_old INTEGER NOT NULL, mac INTEGER NOT NULL, mac_old INTEGER NOT NULL,"
-                         "is_rf INTEGER NOT NULL, trips INTEGER NOT NULL, value_from INTEGER NOT NULL,"
-                         "value_to INTEGER NOT NULL, first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL,"
+                         "nid INTEGER NOT NULL, merge_key TEXT NOT NULL, kind INTEGER NOT NULL,"
+                         "tei INTEGER NOT NULL, tei_old INTEGER NOT NULL, mac INTEGER NOT NULL,"
+                         "mac_old INTEGER NOT NULL, is_rf INTEGER NOT NULL, trips INTEGER NOT NULL,"
+                         "value_from INTEGER NOT NULL, value_to INTEGER NOT NULL,"
+                         "first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL,"
                          "first_frame INTEGER NOT NULL, last_frame INTEGER NOT NULL,"
-                         "UNIQUE(nid,kind,tei,tei_old,mac,mac_old,is_rf));"
+                         "UNIQUE(nid,merge_key));"
                          "CREATE INDEX IF NOT EXISTS topo_anomalies_order "
                          "ON topo_anomalies(nid,last_frame DESC);";
     char* error = nullptr;
@@ -264,8 +265,8 @@ bool TopoReplayWorker::persist_anomalies(quint32 nid, const TopoState& state, qi
     if (!db || m_store_failed) return false;
     SqliteStmt* stmt = nullptr;
     const char* sql = "INSERT OR REPLACE INTO topo_anomalies"
-        "(nid,kind,tei,tei_old,mac,mac_old,is_rf,trips,value_from,value_to,first_ms,last_ms,first_frame,last_frame)"
-        " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)";
+        "(nid,merge_key,kind,tei,tei_old,mac,mac_old,is_rf,trips,value_from,value_to,first_ms,last_ms,first_frame,last_frame)"
+        " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         report_sqlite_error(QStringLiteral("prepare anomaly upsert"));
         return false;
@@ -276,20 +277,22 @@ bool TopoReplayWorker::persist_anomalies(quint32 nid, const TopoState& state, qi
         // projection would both be quadratic and lose older rows after a replay rebuild.
         if (a.last_frame != frame_index) continue;
         sqlite3_reset(stmt); sqlite3_clear_bindings(stmt);
+        const QByteArray merge_key = topo_anomaly_merge_key(nid, a).toUtf8();
         sqlite3_bind_int64(stmt, 1, nid);
-        sqlite3_bind_int(stmt, 2, int(a.kind));
-        sqlite3_bind_int(stmt, 3, a.tei);
-        sqlite3_bind_int(stmt, 4, a.tei_old);
-        sqlite3_bind_int64(stmt, 5, sqlite3_int64(a.mac));
-        sqlite3_bind_int64(stmt, 6, sqlite3_int64(a.mac_old));
-        sqlite3_bind_int(stmt, 7, a.is_rf ? 1 : 0);
-        sqlite3_bind_int(stmt, 8, a.trips);
-        sqlite3_bind_int(stmt, 9, a.value_from);
-        sqlite3_bind_int(stmt, 10, a.value_to);
-        sqlite3_bind_int64(stmt, 11, a.first_ms);
-        sqlite3_bind_int64(stmt, 12, a.last_ms);
-        sqlite3_bind_int64(stmt, 13, a.first_frame);
-        sqlite3_bind_int64(stmt, 14, a.last_frame);
+        sqlite3_bind_text(stmt, 2, merge_key.constData(), merge_key.size(), SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 3, int(a.kind));
+        sqlite3_bind_int(stmt, 4, a.tei);
+        sqlite3_bind_int(stmt, 5, a.tei_old);
+        sqlite3_bind_int64(stmt, 6, sqlite3_int64(a.mac));
+        sqlite3_bind_int64(stmt, 7, sqlite3_int64(a.mac_old));
+        sqlite3_bind_int(stmt, 8, a.is_rf ? 1 : 0);
+        sqlite3_bind_int(stmt, 9, a.trips);
+        sqlite3_bind_int(stmt, 10, a.value_from);
+        sqlite3_bind_int(stmt, 11, a.value_to);
+        sqlite3_bind_int64(stmt, 12, a.first_ms);
+        sqlite3_bind_int64(stmt, 13, a.last_ms);
+        sqlite3_bind_int64(stmt, 14, a.first_frame);
+        sqlite3_bind_int64(stmt, 15, a.last_frame);
         if (sqlite3_step(stmt) != SQLITE_DONE) { ok = false; break; }
     }
     sqlite3_finalize(stmt);
@@ -302,7 +305,8 @@ TopoStateMap checkpoint_state(const TopoStateMap& live_states) {
     TopoStateMap snapshot = live_states;
     for (auto it = snapshot.begin(); it != snapshot.end(); ++it) {
         // Event rows are a display projection, not topology state needed to replay.
-        // Keep them in SQLite and out of each checkpoint to bound snapshot memory.
+        // Preserve the boolean summary before dropping rows so an event-only NID remains visible.
+        it->has_event_history = it->has_event_history || !it->events.isEmpty();
         it->events.clear();
         // Keep the bounded anomaly aggregates: TopoState uses these as its replay-time
         // deduplication/index state; the complete derived history is separately in SQLite.

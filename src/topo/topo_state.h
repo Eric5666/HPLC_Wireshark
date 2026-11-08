@@ -80,6 +80,9 @@ struct TopoAnomaly {
     qint64  last_frame = -1;  ///< 最近来源帧序号
 };
 
+/// Stable aggregate identity shared by in-memory merging and SQLite persistence.
+QString topo_anomaly_merge_key(quint32 net_id, const TopoAnomaly& anomaly);
+
 /// @brief (NID, MAC) 组合键:网络标识符用完整 quint32(GW HDC1.0 为 24bit,有效 1~16777215;
 ///        GW HDC2.0 为 16bit;南网 SNID 合并后 5bit),MAC 取低 48bit;两者都不截断,
 ///        仅高位不同的网络也不会串键(旧 quint64 打包只取 NID 低 16bit,已作废)。
@@ -126,6 +129,7 @@ public:
     // Checkpoints omit events (which are not replay state); anomaly aggregates remain
     // because they are also the bounded deduplication state needed for deterministic replay.
     QVector<TopoEvent> events;      ///< UI 最近 4096 条事件；更早事件需从 SQLite 重建
+    bool has_event_history = false; ///< 有过事件；检查点省略 events 后仍用于保留 NID
     QVector<TopoAnomaly> anomalies; ///< UI 最近 4096 个合并异常主体；更早记录需重建
 
     /// @brief 是否已有可在 TOPO 窗口展示的拓扑/事件内容。
@@ -133,7 +137,7 @@ public:
     ///          在网络列表中表现为一个空拓扑。重启事件或异常产生后则应正常显示。
     bool has_topology_content() const {
         return first_seen_frame >= 0 || !nodes.isEmpty() || !pending.isEmpty()
-            || !events.isEmpty() || !anomalies.isEmpty();
+            || has_event_history || !events.isEmpty() || !anomalies.isEmpty();
     }
 
     /// @brief 在网节点数汇总(用户 2026-11-06 定稿口径)
