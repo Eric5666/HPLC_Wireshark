@@ -334,22 +334,33 @@ struct TopoChannelSample {
     TopoEvent event;          ///< 已填充 epoch_ms 的完整信道观测事件(回放用)
 };
 
-/// @brief 按单调帧序追加回放日志,并在写入已回放范围时使水位失效。
-/// @details MainWindow::make_entry 为每个解析结果分配递增帧号,同帧多条记录按调用顺序追加。
-///          不支持迟到帧;调试构建用断言尽早暴露调用顺序回归,避免回放日志失去有序性。
+/// @brief 记录拓扑回放日志,并在改动已回放范围时使水位失效。
+/// @details 正常的 MainWindow::make_entry 路径按递增帧号 O(1) 追加,同帧按调用顺序稳定追加。
+///          若将来有调用路径违反帧序,则稳定插入以保护各构建类型的回放二分查找;这只修复日志顺序,
+///          不表示实时拓扑状态支持迟到事件回滚。
 template <typename LogEntry>
-inline void append_topo_log_entry(QVector<LogEntry>& log, const LogEntry& item,
+inline void record_topo_log_entry(QVector<LogEntry>& log, const LogEntry& item,
                                   qint64& replayed_frame) {
-    Q_ASSERT_X(log.isEmpty() || item.frame_index >= log.constLast().frame_index,
-               "append_topo_log_entry", "topology replay logs must be appended in frame order");
-    log.append(item);
+    if (log.isEmpty() || item.frame_index >= log.constLast().frame_index) {
+        log.append(item);
+    } else {
+        // upper_bound:相同帧号的新条目排在既有条目之后,保持稳定顺序。
+        int lo = 0;
+        int hi = log.size();
+        while (lo < hi) {
+            const int mid = lo + (hi - lo) / 2;
+            if (log[mid].frame_index <= item.frame_index) lo = mid + 1;
+            else hi = mid;
+        }
+        log.insert(lo, item);
+    }
     if (item.frame_index <= replayed_frame)
         replayed_frame = -1;
 }
 
 /// @brief 历史回放:拓扑事件日志 + 信道观测日志 + 逐帧重启采样日志按帧序合并重放到目标帧,生成冻结快照
 /// @details 增量回放:replayed_frame 记录快照已覆盖到的帧;目标帧更大时只应用差量区间,
-///          目标更小时(或水位失效)全量重建。日志由 append_topo_log_entry 按单调帧序维护,同帧
+///          目标更小时(或水位失效)全量重建。日志由 record_topo_log_entry 按单调帧序维护,同帧
 ///          先应用拓扑事件,再信道观测,最后采样重启,与 MainWindow::make_entry 的实时顺序一致,两侧共用同一基线,
 ///          同一次重启只报一次。NID==0 的日志条目不重放。
 /// @param[in] topo_log 拓扑事件日志(帧序)
