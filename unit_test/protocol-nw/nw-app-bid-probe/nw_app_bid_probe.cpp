@@ -5,9 +5,12 @@
 ///   其余"端口+业务标识"组合表9 标"-"=保留 ⇒ 只能显示裸 BID。
 /// 覆盖:nw_2026(SPLC) 与 nw_2021 各跑一遍(两者 parse_app 同构)。
 /// 另断言:业务数据单元**不被拆解** —— 载荷仍只有单个 "APP Data" 节点。
+/// 例外:停上电事件上报(0x13/0x03/0x01)体被解出事件字段 + TopoEvent(见 check_power_event),
+/// APP Data 节点仍保留一个。
 /// 用法:./build/nw_app_bid_probe ; exit 0 = 全部断言通过
 #include "nw_2021_msdu_parser.h"
 #include "nw_2026_msdu_parser.h"
+#include "common/fieldtools.h"
 
 #include <QCoreApplication>
 #include <QString>
@@ -23,7 +26,8 @@ static int g_fail = 0;
 /// @brief 构造单跳帧 MSDU 体(表113):4B 单跳 MAC 头 + APP 载荷(表1 4B + 表2 8B + 数据) + 4B CRC32 占位
 /// @details 走 parse_single_hop 的 msdu_type==1 分支 —— 与真实单跳应用帧同一条路径,
 ///          parse_app 不被旁路,断言才有意义(probe 不校验 CRC,末 4B 填 0)。
-static QByteArray make_body(quint8 port, quint8 packet_type, quint8 bid, bool uplink) {
+static QByteArray make_body(quint8 port, quint8 packet_type, quint8 bid, bool uplink,
+                            const QByteArray& app_data = QByteArray()) {
     QByteArray app;
     app.append(char(port));                              // 表1 报文端口号
     app.append(char(0x01)); app.append(char(0x01));      // 表1 报文标识符 0x0101
@@ -34,7 +38,10 @@ static QByteArray make_body(quint8 port, quint8 packet_type, quint8 bid, bool up
     app.append(char(0x01));                              // 6.3.3 应用版本号(固定 1)
     app.append(char(0x00)); app.append(char(0x00));      // 6.3.4 帧序号
     app.append(char(0x08)); app.append(char(0x00));      // 6.3.5 帧长
-    for (int i = 0; i < 8; ++i) app.append(char(0xA0 + i));  // 业务数据单元内容
+    if (app_data.isEmpty())
+        for (int i = 0; i < 8; ++i) app.append(char(0xA0 + i));  // 业务数据单元内容
+    else
+        app.append(app_data);
 
     QByteArray body;
     body.append(char(0x04));                             // 表113 Version(bits1-2)=2 → 单跳帧
@@ -133,6 +140,184 @@ static void check_gate(const char* tag, quint8 port, quint8 type, quint8 bid,
     }
 }
 
+/// @brief 停上电事件上报体解析:位图/地址两种格式都产 TopoEvent(首节点主事件、其余 extra)
+/// @details 用 make_body 造单跳应用帧(0x13 端口、0x03 主动上报、BID 0x01、上行),
+///          体字节按规约 §9.6.3 表340/341 填;断言 kind/nodes/leaves/extra 与字段树。
+///          单跳帧无源 MAC,sender_mac 留 0(TopoState 回落到事件 nodes 首条)。
+static void append_mac_le(QByteArray& body, quint64 mac) {
+    for (int i = 0; i < 6; ++i)
+        body.append(char((mac >> (8 * i)) & 0xFF));   // get_bits LSB:低字节在前
+}
+
+template <typename Parser>
+static void check_power_event(const char* tag) {
+    std::printf("  [%s] 停上电事件上报解析\n", tag);
+    const quint64 MAC_A = 0xAABBCCDDEEFFULL;
+    const quint64 MAC_B = 0x112233445566ULL;
+    // 位图断电:类型 1,起始 TEI=5,位图 0x06(bit1/2 → TEI 6/7)
+    {
+        QByteArray body;
+        body.append(char(0x01));
+        body.append(char(0x05)); body.append(char(0x00));   // 起始 TEI=5(低字节在前)
+        body.append(char(0x06));                            // 位图:TEI 6/7
+        const MsduInfo out = Parser::parse(make_body(0x13, 0x03, 0x01, true, body));
+        CHECK("  位图断电解析成功", out.present);
+        CHECK("  位图断电主事件 kind=PowerOff", out.topo_event.kind == TopoEventKind::PowerOff);
+        CHECK("  位图断电主事件节点 TEI=6/MAC=0",
+              out.topo_event.nodes.size() == 1 && out.topo_event.nodes[0].tei == 6
+              && out.topo_event.nodes[0].mac == 0);
+        CHECK("  位图断电主事件说明含断电", out.topo_event.desc.contains(QStringLiteral("断电")));
+        CHECK("  位图断电主事件无 leaves", out.topo_event.leaves.isEmpty());
+        CHECK("  位图断电 extra 1 条 TEI=7",
+              out.topo_extra_events.size() == 1
+              && out.topo_extra_events[0].kind == TopoEventKind::PowerOff
+              && out.topo_extra_events[0].nodes.size() == 1
+              && out.topo_extra_events[0].nodes[0].tei == 7);
+        CHECK("  位图断电仍保留单个 APP Data 节点",
+              count_nodes(out.tree, QStringLiteral("APP Data")) == 1);
+        CHECK("  位图断电字段树有 Power On/Off Event 组",
+              find_node(out.tree, QStringLiteral("Power On/Off Event")) != nullptr);
+    }
+    // 地址断电:类型 3,1 只表 MAC_A,带电状态 0
+    {
+        QByteArray body;
+        body.append(char(0x03));
+        body.append(char(0x01)); body.append(char(0x00));   // 电表个数=1
+        append_mac_le(body, MAC_A);
+        body.append(char(0x00));                            // 带电状态 0=停电
+        const MsduInfo out = Parser::parse(make_body(0x13, 0x03, 0x01, true, body));
+        CHECK("  地址断电主事件 kind=PowerOff", out.topo_event.kind == TopoEventKind::PowerOff);
+        CHECK("  地址断电主事件节点 {0,MAC_A}",
+              out.topo_event.nodes.size() == 1 && out.topo_event.nodes[0].tei == 0
+              && out.topo_event.nodes[0].mac == MAC_A);
+        CHECK("  地址断电主事件 leaves 含 MAC_A",
+              out.topo_event.leaves.size() == 1 && out.topo_event.leaves[0] == MAC_A);
+        CHECK("  地址断电无 extra", out.topo_extra_events.isEmpty());
+    }
+    // 地址上电:类型 4,1 只表 MAC_A,带电状态 1
+    {
+        QByteArray body;
+        body.append(char(0x04));
+        body.append(char(0x01)); body.append(char(0x00));
+        append_mac_le(body, MAC_A);
+        body.append(char(0x01));                            // 带电状态 1=未停电
+        const MsduInfo out = Parser::parse(make_body(0x13, 0x03, 0x01, true, body));
+        CHECK("  地址上电主事件 kind=PowerOn", out.topo_event.kind == TopoEventKind::PowerOn);
+        CHECK("  地址上电主事件节点 {0,MAC_A}",
+              out.topo_event.nodes.size() == 1 && out.topo_event.nodes[0].mac == MAC_A);
+        CHECK("  地址上电主事件无 leaves", out.topo_event.leaves.isEmpty());
+        CHECK("  地址上电主事件说明含上电", out.topo_event.desc.contains(QStringLiteral("上电")));
+    }
+    // 地址混合:类型 3,2 只表 MAC_A 停电 + MAC_B 未停电(逐只表状态为准)
+    {
+        QByteArray body;
+        body.append(char(0x03));
+        body.append(char(0x02)); body.append(char(0x00));   // 电表个数=2
+        append_mac_le(body, MAC_A);
+        body.append(char(0x00));
+        append_mac_le(body, MAC_B);
+        body.append(char(0x01));
+        const MsduInfo out = Parser::parse(make_body(0x13, 0x03, 0x01, true, body));
+        CHECK("  地址混合主事件 kind=PowerOff/MAC_A",
+              out.topo_event.kind == TopoEventKind::PowerOff
+              && out.topo_event.nodes.size() == 1
+              && out.topo_event.nodes[0].mac == MAC_A);
+        CHECK("  地址混合 extra 1 条 kind=PowerOn/MAC_B",
+              out.topo_extra_events.size() == 1
+              && out.topo_extra_events[0].kind == TopoEventKind::PowerOn
+              && out.topo_extra_events[0].nodes.size() == 1
+              && out.topo_extra_events[0].nodes[0].mac == MAC_B);
+    }
+    // 未知事件类型 0x02:不产事件
+    {
+        QByteArray body;
+        body.append(char(0x02));
+        body.append(char(0x00)); body.append(char(0x00));
+        body.append(char(0x00));
+        const MsduInfo out = Parser::parse(make_body(0x13, 0x03, 0x01, true, body));
+        CHECK("  未知事件类型不产 TopoEvent", out.topo_event.kind == TopoEventKind::Other
+              && out.topo_extra_events.isEmpty());
+    }
+    // 截断体:位图类型只有 2B(缺起始 TEI 高字节):不产事件
+    {
+        QByteArray body;
+        body.append(char(0x01));
+        body.append(char(0x05));
+        const MsduInfo out = Parser::parse(make_body(0x13, 0x03, 0x01, true, body));
+        CHECK("  截断体不产 TopoEvent", out.topo_event.kind == TopoEventKind::Other
+              && out.topo_extra_events.isEmpty());
+    }
+    // 截断地址:个数 2 但第 2 只表只有 3B:只解第 1 只
+    {
+        QByteArray body;
+        body.append(char(0x03));
+        body.append(char(0x02)); body.append(char(0x00));
+        append_mac_le(body, MAC_A);
+        body.append(char(0x00));
+        body.append(char(0x11)); body.append(char(0x22)); body.append(char(0x33));
+        const MsduInfo out = Parser::parse(make_body(0x13, 0x03, 0x01, true, body));
+        CHECK("  截断地址只解完整表项",
+              out.topo_event.kind == TopoEventKind::PowerOff
+              && out.topo_extra_events.isEmpty());
+    }
+}
+
+/// @brief 构造 MMe 关联请求数据(MMe 头 6B + 体):[0]=版本 1、[1..2]=类型 0x0030(LE)、
+///        [6..11]=STA MAC(低字节在前)、[52]=BootReason(版本信息首字节)。
+/// @details 完整 AssocReq 体固定 74B(mme_body_complete 门);截断体用更短的 mme_len。
+static QByteArray make_assoc_req_mme(quint64 mac, int boot_reason, int mme_len) {
+    QByteArray mme(mme_len, char(0));
+    if (mme_len > 0) mme[0] = char(1);
+    if (mme_len > 1) mme[1] = char(0x30);
+    if (mme_len > 2) mme[2] = char(0x00);
+    for (int i = 0; i < 6 && 6 + i < mme_len; ++i)
+        mme[6 + i] = char((mac >> (8 * i)) & 0xFF);
+    if (mme_len > 52 && boot_reason >= 0)
+        mme[52] = char(boot_reason & 0xFF);
+    return mme;
+}
+
+/// @brief 构造标准帧 MMe 关联请求(32B 长 MAC 头 + 18B MSDU 长头 + MMe 数据 + 4B CRC 占位)。
+/// @details 照 unit_test/ci/nw-mme-test 的 frame() 写法;CRC 只上报 OK/FAIL 不拦截解析,填 0。
+static QByteArray make_assoc_req_frame(const QByteArray& mme_data) {
+    QByteArray payload(18, char(0));
+    payload.replace(0, 6, QByteArray::fromHex("102030405060"));
+    payload.replace(6, 6, QByteArray::fromHex("aabbccddeeff"));
+    set_bits(reinterpret_cast<quint8*>(payload.data()), 12, 0, 32, 0x8100);
+    set_bits(reinterpret_cast<quint8*>(payload.data()), 16, 0, 16, 0x88e1);
+    payload += mme_data;
+    QByteArray header(32, char(0));
+    header[0] = 2; // 标准帧、长 MAC 头
+    set_bits(reinterpret_cast<quint8*>(header.data()), 2, 0, 16, quint64(payload.size()));
+    QByteArray crc(4, char(0));
+    return header + payload + crc;
+}
+
+template <typename Parser>
+static void check_assoc_req_boot_reason(const char* tag) {
+    std::printf("  [%s] 关联请求系统启动原因进事件记录\n", tag);
+    const quint64 MAC_A = 0xAABBCCDDEEFFULL;
+    // 完整帧 + BootReason 0 → desc 含“正常重启”
+    {
+        const MsduInfo out = Parser::parse(make_assoc_req_frame(make_assoc_req_mme(MAC_A, 0, 74)));
+        CHECK("  完整 AssocReq kind=AssocReq", out.topo_event.kind == TopoEventKind::AssocReq);
+        CHECK("  BootReason 0 desc 含正常重启", out.topo_event.desc.contains(QStringLiteral("正常重启")));
+        CHECK("  BootReason 0 desc 带全角括号后缀",
+              out.topo_event.desc.contains(QStringLiteral("（正常重启）")));
+    }
+    // 保留值 1(NW 未定义)→ 无后缀,原 desc 不变
+    {
+        const MsduInfo out = Parser::parse(make_assoc_req_frame(make_assoc_req_mme(MAC_A, 1, 74)));
+        CHECK("  保留值 AssocReq 仍产事件", out.topo_event.kind == TopoEventKind::AssocReq);
+        CHECK("  保留值 desc 无后缀", !out.topo_event.desc.contains(QStringLiteral("（")));
+    }
+    // 截断帧(无版本区,mme 40B)→ 完整性门挡住,不产事件
+    {
+        const MsduInfo out = Parser::parse(make_assoc_req_frame(make_assoc_req_mme(MAC_A, 0, 40)));
+        CHECK("  截断 AssocReq 不产事件", out.topo_event.kind == TopoEventKind::Other);
+    }
+}
+
 template <typename Parser>
 static void run_all(const char* tag) {
     // 表9「数据传输」四个合法组合
@@ -196,6 +381,12 @@ static void run_all(const char* tag) {
     check_gate<Parser>(tag, 0x11, 0x06, 0x00, "数据订阅业务");
     check_gate<Parser>(tag, 0x13, 0x06, 0x00, "");
     check_gate<Parser>(tag, 0x11, 0x06, 0x01, "");
+
+    // 停上电事件上报体解析(位图/地址两种格式)
+    check_power_event<Parser>(tag);
+
+    // 关联请求系统启动原因进事件记录
+    check_assoc_req_boot_reason<Parser>(tag);
 }
 
 int main(int argc, char** argv) {

@@ -30,6 +30,11 @@ void ReaderWorker::abort() {
 
 void ReaderWorker::start_reading(const ReaderConfig& cfg) {
     if (m_running) stop_reading();
+    if (m_file) {
+        m_file->close();
+        delete m_file;
+        m_file = nullptr;
+    }
     m_cfg = cfg;
     m_abort.store(false);
     m_active.store(true);   // 采集/回放开始(串口/文件/裸hex 均计入)
@@ -57,6 +62,8 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
         m_file = new QFile(cfg.file_path, this);
         if (!m_file->open(QIODevice::ReadOnly)) {
             emit error_occurred(trl::L("打开文件失败: %1").arg(m_file->errorString()));
+            delete m_file;
+            m_file = nullptr;
             m_active.store(false);
             return;
         }
@@ -92,6 +99,8 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
             }
         }
         m_file->close();
+        delete m_file;
+        m_file = nullptr;
         QLOG_INFO() << "replay end:" << m_frame_count << "frames, read+split elapsed"
                     << replay_t.elapsed() << "ms";
         emit progress_percent(100);
@@ -103,6 +112,8 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
         m_file = new QFile(cfg.file_path, this);
         if (!m_file->open(QIODevice::ReadOnly | QIODevice::Text)) {
             emit error_occurred(trl::L("打开文件失败: %1").arg(m_file->errorString()));
+            delete m_file;
+            m_file = nullptr;
             m_active.store(false);
             return;
         }
@@ -119,6 +130,8 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
             process_raw_hex_line(line);
         }
         m_file->close();
+        delete m_file;
+        m_file = nullptr;
         emit finished();
         m_active.store(false);
         return;
@@ -137,6 +150,10 @@ void ReaderWorker::stop_reading() {
 }
 
 namespace {
+// 帧体最多 4 KiB:本分支新增的安全上限,防损坏/恶意输入使串口缓冲持续增长。
+// 合规单帧 ≤4 PB×520B ≈ 2.1KB,4KB 不影响合规帧。
+constexpr int kMaxFrameBodyBytes = 4 * 1024;
+
 // 单调高精度时钟(µs):帧起始分节符 0x3C 到达打点
 qint64 steady_us() {
     return qint64(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -169,6 +186,22 @@ bool ReaderWorker::try_consume_bcd_tag() {
     m_last_ntb = 0;
     m_in_buf.remove(0, 8);
     return true;
+}
+
+void ReaderWorker::emit_drop_frame(const QByteArray& wire, const QString& reason,
+                                   qint64 arrival_us, const QByteArray& data) {
+    BplcFrame drop;
+    drop.data = data;
+    drop.raw_wire = wire;
+    drop.meta.frame_time = QDateTime::currentDateTime();
+    drop.meta.epoch_ms = drop.meta.frame_time.toMSecsSinceEpoch();
+    drop.meta.frame_ts_is_ntb = true;
+    drop.meta.local_rx_ms = QDateTime::currentMSecsSinceEpoch();
+    drop.arrival_us = arrival_us;
+    drop.accepted = false;
+    drop.error_reason = reason;
+    ++m_frame_count;
+    emit frame_ready(drop);
 }
 
 void ReaderWorker::try_extract_frame() {
@@ -251,6 +284,30 @@ void ReaderWorker::try_extract_frame() {
         // 次 0x3C 尚无,只能先按真头等)。体为空(两 0x3C 紧贴)时不发空行。
         const int idx3c = m_in_buf.indexOf(char(0x3C));
         const int idx3e = m_in_buf.indexOf(char(0x3E));
+        const bool next_is_start = idx3c >= 0 && (idx3e < 0 || idx3c < idx3e);
+        const int boundary = next_is_start ? idx3c : idx3e;
+        if (boundary < 0) {
+            if (m_in_buf.size() <= kMaxFrameBodyBytes) return;
+            QByteArray drop_wire(1, char(0x3C));
+            drop_wire.append(m_in_buf.left(kMaxFrameBodyBytes));
+            drop_wire.append(char(0x3E));
+            emit_drop_frame(drop_wire, trl::L("DROP:未闭合帧超过最大长度"), m_frame_rx_us);
+            m_in_buf.clear();
+            m_get3c = false;
+            continue;
+        }
+        if (boundary > kMaxFrameBodyBytes) {
+            QByteArray drop_wire(1, char(0x3C));
+            drop_wire.append(m_in_buf.left(kMaxFrameBodyBytes));
+            drop_wire.append(char(0x3E));
+            emit_drop_frame(drop_wire, trl::L("DROP:帧超过最大长度"), m_frame_rx_us);
+            if (next_is_start)
+                m_in_buf.remove(0, idx3c);  // 保留下一个裸 0x3C 作为重同步起点
+            else
+                m_in_buf.remove(0, idx3e + 1);
+            m_get3c = false;
+            continue;
+        }
         if (idx3c >= 0 && (idx3e < 0 || idx3c < idx3e)) {
             if (idx3c > 0) {
                 BplcFrame drop;
@@ -286,15 +343,9 @@ void ReaderWorker::try_extract_frame() {
 
         // 反转义 0x3D
         QByteArray unesc;
-        unesc.reserve(frame.size());
-        for (int i = 0; i < frame.size(); ++i) {
-            quint8 b = static_cast<quint8>(frame[i]);
-            if (b == 0x3D && i + 1 < frame.size()) {
-                ++i;
-                unesc.append(static_cast<char>(0xFF - static_cast<quint8>(frame[i])));
-            } else {
-                unesc.append(static_cast<char>(b));
-            }
+        if (!playback::unescape_frame_data(frame, unesc)) {
+            emit_drop_frame(wire, trl::L("DROP:非法或悬空的 0x3D 转义"), m_frame_rx_us);
+            continue;
         }
 
         // 旧格式兼容:帧体 data 开头带 8B 逐帧 BCD 标签(无 raw_wire 时
@@ -456,16 +507,10 @@ void ReaderWorker::process_raw_hex_line(const QByteArray& line) {
     {
         QByteArray body = raw.mid(1, raw.size() - 2);
         QByteArray data;
-        data.reserve(body.size());
-        for (int i = 0; i < body.size(); ++i) {
-            quint8 b = (quint8)body[i];
-            if (b == 0x3D && i + 1 < body.size()) {
-                ++i;
-                data.append((char)(0xFF - (quint8)body[i]));
-            } else {
-                data.append((char)b);
-            }
-        }
+        if (!playback::unescape_frame_data(body, data)) return;
+        // 与串口/二进制回放一致:采集头 10B + 完整 FCH 至少 16B。
+        // 必须在读取时间戳、更新 RawHex 时间链之前拒绝短帧。
+        if (data.size() < 26) return;
         // 时间:ts 统一 NTB tick(25kHz,40ns)。段首帧用 TIME 头(m_raw_base_ms)
         // 作基准,无 TIME 头则用首帧本地时刻作基准;段内按自段首累计 NTB 差
         // ×40ns 统一换算为 µs(单次除法,避免逐帧 ms 截断累计漂移,µs 级准确);
@@ -595,6 +640,9 @@ struct I18nRegSerialReader {
         trl::register_en("文件回放结束", "File replay ended");
         trl::register_en("DROP:双 0x3C 成帧垃圾", "DROP: framing garbage between two 0x3C");
         trl::register_en("DROP:帧长小于 FCH(16B)", "DROP: frame shorter than FCH (16B)");
+        trl::register_en("DROP:非法或悬空的 0x3D 转义", "DROP: invalid or dangling 0x3D escape");
+        trl::register_en("DROP:未闭合帧超过最大长度", "DROP: unterminated frame exceeds maximum size");
+        trl::register_en("DROP:帧超过最大长度", "DROP: frame exceeds maximum size");
     }
 };
 const I18nRegSerialReader g_i18n_reg_serialreader;

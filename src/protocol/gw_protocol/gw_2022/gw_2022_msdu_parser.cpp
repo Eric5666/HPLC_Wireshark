@@ -1031,6 +1031,20 @@ static void parse_rfdl(MsduInfo& out, const QByteArray& rfdl, int rel_base) {
     }
 }
 
+// 系统启动原因(HDC2.0 表45/表66)后缀:只在版本信息字节实际存在时追加。
+// 0=正常启动 1=断电重启 2=看门狗复位 3=程序指针异常;4 及以上保留,不追加。
+// 版本信息在 MMe 体 b 偏移 42 起,BootReason = b[42]。
+static QString boot_reason_suffix(const QByteArray& b) {
+    if (b.size() <= 42) return QString();
+    switch (static_cast<quint8>(b[42])) {
+    case 0: return trl::L("正常启动");
+    case 1: return trl::L("断电重启");
+    case 2: return trl::L("看门狗复位");
+    case 3: return trl::L("程序指针异常");
+    default: return QString();
+    }
+}
+
 // ================= 主解析 =================
 MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
     MsduInfo out;
@@ -1158,6 +1172,9 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                     out.topo_event.restart_count = (int)out.restart_count;
                 out.topo_event.desc = trl::L("关联请求: STA %1 正在入网")
                     .arg(mac_str(out.sta_mac));
+                if (const QString reason = boot_reason_suffix(b); !reason.isEmpty())
+                    out.topo_event.desc = trl::L("关联请求: STA %1 正在入网（%2）")
+                        .arg(mac_str(out.sta_mac)).arg(reason);
                 MsduFieldNode mn;
                 mn.name  = QStringLiteral("ManufacturerInfo [144b]");
                 mn.value = bytes_hex(b, 24, 18);
@@ -2223,6 +2240,11 @@ struct I18nReg {
         trl::register_en(" (低可信)", " (low confidence)");
         // 拓扑事件变更说明(TOPO 路由变更表 desc)
         trl::register_en("关联请求: STA %1 正在入网", "Assoc request: STA %1 joining");
+        trl::register_en("关联请求: STA %1 正在入网（%2）", "Assoc request: STA %1 joining (%2)");
+        trl::register_en("正常启动", "Normal Boot");
+        trl::register_en("断电重启", "PowerOff Boot");
+        trl::register_en("看门狗复位", "WatchDog Boot");
+        trl::register_en("程序指针异常", "PC exception Boot");
         trl::register_en("关联确认: STA TEI=%1 入网 代理=%2", "Assoc confirm: STA TEI=%1 joined, proxy=%2");
         trl::register_en("关联汇总: %1 个站点入网 代理=%2", "Assoc gather: %1 stations joined, proxy=%2");
         trl::register_en("发现列表: STA TEI=%1 代理=%2", "Discover list: STA TEI=%1 proxy=%2");

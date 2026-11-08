@@ -258,7 +258,10 @@ enum class TopoEventKind {
     SuccessRate,    ///< 成功率上报(STA 与上级的上下行通讯成功率)
     CcoRestart,     ///< CCO 重启(发现列表重启次数变化;仅 TopoState 内部生成,警告记录)
     StaRestart,     ///< STA 重启(关联请求重启次数变化;仅 TopoState 内部生成,警告记录)
-    Other
+    Other,
+    ChannelInfo,    ///< 信道观测(单跳帧信道观测恢复离线节点;仅 TopoState 内部生成,复活记录)
+    PowerOff,       ///< 断电事件(南网停上电事件上报;受影响节点断电离线)
+    PowerOn         ///< 上电事件(南网停上电事件上报;只记录,不改状态、不复活)
 };
 
 /// @brief 通讯成功率信息(成功率上报条目;down/up 为百分比 0-100)

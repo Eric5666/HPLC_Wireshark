@@ -65,19 +65,35 @@ inline QByteArray escape_frame_data(const QByteArray& data) {
     return esc;
 }
 
-/// @brief 0x3D 反转义(与 escape_frame_data 互逆):0x3D xx → 0xFF ^ xx
-inline QByteArray unescape_frame_data(const QByteArray& esc) {
-    QByteArray out;
+/// @brief 严格反转义:0x3D 后只允许 0xC3/0xC2/0xC1,分别还原为 0x3C/0x3D/0x3E。
+/// @return 是否完整且合法;悬空或非法转义时清空输出并返回 false。
+inline bool unescape_frame_data(const QByteArray& esc, QByteArray& out) {
+    out.clear();
     out.reserve(esc.size());
     for (int i = 0; i < esc.size(); ++i) {
         const quint8 b = static_cast<quint8>(esc[i]);
-        if (b == 0x3D && i + 1 < esc.size()) {
-            ++i;
-            out.append(char(0xFF - static_cast<quint8>(esc[i])));
-        } else {
+        if (b != 0x3D) {
             out.append(esc[i]);
+            continue;
         }
+        if (i + 1 >= esc.size()) {
+            out.clear();
+            return false;
+        }
+        const quint8 escaped = static_cast<quint8>(esc[++i]);
+        if (escaped != 0xC3 && escaped != 0xC2 && escaped != 0xC1) {
+            out.clear();
+            return false;
+        }
+        out.append(char(0xFF - escaped));
     }
+    return true;
+}
+
+/// @brief 便捷反转义;非法转义返回空数组(需要区分合法空载荷时用 bool 重载)。
+inline QByteArray unescape_frame_data(const QByteArray& esc) {
+    QByteArray out;
+    if (!unescape_frame_data(esc, out)) out.clear();
     return out;
 }
 

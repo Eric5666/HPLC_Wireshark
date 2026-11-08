@@ -11,6 +11,68 @@
 
 class ReaderWorkerTestAccess {
 public:
+    static QVector<BplcFrame> serial_frames(const QByteArray& input, int* retained = nullptr,
+                                             bool* in_frame = nullptr) {
+        ReaderWorker worker;
+        worker.m_cfg.mode = ReaderMode::SerialPort;
+        QVector<BplcFrame> frames;
+        QObject::connect(&worker, &ReaderWorker::frame_ready,
+                         [&](const BplcFrame& frame) { frames.append(frame); });
+        worker.m_in_buf = input;
+        worker.try_extract_frame();
+        if (retained) *retained = worker.m_in_buf.size();
+        if (in_frame) *in_frame = worker.m_get3c;
+        return frames;
+    }
+
+    static QVector<BplcFrame> raw_hex_line(const QByteArray& line) {
+        ReaderWorker worker;
+        worker.m_cfg.mode = ReaderMode::RawHex;
+        QVector<BplcFrame> frames;
+        QObject::connect(&worker, &ReaderWorker::frame_ready,
+                         [&](const BplcFrame& frame) { frames.append(frame); });
+        worker.process_raw_hex_line(line);
+        return frames;
+    }
+
+    static bool short_hex_preserves_time(const QByteArray& line) {
+        ReaderWorker worker;
+        worker.m_cfg.mode = ReaderMode::RawHex;
+        worker.m_hex_seg_first = false;
+        worker.m_hex_seg_base_ts = 123456;
+        worker.m_hex_seg_base_us = 987654321;
+        int emitted = 0;
+        QObject::connect(&worker, &ReaderWorker::frame_ready, [&](const BplcFrame&) { ++emitted; });
+        worker.process_raw_hex_line(line);
+        return emitted == 0 && !worker.m_hex_seg_first
+            && worker.m_hex_seg_base_ts == 123456 && worker.m_hex_seg_base_us == 987654321;
+    }
+
+    static QVector<BplcFrame> file_frames(const QByteArray& input) {
+        QTemporaryDir dir;
+        QFile file(dir.filePath("file-input"));
+        if (!file.open(QIODevice::WriteOnly) || file.write(input) != input.size()) return {};
+        file.close();
+        ReaderWorker worker;
+        ReaderConfig cfg;
+        cfg.mode = ReaderMode::FilePlayback;
+        cfg.file_path = file.fileName();
+        QVector<BplcFrame> frames;
+        QObject::connect(&worker, &ReaderWorker::frame_ready,
+                         [&](const BplcFrame& frame) { frames.append(frame); });
+        worker.start_reading(cfg);
+        return frames;
+    }
+
+    static bool repeated_file_replay_releases(const QString& path, int runs) {
+        ReaderWorker worker;
+        ReaderConfig cfg;
+        cfg.mode = ReaderMode::FilePlayback;
+        cfg.file_path = path;
+        for (int i = 0; i < runs; ++i) worker.start_reading(cfg);
+        return worker.m_file == nullptr && worker.findChildren<QFile*>().isEmpty();
+    }
+
     static QVector<PacketEntry> serial(const QByteArray& input, quint32 previous_ntb,
                                       qint64 previous_time, qint64 local_gap_ms,
                                       bool first = false) {
@@ -366,6 +428,89 @@ void serial_regressions() {
           "serial start/resume first frame remains a new segment");
 }
 
+void malformed_frame_regressions() {
+    const QByteArray valid = wire(1000);
+    QByteArray invalid_escape = valid;
+    invalid_escape[1] = char(0x3D);  // 0x3D 后接 0x00,不是合法补码
+    const auto invalid = ReaderWorkerTestAccess::serial_frames(invalid_escape);
+    check(invalid.size() == 1 && !invalid[0].accepted
+              && invalid[0].error_reason.contains(QStringLiteral("0x3D")),
+          "serial framing rejects an invalid 0x3D escape");
+
+    QByteArray dangling_escape = valid;
+    dangling_escape[dangling_escape.size() - 2] = char(0x3D);  // 0x3E 前悬空
+    const auto dangling = ReaderWorkerTestAccess::serial_frames(dangling_escape);
+    check(dangling.size() == 1 && !dangling[0].accepted,
+          "serial framing rejects a dangling 0x3D escape");
+    const auto replay_invalid = ReaderWorkerTestAccess::file_frames(invalid_escape);
+    const auto replay_dangling = ReaderWorkerTestAccess::file_frames(dangling_escape);
+    check(replay_invalid.size() == 1 && !replay_invalid[0].accepted
+              && replay_dangling.size() == 1 && !replay_dangling[0].accepted,
+          "file replay rejects invalid and dangling 0x3D escapes");
+
+    const QByteArray short_wire = QByteArray::fromHex("3c3dc33dc33dc33dc33e");
+    check(ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(short_wire)).isEmpty(),
+          "RawHex checks decoded length before reading timestamp bytes");
+    check(ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(invalid_escape)).isEmpty()
+              && ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(dangling_escape)).isEmpty(),
+          "RawHex rejects invalid and dangling 0x3D escapes");
+
+    // 所有短解码长度都在时间链更新前拒绝,不是只保护 [2..5] 的访问。
+    for (int n = 0; n < 26; ++n) {
+        const QByteArray body(n, char(0x3C));  // 同时覆盖转义前长、解码后短的输入
+        const QByteArray encoded = QByteArray(1, char(0x3C))
+            + playback::escape_frame_data(body) + QByteArray(1, char(0x3E));
+        const auto serial = ReaderWorkerTestAccess::serial_frames(encoded);
+        const auto replay = ReaderWorkerTestAccess::file_frames(encoded);
+        const bool serial_rejected = std::none_of(serial.cbegin(), serial.cend(),
+            [](const BplcFrame& f) { return f.accepted; });
+        const bool replay_rejected = std::none_of(replay.cbegin(), replay.cend(),
+            [](const BplcFrame& f) { return f.accepted; });
+        check(serial_rejected && replay_rejected
+                  && ReaderWorkerTestAccess::short_hex_preserves_time(playback::hex_line_of(encoded)),
+              QStringLiteral("decoded length %1 rejected by all readers without changing RawHex time").arg(n));
+    }
+    const QByteArray minimum_body(26, char(0x55));
+    const QByteArray minimum = QByteArray(1, char(0x3C))
+        + playback::escape_frame_data(minimum_body) + QByteArray(1, char(0x3E));
+    const auto min_serial = ReaderWorkerTestAccess::serial_frames(minimum);
+    const auto min_replay = ReaderWorkerTestAccess::file_frames(minimum);
+    const auto min_hex = ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(minimum));
+    check(min_serial.size() == 1 && min_serial[0].accepted
+              && min_replay.size() == 1 && min_replay[0].accepted
+              && min_hex.size() == 1 && min_hex[0].accepted,
+          "26-byte decoded minimum remains accepted by all readers");
+
+    QByteArray at_limit(4 * 1024 + 1, char(0x55));
+    at_limit[0] = char(0x3C);
+    int retained = -1;
+    bool in_frame = false;
+    const auto within_limit = ReaderWorkerTestAccess::serial_frames(at_limit, &retained, &in_frame);
+    check(within_limit.isEmpty() && retained == 4 * 1024 && in_frame,
+          "an incomplete frame body of exactly 4KB remains buffered");
+
+    QByteArray unterminated(4 * 1024 + 2, char(0x55));
+    unterminated[0] = char(0x3C);
+    retained = -1;
+    in_frame = true;
+    const auto oversized = ReaderWorkerTestAccess::serial_frames(unterminated, &retained, &in_frame);
+    check(oversized.size() == 1 && !oversized[0].accepted && retained == 0 && !in_frame,
+          "frame body exceeding 4KB is dropped and input buffering is bounded");
+}
+
+void repeated_file_regression() {
+    QTemporaryDir dir;
+    QFile file(dir.filePath("repeated-input"));
+    const QByteArray input = playback::bcd_time_tag(QDateTime::currentMSecsSinceEpoch()) + wire(1000);
+    if (!file.open(QIODevice::WriteOnly) || file.write(input) != input.size()) {
+        check(false, "create repeated replay input");
+        return;
+    }
+    file.close();
+    check(ReaderWorkerTestAccess::repeated_file_replay_releases(file.fileName(), 20),
+          "repeated file replays release each closed QFile");
+}
+
 void fixtures(const QString& bin_path, const QString& hex_path) {
     QFile bin(bin_path), hex(hex_path);
     if (!bin.open(QIODevice::ReadOnly) || !hex.open(QIODevice::ReadOnly)) {
@@ -387,6 +532,8 @@ int main(int argc, char* argv[]) {
     regressions();
     delta_regressions();
     serial_regressions();
+    malformed_frame_regressions();
+    repeated_file_regression();
     if (argc == 3) fixtures(app.arguments()[1], app.arguments()[2]);
     else if (argc != 1) { qWarning() << "usage: roundtrip [bin txt]"; return 2; }
     qInfo() << "RESULT:" << (failures == 0 ? "PASS" : "FAIL") << "failures:" << failures;

@@ -70,6 +70,8 @@ private slots:
 private:
     friend class ReaderWorkerTestAccess;
     void try_extract_frame();
+    void emit_drop_frame(const QByteArray& wire, const QString& reason,
+                         qint64 arrival_us, const QByteArray& data = QByteArray());
     void process_raw_hex_line(const QByteArray& line);
     /// @brief 解析裸 hex 文本头行时间(TIME: / ISO 文本),失败返回 -1
     qint64 parse_time_header(const QByteArray& line);

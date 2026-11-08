@@ -46,6 +46,9 @@ QString topo_kind_name(TopoEventKind k) {
     case TopoEventKind::SuccessRate:   return QStringLiteral("successRate");
     case TopoEventKind::CcoRestart:    return QStringLiteral("ccoRestart");
     case TopoEventKind::StaRestart:    return QStringLiteral("staRestart");
+    case TopoEventKind::ChannelInfo:   return QStringLiteral("channelInfo");
+    case TopoEventKind::PowerOff:      return QStringLiteral("powerOff");
+    case TopoEventKind::PowerOn:       return QStringLiteral("powerOn");
     default:                          return QStringLiteral("other");
     }
 }
