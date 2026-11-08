@@ -121,8 +121,12 @@ public:
     QHash<quint16, QHash<quint16, int>> neighbor_counts; ///< STA TEI → (邻居 TEI → 发现列表接收数,累计)
     QHash<quint16, QHash<quint16, quint8>> neighbor_rates; ///< 上报方 STA → (邻居 → 接收率%·方向=邻居→上报方,即上行)
     QHash<quint16, QHash<quint16, qint16>> neighbor_snrs;  ///< 上报方 STA → (邻居 → SNR dB)
-    QVector<TopoEvent> events;      ///< 路由变更事件(时间序,供底部表格)
-    QVector<TopoAnomaly> anomalies; ///< 异常/冲突记录(按主体合并;独立页签展示)
+    // These are bounded UI projections, not the authoritative history. The worker
+    // persists every input frame and derived anomaly in SQLite and exposes paged reads.
+    // Checkpoints omit events (which are not replay state); anomaly aggregates remain
+    // because they are also the bounded deduplication state needed for deterministic replay.
+    QVector<TopoEvent> events;      ///< UI 最近 4096 条事件；更早事件需从 SQLite 重建
+    QVector<TopoAnomaly> anomalies; ///< UI 最近 4096 个合并异常主体；更早记录需重建
 
     /// @brief 是否已有可在 TOPO 窗口展示的拓扑/事件内容。
     /// @details RestartCount 基线可先于任何拓扑事件建立；这种仅含采样基线的状态不应

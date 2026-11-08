@@ -19,6 +19,7 @@ class QTabWidget;
 #include "iprotocolparser.h"
 #include "commconfigdialog.h"
 #include "topo_state.h"
+#include "topo_controller.h"
 
 class QComboBox;
 class UpdateMirrorResolver;
@@ -78,7 +79,9 @@ private slots:
     void jump_packet_to_frame(qint64 frame_index); ///< TOPO 双击 → 主帧列表定位到该帧(选中+居中,清过滤)
     void show_plugin_table(const QString& title, const QStringList& columns,
                            const QList<QStringList>& rows); ///< 插件 host.showTable → 弹独立表格窗口
-    void replay_topo_history();        ///< 按 m_topo_hist_frame 重放日志生成冻结快照
+    void replay_topo_history();        ///< 请求拓扑工作线程生成冻结快照
+    void on_topo_history_ready(quint64 request_id, qint64 target_frame, qint64 target_ms,
+                               bool active, const TopoStateMap& states);
     void on_ranges_selected(const QList<QPair<int, int>>& ranges, const QByteArray& copy_bytes);
     void on_flush_buffer();
     void refresh_status_bar();
@@ -107,6 +110,9 @@ private:
     void connect_plugin_feed();     // m_reader frame_ready → 插件引擎(重建 reader 时重连)
     void autotest_shoot_tabs();     // 自动化测试:逐 tab 截图后退出
 
+signals:
+
+private:
     QToolBar*      m_toolbar;
     QToolButton*   m_btn_start;
     QToolButton*   m_btn_stop;
@@ -150,15 +156,11 @@ private:
     QString       m_autotest_shots;               ///< 非空:自动化测试截图目录
     bool          m_autotest_shooting = false;      ///< 截图序列是否已启动(防重入)
     TopoWindow*    m_topo_window = nullptr;       ///< 拓扑独立窗口(懒创建)
-    QHash<quint32, TopoState> m_topo_states;      ///< NID → 拓扑状态(实时累积)
-    QVector<TopoLogItem> m_topo_log;              ///< 拓扑事件日志(帧序;供历史回放)
-    QVector<TopoRestartSample> m_topo_restart_log; ///< 逐帧重启采样日志(帧序;供历史回放)
-    QVector<TopoChannelSample> m_topo_channel_log; ///< 单跳帧信道观测日志(帧序;供历史回放)
-    QHash<quint32, TopoState> m_topo_hist_states; ///< 回放快照:重放到选中帧的拓扑(冻结显示)
+    TopoController* m_topo_controller = nullptr;
+    quint64        m_topo_request_id = 0;
     bool   m_topo_hist_active = false;            ///< TOPO 历史回放(冻结)模式
     qint64 m_topo_hist_frame = 0;                 ///< 回放到的帧序号
     qint64 m_topo_hist_ms = 0;                    ///< 回放帧时刻(epoch ms)
-    qint64 m_topo_hist_replayed = -1;             ///< 回放水位:快照已覆盖到的帧(增量回放用;-1=需全量重建)
 
     QTimer*          m_flush_timer;
     QTimer*          m_status_timer;
