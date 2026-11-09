@@ -1,8 +1,6 @@
 /// @file topo_window.h
 /// @brief 拓扑(Topo)独立窗口:多 NID 下拉切换 + 拓扑图 + 路由变更表 + TEI→MAC 表
-/// @details 与 app/io/ui 解耦,只依赖 topo_state(数据模型) + Qt widgets。
-///          MainWindow 持有 QHash<quint32, TopoState> 并传入本窗口指针引用,
-///          窗口按需读取当前 NID 的状态绘制/列表,不改动状态。
+/// @details 只持有服务端送来的 value snapshots;不访问 MainWindow 或 worker 内部状态。
 #ifndef TOPO_WINDOW_H
 #define TOPO_WINDOW_H
 
@@ -116,8 +114,9 @@ public:
 
     /// @brief 刷新 NID 下拉列表(从当前视图状态表收集:实时或回放)
     void refresh_nids();
-    /// @brief 设置实时状态表引用(不拷贝;由 MainWindow 持有)
-    void set_state_map(const QHash<quint32, TopoState>* map);
+    /// @brief 接收拓扑服务的实时状态快照/增量;窗口仅持有展示副本。
+    void set_live_states(const QHash<quint32, TopoState>& states);
+    void update_live_state(quint32 nid, const TopoState& state);
     /// @brief 切到指定 NID(存在则切换并刷新)
     void set_current_nid(quint32 nid);
     /// @brief 仅强制下拉框显示并更新 m_current_nid(不重建内容;由 refresh_nids 每 200ms 幂等调用)
@@ -131,7 +130,7 @@ public:
     void mark_dirty();
     /// @brief 历史回放:显示重放到 frame_index 的冻结快照;active=false 时回到实时
     /// @param hist 回放状态表(不拷贝不拥有;调用方保证生命周期)
-    void show_history(const QHash<quint32, TopoState>* hist, bool active,
+    void show_history(const QHash<quint32, TopoState>& hist, bool active,
                       qint64 frame_index, qint64 frame_ms);
     /// @brief 回到实时显示
     void show_live();
@@ -160,7 +159,7 @@ private slots:
 private:
     /// @brief 当前视图状态表(历史回放模式用快照,否则用实时表)
     const QHash<quint32, TopoState>* view_states() const {
-        return m_hist_mode ? m_hist_states : m_states;
+        return m_hist_mode ? &m_hist_states : &m_live_states;
     }
     void rebuild_all();
     void rebuild_routes_table();
@@ -205,8 +204,8 @@ private:
     QTableView*         m_anom_table = nullptr;
     QStandardItemModel* m_anom_model = nullptr;
 
-    const QHash<quint32, TopoState>* m_states = nullptr;
-    const QHash<quint32, TopoState>* m_hist_states = nullptr; ///< 回放快照(不拥有)
+    QHash<quint32, TopoState> m_live_states; ///< service snapshot used only by the view
+    QHash<quint32, TopoState> m_hist_states; ///< 当前视图的冻结回放快照
     bool m_hist_mode = false;         ///< 历史回放(冻结)模式
     bool m_pause_live = false;        ///< TEI-MAC 表交互导致的暂停实时刷新(与历史回放共用「回到实时」恢复)
     qint64 m_hist_frame = -1;         ///< 历史回放冻结到的帧序号(路由表高亮用;-1=无)

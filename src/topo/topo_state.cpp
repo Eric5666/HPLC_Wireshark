@@ -6,6 +6,31 @@
 #include "QsLog.h"
 
 namespace {
+constexpr int kMaxRecentEventsPerNetwork = 4096;
+constexpr int kMaxRecentAnomaliesPerNetwork = 4096;
+
+QString anomaly_key(quint32 net_id, const TopoAnomaly& anomaly) {
+    switch (anomaly.kind) {
+        case TopoAnomalyKind::MacMultipleTei:
+            return QStringLiteral("A|%1").arg(anomaly.mac);
+        case TopoAnomalyKind::TeiMultipleMac:
+            return QStringLiteral("B|%1").arg(anomaly.tei);
+        case TopoAnomalyKind::RestartCountOscillation:
+            return QStringLiteral("C|%1|%2").arg(anomaly.tei).arg(anomaly.is_rf ? 1 : 0);
+        case TopoAnomalyKind::LinkCountMismatch:
+            return QStringLiteral("D|%1").arg(anomaly.tei);
+        case TopoAnomalyKind::NidConflict:
+            return QStringLiteral("E|%1").arg(net_id);
+    }
+    return QString();
+}
+
+void append_event(TopoState& state, const TopoEvent& event) {
+    if (state.events.size() == kMaxRecentEventsPerNetwork) state.events.remove(0);
+    state.events.append(event);
+    state.has_event_history = true;
+}
+
 
 /// @brief TopoState 内部生成的事件说明英文注册(与各 parser 的 register_en 解耦,本模块自维护)
 struct I18nRegTopoState { I18nRegTopoState() {
@@ -73,7 +98,7 @@ QString online_evidence_name(TopoEventKind k) {
 ///        只在真正 Offline→Online 跃迁时记一条,已在线帧不重复记;
 ///        kind=证据帧 kind、desc=复活原因、nodes=复活节点,复用 TopoEvent 现有字段,
 ///        不新增字段、不动序列化;回放重走同一路径,记录与实时一致。
-void append_revival_record(QVector<TopoEvent>& events, quint32 nid, TopoEventKind kind,
+void append_revival_record(TopoState& state, quint32 nid, TopoEventKind kind,
                            quint16 tei, quint64 mac, quint64 sender_mac,
                            qint64 epoch_ms, qint64 frame_index) {
     TopoEvent re;
@@ -84,7 +109,7 @@ void append_revival_record(QVector<TopoEvent>& events, quint32 nid, TopoEventKin
     re.epoch_ms = epoch_ms;
     re.frame_index = frame_index;
     re.desc = trl::L("节点恢复在线（%1）").arg(online_evidence_name(kind));
-    events.append(re);
+    append_event(state, re);
 }
 
 /// @brief 事件类型 → 状态更新;未明确表示在线/入网的事件不改状态。
@@ -136,30 +161,22 @@ static void assign_link_type(TopoNode& n, const TopoEvent& e) {
 
 } // namespace
 
+QString topo_anomaly_merge_key(quint32 net_id, const TopoAnomaly& anomaly) {
+    return anomaly_key(net_id, anomaly);
+}
+
 void TopoState::note_anomaly(quint32 net_id, TopoAnomalyKind kind,
                             quint16 tei, quint64 mac, quint64 mac_old,
                             quint16 tei_old, bool is_rf, int from, int to,
                             qint64 epoch_ms, qint64 frame_index) {
-    // 合并键只取"类别 + 主体",不含变化中的两端值:同一主体反复冲突/振荡只占一行,
-    // 由 trips 累加计数,避免一次抓包刷出成百上千行(实测同一 TEI 两介质可交替数十次)。
-    QString key;
-    switch (kind) {
-        case TopoAnomalyKind::MacMultipleTei:
-            key = QStringLiteral("A|%1").arg(mac);
-            break;
-        case TopoAnomalyKind::TeiMultipleMac:
-            key = QStringLiteral("B|%1").arg(tei);
-            break;
-        case TopoAnomalyKind::RestartCountOscillation:
-            key = QStringLiteral("C|%1|%2").arg(tei).arg(is_rf ? 1 : 0);
-            break;
-        case TopoAnomalyKind::LinkCountMismatch:
-            key = QStringLiteral("D|%1").arg(tei);
-            break;
-        case TopoAnomalyKind::NidConflict:
-            key = QStringLiteral("E|%1").arg(net_id);
-            break;
-    }
+    // Merge by category + subject, not changing values. Keep the in-memory projection
+    // bounded; the full input frames are retained in SQLite and can rebuild this view.
+    TopoAnomaly key_fields;
+    key_fields.kind = kind;
+    key_fields.mac = mac;
+    key_fields.tei = tei;
+    key_fields.is_rf = is_rf;
+    const QString key = anomaly_key(net_id, key_fields);
     auto it = m_anom_idx.find(key);
     if (it == m_anom_idx.end()) {
         TopoAnomaly a;
@@ -174,6 +191,12 @@ void TopoState::note_anomaly(quint32 net_id, TopoAnomalyKind kind,
         a.value_to = to;
         a.first_ms = a.last_ms = epoch_ms;
         a.first_frame = a.last_frame = frame_index;
+        if (anomalies.size() >= kMaxRecentAnomaliesPerNetwork) {
+            anomalies.remove(0);
+            m_anom_idx.clear();
+            for (int i = 0; i < anomalies.size(); ++i)
+                m_anom_idx.insert(anomaly_key(net_id, anomalies.at(i)), i);
+        }
         anomalies.append(a);
         m_anom_idx.insert(key, anomalies.size() - 1);
         return;
@@ -218,7 +241,7 @@ void replay_topo_logs(const QVector<TopoLogItem>& topo_log,
                       const QVector<TopoRestartSample>& restart_log,
                       qint64 target_frame, qint64& replayed_frame,
                       QHash<quint32, TopoState>& hist_states) {
-    // 点到更早的帧,或水位失效(初始 -1 / 日志乱序被重置):快照从零重建。
+    // 点到更早的帧,或新增记录覆盖已回放范围使水位失效(初始 -1):快照从零重建。
     // 注意:水位失效时必须清快照,否则从头重放会 double-apply(事件表翻倍)。
     if (replayed_frame < 0 || target_frame < replayed_frame) {
         hist_states.clear();
@@ -557,7 +580,7 @@ bool TopoState::note_restart_change(quint32 net_id, quint64 subject, bool is_cco
                   ? trl::L("警告CCO重启过！重启次数 %1→%2").arg(prev).arg(rc)
                   : trl::L("警告STA重启过！STA %1 重启次数 %2→%3")
                         .arg(topo_mac_str(subject)).arg(prev).arg(rc);
-    events.append(re);
+    append_event(*this, re);
     return true;
 }
 
@@ -586,7 +609,7 @@ bool TopoState::note_restart_origin(quint32 net_id, quint16 src_tei, quint64 src
             nit->status = NodeStatus::Online;
             nit->last_seen_ms = epoch_ms;
             if (revived) {
-                append_revival_record(events, net_id, frame_kind, src_tei, src_mac,
+                append_revival_record(*this, net_id, frame_kind, src_tei, src_mac,
                                       src_mac, epoch_ms, frame_index);
                 if (did_revive) *did_revive = true;
             }
@@ -635,7 +658,7 @@ void TopoState::apply(const TopoEvent& e) {
                 node.parent_tei = new_hop;
                 node.last_seen_ms = e.epoch_ms;
                 if (node.status == NodeStatus::Offline)
-                    append_revival_record(events, e.nid, TopoEventKind::DiscoverList,
+                    append_revival_record(*this, e.nid, TopoEventKind::DiscoverList,
                                           tei, node.mac, e.sender_mac,
                                           e.epoch_ms, e.frame_index);
                 node.status = NodeStatus::Online;
@@ -658,7 +681,7 @@ void TopoState::apply(const TopoEvent& e) {
         cco.mac = e.cco_mac;
         cco.parent_tei = 0;
         if (cco.status == NodeStatus::Offline)
-            append_revival_record(events, e.nid, e.kind, 1, e.cco_mac, e.sender_mac,
+            append_revival_record(*this, e.nid, e.kind, 1, e.cco_mac, e.sender_mac,
                                   e.epoch_ms, e.frame_index);
         cco.status = NodeStatus::Online;
         cco.last_seen_ms = e.epoch_ms;
@@ -700,7 +723,7 @@ void TopoState::apply(const TopoEvent& e) {
         n.mac = p.mac;
         if (has_event_status) {
             if (n.status == NodeStatus::Offline && event_status == NodeStatus::Online)
-                append_revival_record(events, e.nid, e.kind, p.tei, p.mac, e.sender_mac,
+                append_revival_record(*this, e.nid, e.kind, p.tei, p.mac, e.sender_mac,
                                       e.epoch_ms, e.frame_index);
             n.status = event_status;
         }
@@ -767,7 +790,7 @@ void TopoState::apply(const TopoEvent& e) {
         n.parent_tei = r.second;
         if (has_event_status) {
             if (n.status == NodeStatus::Offline && event_status == NodeStatus::Online)
-                append_revival_record(events, e.nid, e.kind, r.first, n.mac, e.sender_mac,
+                append_revival_record(*this, e.nid, e.kind, r.first, n.mac, e.sender_mac,
                                       e.epoch_ms, e.frame_index);
             n.status = event_status;
         }
@@ -819,7 +842,7 @@ void TopoState::apply(const TopoEvent& e) {
             TopoNode& n = nodes[ctei];
             n.tei = ctei;
             if (n.status == NodeStatus::Offline)
-                append_revival_record(events, e.nid, TopoEventKind::ChangeProxyCnf,
+                append_revival_record(*this, e.nid, TopoEventKind::ChangeProxyCnf,
                                       ctei, n.mac, e.sender_mac,
                                       e.epoch_ms, e.frame_index);
             n.status = NodeStatus::Online; // 成功确认中的子 TEI 位图是当前在网证据
@@ -907,13 +930,13 @@ void TopoState::apply(const TopoEvent& e) {
         case TopoEventKind::LeaveInd:
         case TopoEventKind::PowerOff:
         case TopoEventKind::PowerOn:
-            events.append(e);
+            append_event(*this, e);
             break;
         case TopoEventKind::DiscoverList:
             if (up_route_changed) {
                 TopoEvent ev = e;
                 if (!up_route_desc.isEmpty()) ev.desc = up_route_desc;
-                events.append(ev);
+                append_event(*this, ev);
             }
             break;
         default:
@@ -940,7 +963,7 @@ void TopoState::apply_channel_info(quint16 reporter_tei, const TopoEvent& e) {
     reporter.status = NodeStatus::Online;
     reporter.last_seen_ms = e.epoch_ms;
     if (revived)
-        append_revival_record(events, nid, TopoEventKind::ChannelInfo, reporter_tei,
+        append_revival_record(*this, nid, TopoEventKind::ChannelInfo, reporter_tei,
                               reporter_mac ? reporter_mac : e.sender_mac,
                               e.sender_mac, e.epoch_ms, e.frame_index);
     // 站点属性(表217/表126):代理上行/下行接收率、最小接收率、RF 跳数、角色 + parent_tei 校正

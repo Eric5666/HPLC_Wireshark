@@ -16,6 +16,7 @@
 #include "packetentry_serialize.h"
 #include "fieldtools.h"
 #include "topo_window.h"
+#include "topo_input.h"
 #include "plugin_panels.h"
 #include "plugin_manager.h"
 #include "market_dialog.h"
@@ -98,6 +99,9 @@ MainWindow::MainWindow(QWidget* parent)
     qRegisterMetaType<ReaderConfig>("ReaderConfig");
     qRegisterMetaType<ParseFilter>("ParseFilter");
     qRegisterMetaType<PacketEntry>("PacketEntry");
+    qRegisterMetaType<TopoFrameInput>("TopoFrameInput");
+    qRegisterMetaType<TopoState>("TopoState");
+    qRegisterMetaType<TopoStateMap>("TopoStateMap");
 
     build_ui();
     wire_signals();
@@ -105,6 +109,24 @@ MainWindow::MainWindow(QWidget* parent)
     m_reader   = new SerialReader(this);
     m_dispatch = new FrameDispatcher(this);
     m_dispatch->connect_source(m_reader);
+
+    // TopoController owns domain processing, persistence and worker lifecycle.
+    m_topo_controller = new TopoController(this);
+    connect(m_topo_controller, &TopoController::live_state_changed,
+            this, [this](quint32 nid, const TopoState& state) {
+        if (m_topo_window) m_topo_window->update_live_state(nid, state);
+    }, Qt::QueuedConnection);
+    connect(m_topo_controller, &TopoController::live_states_reset,
+            this, [this](const TopoStateMap& states) {
+        if (m_topo_window) m_topo_window->set_live_states(states);
+    }, Qt::QueuedConnection);
+    connect(m_topo_controller, &TopoController::history_ready,
+            this, &MainWindow::on_topo_history_ready, Qt::QueuedConnection);
+    connect(m_topo_controller, &TopoController::worker_error, this, [this](const QString& message) {
+        qWarning().noquote() << message;
+        if (m_status_left) m_status_left->setToolTip(message);
+    }, Qt::QueuedConnection);
+
     connect(m_dispatch, &FrameDispatcher::parsed,
             this,       &MainWindow::on_parsed,
             Qt::QueuedConnection);
@@ -515,12 +537,8 @@ void MainWindow::on_clear() {
     }
     if (m_dispatch) m_dispatch->statistics()->reset();
     // 拓扑状态随报文清空(此前漏清会导致旧拓扑残留);回放日志/快照/回放水位同步清零
-    m_topo_states.clear();
-    m_topo_log.clear();
-    m_topo_restart_log.clear();
-    m_topo_channel_log.clear();
-    m_topo_hist_states.clear();
-    m_topo_hist_replayed = -1;
+    if (m_topo_controller) m_topo_controller->clear();
+    ++m_topo_request_id;
     m_topo_hist_active = false;
     if (m_topo_window) m_topo_window->show_live();
     m_tree_protocol->clear();
@@ -815,6 +833,7 @@ void MainWindow::reset_dispatcher() {
     }
     m_dispatch = new FrameDispatcher(this);   // 按 config.ini 新协议实例化解析器
     m_dispatch->connect_source(m_reader);
+
     connect(m_dispatch, &FrameDispatcher::parsed,
             this,       &MainWindow::on_parsed,
             Qt::QueuedConnection);
@@ -929,155 +948,9 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
     e.msdu_raw_base = r.msdu_raw_base;
     e.raw_bytes = r.payload_for_log;
     e.dissect_fields = r.dissect_fields;  // 插件解析器通用字段树(内置解析恒空)
-    // 拓扑:关键管理消息(关联确认/代理变更/发现列表/离网)喂给拓扑状态;
-    // 同时记入回放日志:事件直接填充在 entry 内(nid/epoch_ms/is_rf),
-    // 供 TOPO 历史回放调试(点击帧 → 按帧序号重放到该帧)。
-    // 多站点合并帧:首事件 + topo_extra_events 逐个应用、逐个记日志;
-    // 首事件沿用原地语义(改写 e.msdu.topo_event,下游插件喂帧/盘块沿用),
-    // 后续事件取拷贝应用,不改写存储的 extras。
-    auto apply_one_topo_event = [&](TopoEvent& te) {
-        te.nid = e.mpdu.net_id;
-        // 网络标识符不完整(NID==0,两规约里 0 均无效)不进拓扑:不建状态、不记日志。
-        if (te.nid == 0) return;
-        te.epoch_ms = e.epoch_ms;
-        // 接入方式判定口径:
-        // - 国网(GW_2022)关联确认/代理变更确认:解析层已从「链路类型」字段判定
-        //   (is_rf + is_rf_known 已填);其余帧保持默认载波(is_rf_known=false)
-        // - 南网(NW_2021/NW_2026):无链路类型字段,统一用物理层介质 meta.is_rf 判定
-        if (te.link_type >= 0) {
-            // 帧内链路类型(表79/表160)优先:0=高速载波链路 1=无线链路
-            te.is_rf = (te.link_type == LinkTypeRf);
-            te.is_rf_known = true;
-        } else if ((e.protocol & 0x7F) == kProtocolNw2021 || (e.protocol & 0x7F) == kProtocolNw2026) {
-            te.is_rf = e.meta.is_rf;
-            te.is_rf_known = true;
-        } else if (!te.is_rf_known) {
-            // 其余(国网解析层未判定的帧):物理媒介兜底;解析层已判定的保持原值
-            te.is_rf = e.meta.is_rf;
-            te.is_rf_known = true;
-        }
-        te.frame_index = e.index;  // 来源帧序号(路由表序号列/双击追溯)
-        // sender_mac 不再此处覆盖:由解析器逐事件填(本站/本段 MSDU 头源);
-        // 帧级源只属于首站/首段,盖到多站/级联后续事件上会串归属,留 0 的
-        // 事件由 TopoState 回落到该事件 nodes 首条。
-        m_topo_states[e.mpdu.net_id].apply(te);
-        m_topo_log.append({e.index, te});
-        // 增量回放依赖日志严格按帧序追加;若乱序到达则重置回放水位,下次回放全量重建
-        if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
-        // 拓扑窗口节流刷新:仅置脏标志,由 TopoWindow 定时器批量刷新(防高频卡顿)
-        // (历史回放模式下 mark_dirty 会被 TopoWindow 忽略,保持冻结)
-        if (m_topo_window)
-            m_topo_window->mark_dirty();
-    };
-    if (e.msdu.topo_event.kind != TopoEventKind::Other)
-        apply_one_topo_event(e.msdu.topo_event);
-    for (const auto& extra : e.msdu.topo_extra_events) {
-        if (extra.kind == TopoEventKind::Other) continue;
-        TopoEvent te = extra;
-        apply_one_topo_event(te);
-    }
-    // RFDL 单跳帧(kind=Other,不走事件门):邻居信道信息(接收率/SNR/RSSI)按发送方 FCH src_tei 键控落地
-    // 信道观测只走信道日志,不进 m_topo_log;回放重调 apply_channel_info 复现 Online 翻转、
-    // last_seen 与邻居数据。解析器不填 topo_event.epoch_ms/frame_index(只在 apply_one_topo_event
-    // 里补),这里沿用同一做法先补帧时刻与帧号,否则实时与回放的 last_seen 都会写 0、复活记录的
-    // 帧号会是 -1(回放双击追溯会错);信道日志里存的 TopoEvent 拷贝也在补填之后,同样带这两个值。
-    if (e.msdu.simple_head && e.msdu.present
-        && (!e.msdu.topo_event.neighbor_rates.isEmpty()
-            || !e.msdu.topo_event.neighbor_snrs.isEmpty()
-            || !e.msdu.topo_event.rssi_entries.isEmpty()
-            || e.msdu.topo_event.proxy_tei != kTeiInvalid)) {
-        auto ts_it = m_topo_states.find(e.mpdu.net_id);
-        if (e.mpdu.net_id != 0 && ts_it != m_topo_states.end()) {
-            e.msdu.topo_event.epoch_ms = e.epoch_ms;
-            e.msdu.topo_event.frame_index = e.index;
-            ts_it.value().apply_channel_info(e.mpdu.src_tei, e.msdu.topo_event);
-            m_topo_channel_log.append({e.index, e.mpdu.net_id, e.mpdu.src_tei,
-                                       e.epoch_ms, e.msdu.topo_event});
-            // 增量回放依赖日志严格按帧序追加;若乱序到达则重置回放水位,下次回放全量重建
-            if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
-            if (m_topo_window) m_topo_window->mark_dirty();
-        }
-    }
-    // TOPO 接入方式盲区修复(方案②,用户拍板):非事件帧也更新 is_rf,
-    // 但仅节点首次出现或 is_rf 未判定时写入(避免高频重写 last_seen 等字段);
-    // 来源:物理媒介(链路类型字段已在事件帧/解析层优先判定)。
-    // is_rf 权威来源 = 帧内链路类型(A+C 批);无链路类型时用首次出现的物理媒介兜底并定住,
-    // 已确定后不再被后续帧覆盖(防双模设备载波+无线并存时拓扑颜色跳变)
-    {
-        bool topo_touched = false;
-        // 普通 MSDU 的 RestartCount 可能早于首个拓扑管理事件到达。
-        // 有效 NID/计数先建立轻量基线状态，避免丢掉后续比较所需的首个样本；
-        // TopoWindow 会隐藏尚无拓扑/事件内容的基线-only 状态。
-        if (e.msdu.present)
-            ensure_restart_sample_state(m_topo_states, e.mpdu.net_id,
-                                        int(e.msdu.restart_count));
-        auto ts_it = m_topo_states.find(e.mpdu.net_id);
-        if (e.mpdu.net_id != 0 && ts_it != m_topo_states.end()) {
-            TopoState& ts = ts_it.value();
-            // FCH TEI 源优先/目的兜底(覆盖无 MSDU 的帧)
-            const quint16 t = e.mpdu.src_tei ? e.mpdu.src_tei : e.mpdu.dst_tei;
-            if (ts.note_frame_medium(t, e.meta.is_rf)) topo_touched = true;
-            // 双模标记:发送方(src_tei)发过 RF 帧即置位(判据取"发过"而非"收发过")
-            if (ts.note_rf_capable(e.mpdu.src_tei, e.meta.is_rf)) topo_touched = true;
-            // 重启次数往返振荡:同一(发送方 TEI, 介质)的 4bit 计数回到出现过旧值即记一条
-            // (实测同一 TEI 载波上 9↔12 交替 ⇒ 双实体共用 TEI 或计数被复位,记异常)
-            if (e.msdu.present
-                && ts.note_restart_count(quint16(e.msdu.msdu_src_tei), e.meta.is_rf,
-                                         int(e.msdu.restart_count), e.epoch_ms, e.index))
-                topo_touched = true;
-            // 重启归属(CCO/STA,方案 B):全帧采样(不再限于发现列表/关联请求),
-            // 基线按 (NID, 主体 MAC) 分键(CCO 归一到 (NID, 已知 cco_mac)) —— CCO 的 TEI 固定为 1
-            // (南网规约/HDC2.0 5.3.3.1),主体判定与变化比较都在 TopoState 内完成;
-            // src_mac==0 时只有判为 CCO 才检测(宁可不报,也不串主体)。
-            // 注:与上面 apply() 事件侧的重启检测共用同一基线,不会重复报(同帧同主体第二次
-            //     比较时基线已相等)。
-            // 逐帧采样记一条轻量日志(只记有效采样;变化与否都记——首帧只建基线,回放时
-            // 缺了它,后一帧的变化就报不出来),供 replay_topo_history() 按帧序重放;
-            // 普通数据帧的重启只走这条日志,不进 m_topo_log(重启事件本身不能进事件日志,
-            // 回放 apply() 会从基线重新推导一次,同一事件记两遍)。NID==0 不记。
-            // 采样 kind 一并记入:回放里离线复活原因须与实时一致(否则管理帧复活会被错记成普通数据帧)。
-            // 例外:无重启计数的帧不进采样日志,但实时 note_restart_origin 仍会复活离线
-            // 节点(复活块在计数检查之前);只给真正复活的帧补记一条采样(rc=0xFF),
-            // 回放重走同一函数复现复活与原因。复活判定只在 note_restart_origin 里一处,
-            // 此处只认它报告的 did_revive,不另写一遍预判;该函数只操作本 NID 的状态,
-            // 同 TEI 在不同 NID 是不同节点,不会跨组复活。一次复活一条,不按帧刷屏。
-            const bool has_valid_rc = int(e.msdu.restart_count) != kRestartCountInvalid;
-            if (e.msdu.present && e.mpdu.net_id != 0 && has_valid_rc) {
-                m_topo_restart_log.append({e.index, e.mpdu.net_id,
-                                           quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
-                                           int(e.msdu.restart_count), e.epoch_ms,
-                                           e.meta.is_rf, true, e.msdu.topo_event.kind});
-                // 增量回放依赖日志严格按帧序追加;若乱序到达则重置回放水位,下次回放全量重建
-                if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
-            }
-            bool did_revive = false;
-            if (e.msdu.present
-                && ts.note_restart_origin(e.mpdu.net_id, quint16(e.msdu.msdu_src_tei),
-                                          e.msdu.msdu_src_mac, int(e.msdu.restart_count),
-                                          e.epoch_ms, e.index, e.meta.is_rf, true,
-                                          e.msdu.topo_event.kind, &did_revive))
-                topo_touched = true;
-            if (did_revive && !has_valid_rc) {
-                m_topo_restart_log.append({e.index, e.mpdu.net_id,
-                                           quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
-                                           kRestartCountInvalid, e.epoch_ms,
-                                           e.meta.is_rf, true, e.msdu.topo_event.kind});
-                if (e.index <= m_topo_hist_replayed) m_topo_hist_replayed = -1;
-            }
-            // 正在入网节点(pending,按 MAC):同样仅未判定时写入
-            if (e.msdu.msdu_src_mac) {
-                auto pit = ts.pending.find(e.msdu.msdu_src_mac);
-                if (pit != ts.pending.end() && !pit.value().is_rf_known) {
-                    pit.value().is_rf = e.meta.is_rf;
-                    pit.value().is_rf_known = true;
-                    topo_touched = true;
-                }
-            }
-        }
-        // 实际发生接入方式写入才刷新拓扑窗口(节流语义与事件帧一致)
-        if (topo_touched && m_topo_window)
-            m_topo_window->mark_dirty();
-    }
+    // Topology input normalization is owned by its module; MainWindow only forwards it.
+    const TopoFrameInput topo_frame = make_topo_frame_input(e);
+    if (topo_frame.net_id != 0 && m_topo_controller) m_topo_controller->submit_frame(topo_frame);
     e.search_text = make_search_text(e);   // 缓存可搜索全文,过滤匹配复用
     // 插件:喂"解析好的帧"(单入口 parse)——帧序号/时间戳/topoEvent 均已就绪,
     // 插件 topo 与原版共享同一份解码数据,不再走独立事件侧信道
@@ -1211,6 +1084,10 @@ void MainWindow::update_topo_history(qint64 frame_index, qint64 frame_ms) {
     m_topo_hist_active = (m_model && frame_index < m_model->total_count());
     if (!m_topo_window || !m_topo_window->isVisible())
         return;  // TOPO 窗口未打开:只记模式,打开时再重放同步
+    if (!m_topo_hist_active) {
+        on_topo_request_live();  // 最新帧直接回实时,不可等待一个会被历史态守卫丢弃的异步快照
+        return;
+    }
     replay_topo_history();
 }
 
@@ -1220,16 +1097,30 @@ void MainWindow::update_topo_history(qint64 frame_index, qint64 frame_ms) {
 ///          只在采样日志里,此前只重放事件日志时会在历史模式里消失;单跳帧的信道观测
 ///          只在信道日志里,此前同样会消失。
 void MainWindow::replay_topo_history() {
-    replay_topo_logs(m_topo_log, m_topo_channel_log, m_topo_restart_log, m_topo_hist_frame,
-                     m_topo_hist_replayed, m_topo_hist_states);
-    m_topo_window->show_history(&m_topo_hist_states, m_topo_hist_active,
-                                m_topo_hist_frame, m_topo_hist_ms);
+    if (!m_topo_window) return;
+    const quint64 request_id = ++m_topo_request_id;
+    if (m_topo_controller) m_topo_controller->request_history(request_id, m_topo_hist_frame, m_topo_hist_ms, m_topo_hist_active);
+}
+
+void MainWindow::on_topo_history_ready(quint64 request_id, qint64 target_frame, qint64 target_ms,
+                                       bool active, const TopoStateMap& states) {
+    if (request_id != m_topo_request_id || !m_topo_window) return;
+    if (target_frame != m_topo_hist_frame || target_ms != m_topo_hist_ms) return;
+    if (!active) {
+        on_topo_request_live();
+        return;
+    }
+    if (!m_topo_hist_active) return;
+    m_topo_window->show_history(states, active, target_frame, target_ms);
 }
 
 void MainWindow::on_topo_request_live() {
+    ++m_topo_request_id;
     m_topo_hist_active = false;
     if (m_topo_window)
         m_topo_window->show_live();
+    if (m_topo_controller)
+        m_topo_controller->request_live_snapshot();
 }
 
 /// @brief TOPO 路由变更表双击某行 → 进入历史追溯并冻结在该行对应的帧
@@ -1371,7 +1262,7 @@ void MainWindow::update_selection_delta() {
 void MainWindow::open_topo_window() {
     if (!m_topo_window) {
         m_topo_window = new TopoWindow(this);
-        m_topo_window->set_state_map(&m_topo_states);
+        if (m_topo_controller) m_topo_controller->request_live_snapshot();
         connect(m_topo_window, &TopoWindow::request_live,
                 this, &MainWindow::on_topo_request_live);
         connect(m_topo_window, &TopoWindow::request_history,

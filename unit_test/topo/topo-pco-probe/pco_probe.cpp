@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
     states.insert(1, st);
 
     TopoWindow win;
-    win.set_state_map(&states);
+    win.set_live_states(states);
     win.refresh_nids();
     win.set_current_nid(1);
 

@@ -850,9 +850,15 @@ TopoWindow::TopoWindow(QWidget* parent) : QWidget(parent) {
     m_refresh_timer->start();
 }
 
-void TopoWindow::set_state_map(const QHash<quint32, TopoState>* map) {
-    m_states = map;
+void TopoWindow::set_live_states(const QHash<quint32, TopoState>& states) {
+    m_live_states = states;
     refresh_nids();
+    mark_dirty();
+}
+
+void TopoWindow::update_live_state(quint32 nid, const TopoState& state) {
+    m_live_states.insert(nid, state);
+    mark_dirty();
 }
 
 // 仅强制「显示 + 更新 m_current_nid」，不重建内容。
@@ -1150,7 +1156,7 @@ void TopoWindow::rebuild_all() {
     update_count_label();
 }
 
-void TopoWindow::show_history(const QHash<quint32, TopoState>* hist, bool active,
+void TopoWindow::show_history(const QHash<quint32, TopoState>& hist, bool active,
                               qint64 frame_index, qint64 frame_ms) {
     m_hist_states = hist;
     m_hist_mode = active;
@@ -1169,7 +1175,7 @@ void TopoWindow::show_history(const QHash<quint32, TopoState>* hist, bool active
 void TopoWindow::show_live() {
     m_hist_mode = false;
     m_pause_live = false;   // 恢复 TEI-MAC 交互暂停
-    m_hist_states = nullptr;
+    m_hist_states.clear();
     m_hist_frame = -1;
     if (m_routes_table && m_routes_table->selectionModel())
         m_routes_table->selectionModel()->clearSelection();
@@ -1527,7 +1533,7 @@ void TopoWindow::rebuild_routes_table() {
 
     // 路由变更表恒读实时表:它是帧记录索引,双击进入历史回放时也不得
     // 截断目标帧之后的行(拓扑图/TEI-MAC 表仍读冻结快照,保持冻结语义)
-    const QHash<quint32, TopoState>* states = m_states;
+    const QHash<quint32, TopoState>* states = &m_live_states;
     const TopoState* st = nullptr;
     if (states) {
         auto it = states->constFind(m_current_nid);
@@ -1589,7 +1595,7 @@ void TopoWindow::rebuild_teimac_table() {
     }
 
     const TopoState* st = nullptr;
-    // 历史回放模式读冻结快照,否则读实时表(此前误读 m_states,回放时表格未冻结)
+    // 历史回放模式读冻结快照,否则读窗口持有的实时展示副本
     if (const auto* states = view_states()) {
         auto it = states->constFind(m_current_nid);
         if (it != states->constEnd()) st = &it.value();

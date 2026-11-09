@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - '3rdparty/sqlite/**'
       - 'unit_test/**'
       - 'tools/**'
       - 'samples/**'
@@ -243,3 +244,55 @@ jobs:
             exit 1
           fi
           "$BIN"
+
+  topology-worker-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Qt 6.11.3
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.3'
+          cache: true
+      - name: Build and run topology worker probe
+        run: |
+          set -e
+          mkdir -p build/topo-worker-probe
+          cd build/topo-worker-probe
+          qmake ../../unit_test/topo/topo-worker-probe/topo_worker_probe.pro CONFIG+=release CONFIG-=debug
+          make -j2
+          ./topo_worker_probe
+
+  topology-worker-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Qt 6.11.3 + MinGW 13.1.0
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.3'
+          arch: 'win64_mingw'
+          tools: 'tools_mingw1310'
+          cache: true
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7'
+      - name: Build and run topology worker probe
+        shell: bash
+        run: |
+          set -e
+          mkdir -p build/topo-worker-probe
+          cd build/topo-worker-probe
+          qmake ../../unit_test/topo/topo-worker-probe/topo_worker_probe.pro CONFIG+=release CONFIG-=debug
+          mingw32-make -j2
+          if [ -x release/topo_worker_probe.exe ]; then
+            ./release/topo_worker_probe.exe
+          elif [ -x topo_worker_probe.exe ]; then
+            ./topo_worker_probe.exe
+          else
+            echo "::error::topo_worker_probe.exe was not produced"
+            find . -maxdepth 3 -type f | head -30
+            exit 1
+          fi

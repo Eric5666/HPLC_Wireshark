@@ -64,6 +64,7 @@ CONFIG(crash_crashpad)|CONFIG(crash_sentry) {
 }
 # QsLog 轻量日志库(3rdparty,文件轮转 + 调试输出)
 include(3rdparty/qslog/QsLog.pri)
+include(3rdparty/sqlite/sqlite.pri)
 include(src/updater/updater.pri)
 include(src/common/common.pri)
 include(src/protocol/protocol.pri)

@@ -72,6 +72,7 @@ struct TopoAnomaly {
     quint64 mac_old = 0;      ///< 冲突中先出现的 MAC(TeiMultipleMac 有意义)
     bool    is_rf = false;    ///< 介质(振荡项有意义;false=载波 true=无线)
     int     trips = 0;        ///< 出现次数(冲突次数 / 往返次数)
+    int     persisted_trips = 0; ///< 当前内存汇总已写入 SQLite 的次数(内部增量游标)
     int     value_from = -1;  ///< 最近一次变化前值(振荡项;冲突项=旧 TEI/旧 MAC 数值无意义)
     int     value_to = -1;    ///< 最近一次变化后值(振荡项)
     qint64  first_ms = 0;     ///< 首次时间(epoch ms)
@@ -79,6 +80,9 @@ struct TopoAnomaly {
     qint64  first_frame = -1; ///< 首次来源帧序号
     qint64  last_frame = -1;  ///< 最近来源帧序号
 };
+
+/// Stable aggregate identity shared by in-memory merging and SQLite persistence.
+QString topo_anomaly_merge_key(quint32 net_id, const TopoAnomaly& anomaly);
 
 /// @brief (NID, MAC) 组合键:网络标识符用完整 quint32(GW HDC1.0 为 24bit,有效 1~16777215;
 ///        GW HDC2.0 为 16bit;南网 SNID 合并后 5bit),MAC 取低 48bit;两者都不截断,
@@ -121,15 +125,20 @@ public:
     QHash<quint16, QHash<quint16, int>> neighbor_counts; ///< STA TEI → (邻居 TEI → 发现列表接收数,累计)
     QHash<quint16, QHash<quint16, quint8>> neighbor_rates; ///< 上报方 STA → (邻居 → 接收率%·方向=邻居→上报方,即上行)
     QHash<quint16, QHash<quint16, qint16>> neighbor_snrs;  ///< 上报方 STA → (邻居 → SNR dB)
-    QVector<TopoEvent> events;      ///< 路由变更事件(时间序,供底部表格)
-    QVector<TopoAnomaly> anomalies; ///< 异常/冲突记录(按主体合并;独立页签展示)
+    // These are bounded UI projections, not the authoritative history. The worker
+    // persists every input frame and derived anomaly in SQLite and exposes paged reads.
+    // Checkpoints omit events (which are not replay state); anomaly aggregates remain
+    // because they are also the bounded deduplication state needed for deterministic replay.
+    QVector<TopoEvent> events;      ///< UI 最近 4096 条事件；更早事件需从 SQLite 重建
+    bool has_event_history = false; ///< 有过事件；检查点省略 events 后仍用于保留 NID
+    QVector<TopoAnomaly> anomalies; ///< UI 最近 4096 个合并异常主体；更早记录需重建
 
     /// @brief 是否已有可在 TOPO 窗口展示的拓扑/事件内容。
     /// @details RestartCount 基线可先于任何拓扑事件建立；这种仅含采样基线的状态不应
     ///          在网络列表中表现为一个空拓扑。重启事件或异常产生后则应正常显示。
     bool has_topology_content() const {
         return first_seen_frame >= 0 || !nodes.isEmpty() || !pending.isEmpty()
-            || !events.isEmpty() || !anomalies.isEmpty();
+            || has_event_history || !events.isEmpty() || !anomalies.isEmpty();
     }
 
     /// @brief 在网节点数汇总(用户 2026-11-06 定稿口径)
@@ -334,10 +343,34 @@ struct TopoChannelSample {
     TopoEvent event;          ///< 已填充 epoch_ms 的完整信道观测事件(回放用)
 };
 
+/// @brief 记录拓扑回放日志,并在改动已回放范围时使水位失效。
+/// @details 正常的 MainWindow::make_entry 路径按递增帧号 O(1) 追加,同帧按调用顺序稳定追加。
+///          若将来有调用路径违反帧序,则稳定插入以保护各构建类型的回放二分查找;这只修复日志顺序,
+///          不表示实时拓扑状态支持迟到事件回滚。
+template <typename LogEntry>
+inline void record_topo_log_entry(QVector<LogEntry>& log, const LogEntry& item,
+                                  qint64& replayed_frame) {
+    if (log.isEmpty() || item.frame_index >= log.constLast().frame_index) {
+        log.append(item);
+    } else {
+        // upper_bound:相同帧号的新条目排在既有条目之后,保持稳定顺序。
+        int lo = 0;
+        int hi = log.size();
+        while (lo < hi) {
+            const int mid = lo + (hi - lo) / 2;
+            if (log[mid].frame_index <= item.frame_index) lo = mid + 1;
+            else hi = mid;
+        }
+        log.insert(lo, item);
+    }
+    if (item.frame_index <= replayed_frame)
+        replayed_frame = -1;
+}
+
 /// @brief 历史回放:拓扑事件日志 + 信道观测日志 + 逐帧重启采样日志按帧序合并重放到目标帧,生成冻结快照
 /// @details 增量回放:replayed_frame 记录快照已覆盖到的帧;目标帧更大时只应用差量区间,
-///          目标更小时(或水位失效)全量重建。三条日志都严格按帧序追加;同帧先应用拓扑
-///          事件,再信道观测,最后采样重启,与 MainWindow::make_entry 的实时顺序一致,两侧共用同一基线,
+///          目标更小时(或水位失效)全量重建。日志由 record_topo_log_entry 按单调帧序维护,同帧
+///          先应用拓扑事件,再信道观测,最后采样重启,与 MainWindow::make_entry 的实时顺序一致,两侧共用同一基线,
 ///          同一次重启只报一次。NID==0 的日志条目不重放。
 /// @param[in] topo_log 拓扑事件日志(帧序)
 /// @param[in] channel_log 单跳帧信道观测日志(帧序)
