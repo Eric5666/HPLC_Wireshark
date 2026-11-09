@@ -1041,8 +1041,7 @@ PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
             // 回放重走同一函数复现复活与原因。复活判定只在 note_restart_origin 里一处,
             // 此处只认它报告的 did_revive,不另写一遍预判;该函数只操作本 NID 的状态,
             // 同 TEI 在不同 NID 是不同节点,不会跨组复活。一次复活一条,不按帧刷屏。
-            const bool has_valid_rc = int(e.msdu.restart_count) >= 0
-                && int(e.msdu.restart_count) != kRestartCountInvalid;
+            const bool has_valid_rc = int(e.msdu.restart_count) != kRestartCountInvalid;
             if (e.msdu.present && e.mpdu.net_id != 0 && has_valid_rc) {
                 m_topo_restart_log.append({e.index, e.mpdu.net_id,
                                            quint16(e.msdu.msdu_src_tei), e.msdu.msdu_src_mac,
