@@ -65,6 +65,7 @@ public slots:
   void setUserAgentString(const QString& agent);
   void setUseCustomInstallProcedures(const bool custom);
   void setMandatoryUpdate(const bool mandatory_update);
+  void setExpectedSha256(const QString& sha256);
 
 private slots:
   void finished();
@@ -80,6 +81,7 @@ private slots:
 
 private:
   qreal round(const qreal& input);
+  bool verifyDownload(QString* error) const;
 
 private:
   QString m_url;
@@ -89,6 +91,8 @@ private:
   Ui::Downloader* m_ui;
   QNetworkReply* m_reply;
   QString m_userAgentString;
+
+  QString m_expectedSha256;  ///< 本地扩展:安装包期望 SHA-256(来自 update.json "sha256")
 
   bool m_useCustomProcedures;
   bool m_mandatoryUpdate;

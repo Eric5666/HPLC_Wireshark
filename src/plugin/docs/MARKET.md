@@ -120,7 +120,9 @@ plugin.json   # manifest, see plugin_api/plugin_manifest.h
 
 ## Install flow
 
-1. Market install: download zip → verify **sha256** against the feed value
+1. Market install: the feed version entry **must** carry `sha256` (64 hex
+   chars); entries without a valid `sha256` are refused before download.
+   Download zip → verify **sha256** against the feed value
    (mismatch = rejected) → unzip to temp dir → validate `plugin.json`
    (manifest + entry file must exist) → check `min_app_version` against the
    running app version → check `platforms` against the running platform
@@ -180,7 +182,8 @@ and need no `abi` field.
 
 ## Verification chain (current)
 
-- sha256 of the downloaded package vs the feed (market installs).
+- sha256 of the downloaded package vs the feed (market installs);
+  a feed entry without `sha256` is not installable.
 - Manifest + entry-file validation for every install.
 - `min_app_version` compatibility check before market installs.
 - `platforms` compatibility check before market installs.
@@ -190,6 +193,26 @@ packages (per the plugin-system interface draft). The feed and the
 transport are not trusted; the local checks above are the trust anchor
 for now. Signature verification is the next step before shipping
 non-test plugins.
+
+## Script sandbox (Lua)
+
+Lua plugins run with a restricted standard library
+(`open_sandboxed_libs` in `host/lua_backend.cpp`, used by both the
+in-process backend and `bplc-plugin-host`):
+
+- available: base, `string`, `table`, `math`, `utf8`, `coroutine`,
+  `package`/`require`, and `os.clock/date/difftime/time`;
+- removed: `io`, `debug`, `os.execute/exit/getenv/remove/rename/tmpname/setlocale`,
+  `package.loadlib`, C module loading (`package.cpath` is empty, C searchers
+  removed) — use `host.getEnv(name)` for environment values;
+- `require`, `dofile` and `loadfile` only load files inside the plugin
+  directory (relative paths are resolved against it);
+- `load`/`loadfile`/`dofile`/`require` and the entry script accept **text
+  chunks only** (precompiled bytecode is rejected).
+
+This is defence in depth, not a security boundary: there is no CPU/memory
+limit, and JS/native plugins are not sandboxed (native plugins are fully
+trusted code).
 
 ## API notes
 

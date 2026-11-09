@@ -15,7 +15,7 @@
 ///   每个已安装插件目录下有 meta.json: { "enabled": bool, "installed_at",
 ///   "source", "updated_at" }。README 优先读插件目录下 README.md,
 ///   其次拉取 feed 的 readme_url。
-///   校验链(当前):feed 提供的 sha256 校验下载包 + 清单合法性 +
+///   校验链(当前):feed 必须提供 sha256(缺失/格式错拒装)并校验下载包 + 清单合法性 +
 ///   min_app_version 兼容性。Ed25519 官方签名为后续步骤,见 docs/MARKET.md。
 #ifndef BPLC_PLUGIN_MARKET_H
 #define BPLC_PLUGIN_MARKET_H
@@ -129,6 +129,8 @@ public:
     /// @return 合法时返回规范化绝对路径;name 不合白名单、不是 base 的一级子目录、
     ///         或已存在目录(含符号链接)解析后落在 base 之外时返回空串
     static QString plugin_dir_path(const QString& base_dir, const QString& name);
+    /// @brief 是否为 64 位十六进制 SHA-256 摘要(市场安装的必要条件)
+    static bool is_sha256_hex(const QString& s);
     static bool verify_sha256(const QString& file_path,
                               const QString& expected_hex);
     /// @brief 解包到 dest_dir:拒绝不安全条目名(见 safe_extract_path),

@@ -4,6 +4,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QPainter>
 
@@ -262,6 +263,162 @@ void push_painter_table(lua_State* L, ScriptPainter* bridge) {
 } // namespace
 } // namespace
 
+namespace {
+// ===== 插件 Lua 沙箱 =====
+// 插件脚本来自市场/离线包,不可信:只开放 base/package/coroutine/table/string/
+// math/utf8 与 os 的只读时间函数;不开放 io/debug、os.execute/exit/remove/rename/
+// getenv/tmpname/setlocale、C 模块加载(package.loadlib/cpath/C searcher);
+// dofile/loadfile 只能读插件目录内的文件;load/loadfile/dofile 只接受文本 chunk
+// (恶意字节码可绕过 Lua VM 校验)。环境变量请用 host.getEnv。
+
+/// 解析插件目录内的脚本路径(相对路径相对插件目录);越界返回空串
+QString sandbox_plugin_path(lua_State* L, const char* fname) {
+    const QString dir = QString::fromUtf8(lua_tostring(L, lua_upvalueindex(1)));
+    const QString root = QFileInfo(dir).canonicalFilePath();
+    const QString path = QDir(dir).absoluteFilePath(QString::fromUtf8(fname));
+    const QString real = QFileInfo(path).canonicalFilePath();
+    if (root.isEmpty() || real.isEmpty() ||
+        !real.startsWith(root + QLatin1Char('/')))
+        return QString();
+    return real;
+}
+
+/// loadfile(filename [, mode [, env]]):仅插件目录内、仅文本 chunk
+int l_sandbox_loadfile(lua_State* L) {
+    const char* fname = luaL_optstring(L, 1, nullptr);
+    const bool has_env = !lua_isnone(L, 3);
+    if (!fname) {
+        luaL_pushfail(L);
+        lua_pushliteral(L, "loadfile: stdin is not available to plugins");
+        return 2;
+    }
+    const QString path = sandbox_plugin_path(L, fname);
+    if (path.isEmpty()) {
+        luaL_pushfail(L);
+        lua_pushfstring(L, "loadfile: '%s' is outside the plugin directory", fname);
+        return 2;
+    }
+    const QByteArray p = path.toUtf8();  // 与入口脚本加载同口径
+    if (luaL_loadfilex(L, p.constData(), "t") != LUA_OK) {
+        luaL_pushfail(L);
+        lua_insert(L, -2);
+        return 2;  // nil, message
+    }
+    if (has_env) {
+        lua_pushvalue(L, 3);
+        if (!lua_setupvalue(L, -2, 1)) lua_pop(L, 1);  // 设为首个 upvalue(_ENV)
+    }
+    return 1;
+}
+
+/// dofile(filename):仅插件目录内、仅文本 chunk
+int l_sandbox_dofile(lua_State* L) {
+    const char* fname = luaL_checkstring(L, 1);
+    const QString path = sandbox_plugin_path(L, fname);
+    if (path.isEmpty())
+        return luaL_error(L, "dofile: '%s' is outside the plugin directory", fname);
+    lua_settop(L, 1);
+    const QByteArray p = path.toUtf8();  // 与入口脚本加载同口径
+    if (luaL_loadfilex(L, p.constData(), "t") != LUA_OK) return lua_error(L);
+    lua_call(L, 0, LUA_MULTRET);
+    return lua_gettop(L) - 1;
+}
+
+/// load(chunk [, chunkname [, mode [, env]]]):转调原 load,mode 强制 "t"
+int l_sandbox_load(lua_State* L) {
+    const bool has_env = lua_gettop(L) >= 4;  // 不传 env 时保持「无 env」语义
+    lua_settop(L, 4);                         // chunk, chunkname, mode, env(缺省补 nil)
+    lua_pushvalue(L, lua_upvalueindex(1));    // 原 load
+    lua_pushvalue(L, 1);
+    lua_pushvalue(L, 2);
+    lua_pushliteral(L, "t");
+    if (has_env) lua_pushvalue(L, 4);
+    lua_call(L, has_env ? 4 : 3, LUA_MULTRET);
+    return lua_gettop(L) - 4;
+}
+
+/// require 的 Lua 文件搜索器:按 package.path 查找,但只加载插件目录内的文本 chunk
+int l_sandbox_lua_searcher(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    lua_settop(L, 1);
+    lua_getglobal(L, LUA_LOADLIBNAME);   // 2
+    lua_getfield(L, 2, "searchpath");    // 3
+    lua_pushstring(L, name);
+    lua_getfield(L, 2, "path");
+    lua_call(L, 2, 2);                   // 3: filename | nil, 4: 未找到说明
+    if (lua_isnil(L, 3)) {
+        lua_pushvalue(L, 4);
+        return 1;
+    }
+    const char* fname = lua_tostring(L, 3);
+    const QString path = sandbox_plugin_path(L, fname);
+    if (path.isEmpty()) {
+        lua_pushfstring(L, "\n\tmodule file '%s' is outside the plugin directory", fname);
+        return 1;
+    }
+    const QByteArray p = path.toUtf8();  // 与入口脚本加载同口径
+    if (luaL_loadfilex(L, p.constData(), "t") != LUA_OK)
+        return luaL_error(L, "error loading module '%s' from file '%s':\n\t%s",
+                          name, fname, lua_tostring(L, -1));
+    lua_pushvalue(L, 3);  // 第二返回值:文件名(传给模块)
+    return 2;
+}
+
+/// 打开受限标准库并装好沙箱(替代 luaL_openlibs)
+void open_sandboxed_libs(lua_State* L, const QString& plugin_dir) {
+    static const luaL_Reg kLibs[] = {
+        {LUA_GNAME, luaopen_base},          {LUA_LOADLIBNAME, luaopen_package},
+        {LUA_COLIBNAME, luaopen_coroutine}, {LUA_TABLIBNAME, luaopen_table},
+        {LUA_STRLIBNAME, luaopen_string},   {LUA_MATHLIBNAME, luaopen_math},
+        {LUA_UTF8LIBNAME, luaopen_utf8},    {LUA_OSLIBNAME, luaopen_os},
+        {nullptr, nullptr}};
+    for (const luaL_Reg* lib = kLibs; lib->func; ++lib) {
+        luaL_requiref(L, lib->name, lib->func, 1);
+        lua_pop(L, 1);
+    }
+    // os:只保留 clock/date/difftime/time
+    lua_getglobal(L, LUA_OSLIBNAME);
+    for (const char* k : {"execute", "exit", "getenv", "remove", "rename",
+                          "setlocale", "tmpname"}) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, k);
+    }
+    lua_pop(L, 1);
+
+    const QByteArray dir = QDir(plugin_dir).absolutePath().toUtf8();
+    // package:require 只搜插件目录内的 Lua 文件;禁止 C 模块
+    lua_getglobal(L, LUA_LOADLIBNAME);
+    lua_pushfstring(L, "%s/?.lua;%s/?/init.lua", dir.constData(), dir.constData());
+    lua_setfield(L, -2, "path");
+    lua_pushliteral(L, "");
+    lua_setfield(L, -2, "cpath");
+    lua_pushnil(L);
+    lua_setfield(L, -2, "loadlib");
+    lua_getfield(L, -1, "searchers");  // {preload, Lua, C, Croot} → preload + 受限 Lua 搜索器
+    if (lua_istable(L, -1)) {
+        for (lua_Integer i = luaL_len(L, -1); i > 2; --i) {
+            lua_pushnil(L);
+            lua_seti(L, -2, i);
+        }
+        lua_pushstring(L, dir.constData());
+        lua_pushcclosure(L, l_sandbox_lua_searcher, 1);
+        lua_seti(L, -2, 2);
+    }
+    lua_pop(L, 2);
+
+    // base:dofile/loadfile 限插件目录;load 只收文本
+    lua_pushstring(L, dir.constData());
+    lua_pushcclosure(L, l_sandbox_loadfile, 1);
+    lua_setglobal(L, "loadfile");
+    lua_pushstring(L, dir.constData());
+    lua_pushcclosure(L, l_sandbox_dofile, 1);
+    lua_setglobal(L, "dofile");
+    lua_getglobal(L, "load");
+    lua_pushcclosure(L, l_sandbox_load, 1);
+    lua_setglobal(L, "load");
+}
+}  // namespace
+
 LuaBackend::LuaBackend() = default;
 
 LuaBackend::~LuaBackend() {
@@ -278,12 +435,12 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
         *err = QStringLiteral("luaL_newstate failed");
         return false;
     }
-    luaL_openlibs(m_lua);
     m_plugin_dir = m.dir_path;
+    open_sandboxed_libs(m_lua, m_plugin_dir);   // 受限标准库(不再 luaL_openlibs)
 
     const QString lua_path = QDir(m.dir_path).filePath(m.entry);
     const QByteArray path_utf8 = lua_path.toUtf8();
-    if (luaL_loadfile(m_lua, path_utf8.constData()) != LUA_OK) {
+    if (luaL_loadfilex(m_lua, path_utf8.constData(), "t") != LUA_OK) {  // 只收文本(拒字节码)
         *err = QStringLiteral("load %1: %2").arg(m.entry, pop_lua_error(m_lua));
         return false;
     }

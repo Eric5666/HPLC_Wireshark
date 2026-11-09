@@ -310,6 +310,16 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
             plugin.name);
         return;
     }
+    // 完整性:市场包必须带 sha256(64 位 hex),缺失/格式错一律拒装,不再静默跳过校验
+    if (!is_sha256_hex(v.sha256)) {
+        emit install_finished(
+            false,
+            QStringLiteral("feed entry for %1 %2 has no valid sha256; "
+                           "refusing to install an unverified package")
+                .arg(plugin.name, v.version),
+            plugin.name);
+        return;
+    }
     m_pending_name = plugin.name;
     m_pending_sha256 = v.sha256;
     m_pending_source =
@@ -378,6 +388,8 @@ void PluginMarket::install_from_file(const QString& zip_path) {
 void PluginMarket::finish_install_from_zip(const QString& zip_path,
                                            const QString& expected_sha256) {
     const QString name = m_pending_name;
+    // 市场安装已在 install_market_plugin 保证 expected_sha256 非空;
+    // 仅离线安装(install_from_file,用户自选本地包)不带 sha256
     if (!expected_sha256.isEmpty() &&
         !verify_sha256(zip_path, expected_sha256)) {
         emit install_finished(false,
@@ -576,6 +588,17 @@ const MarketVersion* PluginMarket::update_for(
         return nullptr;
     }
     return nullptr;
+}
+
+bool PluginMarket::is_sha256_hex(const QString& s) {
+    if (s.size() != 64) return false;
+    for (const QChar c : s) {
+        const bool hex = (c >= QLatin1Char('0') && c <= QLatin1Char('9')) ||
+                         (c >= QLatin1Char('a') && c <= QLatin1Char('f')) ||
+                         (c >= QLatin1Char('A') && c <= QLatin1Char('F'));
+        if (!hex) return false;
+    }
+    return true;
 }
 
 bool PluginMarket::verify_sha256(const QString& file_path,

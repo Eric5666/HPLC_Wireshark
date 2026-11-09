@@ -26,6 +26,7 @@
 
 #include <QApplication>
 #include <QAuthenticator>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -227,6 +228,21 @@ void Downloader::finished()
   QFile::rename(m_downloadDir.filePath(m_fileName + PARTIAL_DOWN),
                 m_downloadDir.filePath(m_fileName));
 
+  // Local extension: verify the package against the manifest's "sha256"
+  // before anything may open it. Missing or mismatching hash => the file is
+  // deleted and the install flow is not started.
+  QString verifyError;
+  if (!verifyDownload(&verifyError)) {
+    QFile::remove(m_downloadDir.filePath(m_fileName));
+    m_reply->deleteLater();
+    m_reply = nullptr;
+    m_ui->stopButton->setText(tr("Close"));
+    m_ui->downloadLabel->setText(tr("Update package rejected"));
+    m_ui->timeLabel->setText(verifyError);
+    QMessageBox::critical(this, tr("Error"), verifyError, QMessageBox::Close);
+    return;
+  }
+
   // Notify application
   emit downloadFinished(m_url, m_downloadDir.filePath(m_fileName));
 
@@ -244,7 +260,10 @@ void Downloader::finished()
  */
 void Downloader::openDownload()
 {
-  if (!m_fileName.isEmpty())
+  QString verifyError;
+  if (!m_fileName.isEmpty() && !verifyDownload(&verifyError))
+    QMessageBox::critical(this, tr("Error"), verifyError, QMessageBox::Close);
+  else if (!m_fileName.isEmpty())
     QDesktopServices::openUrl(QUrl::fromLocalFile(m_downloadDir.filePath(m_fileName)));
   else
     QMessageBox::critical(
@@ -549,3 +568,45 @@ void Downloader::setUseCustomInstallProcedures(const bool custom)
 #if QSU_INCLUDE_MOC
 #  include "moc_Downloader.cpp"
 #endif
+
+/**
+ * @brief Sets the expected SHA-256 (hex) of the package to be downloaded
+ *        (local extension, from the "sha256" key of the update manifest).
+ */
+void Downloader::setExpectedSha256(const QString& sha256)
+{
+  m_expectedSha256 = sha256.trimmed().toLower();
+}
+
+/**
+ * @brief Verifies the downloaded package against the expected SHA-256.
+ *
+ * Local extension: returns @c false (with a user-facing reason) when the
+ * manifest did not provide a well-formed hash, the file cannot be read, or
+ * the digest differs. Unverified packages are never opened.
+ */
+bool Downloader::verifyDownload(QString* error) const
+{
+  static const QRegularExpression hexRe(QStringLiteral("^[0-9a-f]{64}$"));
+  if (!hexRe.match(m_expectedSha256).hasMatch()) {
+    if (error)
+      *error = tr("The update manifest does not provide a valid SHA-256 for this "
+                  "package; refusing to open an unverified installer. Please "
+                  "download the update manually from the official release page.");
+    return false;
+  }
+  QFile file(m_downloadDir.filePath(m_fileName));
+  QCryptographicHash hash(QCryptographicHash::Sha256);
+  if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file)) {
+    if (error)
+      *error = tr("Cannot read the downloaded update package.");
+    return false;
+  }
+  if (QString::fromLatin1(hash.result().toHex()) != m_expectedSha256) {
+    if (error)
+      *error = tr("SHA-256 mismatch: the downloaded update package does not match "
+                  "the update manifest and has been deleted.");
+    return false;
+  }
+  return true;
+}

@@ -410,12 +410,15 @@ Manifest format:
     "windows": {
       "latest-version": "1.3.0",
       "download-url": "https://example.com/BPLC_STA_Monitor_Setup_v1.3.0.exe",
+      "sha256": "<SHA-256 of the installer, 64 lowercase hex chars>",
       "changelog": "Release notes",
       "mandatory-update": false
     }
   }
 }
 ```
+
+`sha256` is the SHA-256 of the installer (`sha256sum <installer>`). The built-in downloader verifies it before opening the package and **refuses (and deletes the download) when `sha256` is missing or does not match**; download the release manually in that case. Older clients ignore the field, so the manifest stays backward compatible.
 
 The changelog string may contain `<br/>`.
 

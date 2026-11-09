@@ -1,9 +1,14 @@
 /// @file market_safety_probe.cpp
-/// @brief 插件市场安全回归探针:插件名/安装目录路径穿越(H2)、zip 解包防护(H3)
+/// @brief 插件市场安全回归探针:插件名/安装目录路径穿越(H2)、zip 解包防护(H3)、
+///        市场安装强制 sha256(H4)
 /// @details 无外部输入:zip 包用 miniz 现场合成,安装目录为
 ///          <探针所在目录>/plugins(PluginMarket::default_install_dir),跑完清理。
 ///          预期输出 `RESULT: ALL PASS (0 failures)`,exit 0。
 #include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QEventLoop>
+#include <QTimer>
+#include <QUrl>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -235,6 +240,57 @@ static void test_zip_limits(const QString& root) {
     }
 }
 
+// ── H4:市场安装必须带 sha256(缺失/格式错/不匹配一律拒装) ──
+static void test_market_sha256(const QString& root) {
+    const QString zip = root + QStringLiteral("/mk.zip");
+    make_zip(zip, {{"plugin.json", manifest_json("mk-plugin")}, {"x.js", "1"}});
+    QFile zf(zip);
+    const bool opened = zf.open(QIODevice::ReadOnly);
+    const QString good_sha =
+        opened ? QString::fromLatin1(QCryptographicHash::hash(zf.readAll(),
+                                                              QCryptographicHash::Sha256).toHex())
+               : QString();
+    zf.close();
+    check("sha256 hex: valid accepted", PluginMarket::is_sha256_hex(good_sha));
+    check("sha256 hex: empty/short/non-hex rejected",
+          !PluginMarket::is_sha256_hex(QString()) &&
+              !PluginMarket::is_sha256_hex(QStringLiteral("abc")) &&
+              !PluginMarket::is_sha256_hex(QString(64, QLatin1Char('g'))));
+
+    auto run = [&](const QString& sha, QString* err_out) {
+        MarketPlugin p;
+        p.name = QStringLiteral("mk-plugin");
+        MarketVersion v;
+        v.version = QStringLiteral("1.0.0");
+        v.url = QUrl::fromLocalFile(zip).toString();   // file://,不走镜像/网络
+        v.sha256 = sha;
+        p.versions.append(v);
+        PluginMarket mk;
+        bool done = false, ok = false;
+        QEventLoop loop;
+        QObject::connect(&mk, &PluginMarket::install_finished,
+                         [&](bool r, const QString& e, const QString&) {
+                             done = true; ok = r; *err_out = e; loop.quit();
+                         });
+        mk.install_market_plugin(p, 0);
+        if (!done) {
+            QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+            loop.exec();
+        }
+        if (ok) mk.uninstall(QStringLiteral("mk-plugin"));
+        return ok;
+    };
+    QString err;
+    check("market: missing sha256 refused",
+          !run(QString(), &err) && err.contains(QStringLiteral("no valid sha256")));
+    check("market: malformed sha256 refused", !run(QStringLiteral("deadbeef"), &err));
+    check("market: wrong sha256 refused",
+          !run(QString(64, QLatin1Char('0')), &err) && err.contains(QStringLiteral("mismatch")));
+    const bool good = run(good_sha, &err);
+    if (!good) std::printf("  err: %s\n", qPrintable(err));
+    check("market: correct sha256 installs", good);
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("BPLC_MarketSafetyProbe"));
@@ -250,6 +306,7 @@ int main(int argc, char** argv) {
     test_install_traversal(tmp.path());
     test_zip_entry_names(tmp.path());
     test_zip_limits(tmp.path());
+    test_market_sha256(tmp.path());
     QDir(PluginMarket::default_install_dir()).removeRecursively();
     std::printf("\nRESULT: %s (%d failures)\n", g_fails ? "FAILURES" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;

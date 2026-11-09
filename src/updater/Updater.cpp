@@ -187,6 +187,17 @@ QString Updater::downloadUrl() const
 }
 
 /**
+ * @brief Returns the SHA-256 (lowercase hex) of the installer package as
+ *        declared by the "sha256" key of the update definitions file
+ *        (local extension). Empty when the manifest does not provide it;
+ *        the built-in downloader then refuses to open the package.
+ */
+QString Updater::downloadSha256() const
+{
+  return m_downloadSha256;
+}
+
+/**
  * @brief Sets a mirror prefix (e.g. "https://ghfast.top/") that
  *        downloadUrl() prepends to GitHub-hosted download URLs.
  *        An empty prefix disables mirroring (default behavior).
@@ -505,6 +516,10 @@ void Updater::onReply(QNetworkReply* reply)
   m_changelog     = platform.value("changelog").toString();
   m_downloadUrl   = platform.value("download-url").toString();
   m_latestVersion = platform.value("latest-version").toString();
+  // Local extension: installer integrity. "sha256" is optional in the
+  // manifest format (older clients ignore it), but the built-in downloader
+  // refuses to open a package whose hash is missing or does not match.
+  m_downloadSha256 = platform.value("sha256").toString().trimmed().toLower();
   if (platform.contains("mandatory-update"))
     m_mandatoryUpdate = platform.value("mandatory-update").toBool();
 
@@ -554,6 +569,7 @@ void Updater::setUpdateAvailable(const bool available)
         m_downloader->setUrlId(url());
         m_downloader->setFileName(downloadUrl().split("/").last());
         m_downloader->setMandatoryUpdate(m_mandatoryUpdate);
+        m_downloader->setExpectedSha256(m_downloadSha256);
         auto download_url = QUrl(downloadUrl());
         download_url.setUserName(m_downloadUserName);
         download_url.setPassword(m_downloadPassword);

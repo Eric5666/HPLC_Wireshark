@@ -387,7 +387,8 @@ dist/BPLC_STA_Monitor_Setup_v1.3.0.exe /S /D=C:\my\dir    # 静默装到指定�
    上传安装包为 release asset
 4. **改 `update.json`**(仓库根,提交推送):
    `latest-version` 抬高新版本号,`download-url` 指向 release asset 地址
-   (形如 `https://github.com/<owner>/<repo>/releases/download/<tag>/<文件名>.exe`)
+   (形如 `https://github.com/<owner>/<repo>/releases/download/<tag>/<文件名>.exe`),
+   `sha256` 填该安装包的 `sha256sum`(必填:内置下载器缺少或不匹配时拒绝打开安装包)
 5. 用户端:程序内 `帮助 → 检查更新` → 发现新版本 → 下载安装包 → 运行
    即覆盖安装(自动关闭旧进程,完成后即可用新版本)
 
@@ -401,6 +402,7 @@ dist/BPLC_STA_Monitor_Setup_v1.3.0.exe /S /D=C:\my\dir    # 静默装到指定�
     "windows": {
       "latest-version": "1.3.0",
       "download-url": "https://example.com/BPLC_STA_Monitor.exe",
+      "sha256": "<安装包 sha256sum,64 位小写 hex>",
       "changelog": "修复 xxx",
       "mandatory-update": false
     }

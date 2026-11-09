@@ -418,12 +418,15 @@ db_path=
     "windows": {
       "latest-version": "1.3.0",
       "download-url": "https://example.com/BPLC_STA_Monitor_Setup_v1.3.0.exe",
+      "sha256": "<安装包的 SHA-256，64 位小写十六进制>",
       "changelog": "Release notes",
       "mandatory-update": false
     }
   }
 }
 ```
+
+`sha256` 为安装包的 SHA-256（`sha256sum <安装包>`）。程序内置下载器下载完成后先比对该值，**缺少 `sha256` 或不一致时拒绝打开安装包并删除下载文件**；此时请到发布页手动下载。旧版本程序会忽略该字段，清单格式向后兼容。
 
 更新说明字符串支持 `<br/>`。
 
