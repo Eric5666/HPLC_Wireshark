@@ -123,6 +123,34 @@ public:
         }
         painter->restore();
     }
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        const QString html = index.data(Qt::DisplayRole).toString();
+        if (!html.contains(QLatin1String("<span"))) {
+            return QStyledItemDelegate::sizeHint(option, index);
+        }
+        // 按内容量宽:格子存的是 HTML,须按渲染后的宽度量,不要用字体度量
+        // 直接量纯文本——富文本文档排版出的宽度比字体度量宽约 9px,
+        // 量短了会在绘制时换行(诊断实测:纯文本字体度量 78,文档理想宽 87.2)。
+        // 绘制时文档宽度 = 文本区宽 - 8(左右各留 4px),文本区又比列宽窄
+        // 一个视图内边距;该内边距随风格而变,用风格自身的子元素矩形量出。
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        QTextDocument doc;
+        doc.setHtml(html);
+        doc.setDefaultFont(opt.font);
+        const int text_w = static_cast<int>(doc.idealWidth()) + 1;
+        int inset = 0;
+        {
+            opt.rect = QRect(0, 0, 1000, qMax(1, option.fontMetrics.height()));
+            const QWidget* w = opt.widget;
+            QStyle* st = w ? w->style() : QApplication::style();
+            const QRect text_rect = st->subElementRect(QStyle::SE_ItemViewItemText, &opt, w);
+            inset = opt.rect.width() - text_rect.width();
+        }
+        const int w = text_w + qMax(inset, 0) + 8;
+        const int h = QStyledItemDelegate::sizeHint(option, index).height();
+        return QSize(w, h);
+    }
 };
 
 /// @brief MAC 48-bit 帧内原始字节序 → "aa:bb:cc:dd:ee:ff"(与 Table View 一致)
@@ -668,7 +696,8 @@ TopoWindow::TopoWindow(QWidget* parent) : QWidget(parent) {
     m_teimac_table->setModel(m_teimac_model);
     m_teimac_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_teimac_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    // 列宽适配:其余列按内容自适应;邻居表列(索引 7)占满剩余宽度,
+    // 列宽适配:其余列按内容自适应;邻居表列(索引 7)平时占满剩余宽度,
+    // 手动适配(适应视图)后改定宽并记住,重建时保持(见 rebuild_teimac_table)。
     // 但不能在这里对第 7 列调 setSectionResizeMode:此时模型还是空的
     // (表头在 rebuild_teimac_table() 里才建),Qt 6.4.2 下对不存在的
     // 列调该接口会段错误(见 unit_test/topo/topo-pco-probe),第 7 列
@@ -983,9 +1012,15 @@ void TopoWindow::fit_tables_once() {
         QHeaderView* hh = view->horizontalHeader();
         const int cols = hh->count();
         if (cols <= 0) continue;
+        // TEI-MAC 表第 7 列(邻居表):平时 Stretch 占满剩余宽度;
+        // 手动适配时改 Interactive 量一次内容宽并记住宽度,
+        // 后续重建保持定宽,下次手动适配再重测(只随手动点击调整一次,
+        // 不跟随刷新自适应;不还原回 Stretch,否则量出的宽度当场作废)。
+        const bool is_teimac_col7 = (view == m_teimac_table && cols > 7);
+        if (is_teimac_col7)
+            hh->setSectionResizeMode(7, QHeaderView::Interactive);
         // 只处理"固定宽度(Interactive)"的列:ResizeToContents 的列本来就随内容自适应,
-        // Stretch 的列随窗口伸缩;对它们强改会打断原策略(实测:先量再还原策略,
-        // 还原时 Qt 会按内容重算,把下限覆盖掉)。邻居表(TEI-MAC)因此整体跳过。
+        // 其余 Stretch 的列随窗口伸缩,不在此处理。
         QVector<int> fixed_cols;
         for (int c = 0; c < cols; ++c)
             if (hh->sectionResizeMode(c) == QHeaderView::Interactive) fixed_cols.append(c);
@@ -996,6 +1031,8 @@ void TopoWindow::fit_tables_once() {
             if (hh->sectionSize(c) < kMinColWidth) hh->resizeSection(c, kMinColWidth);
             else if (hh->sectionSize(c) > kMaxColWidth) hh->resizeSection(c, kMaxColWidth);
         }
+        if (is_teimac_col7)
+            m_teimac_col7_fit_width = hh->sectionSize(7);
     }
 }
 
@@ -1546,8 +1583,16 @@ void TopoWindow::rebuild_teimac_table() {
     // 模型还是空的,此时调 setSectionResizeMode(7, ...) 在 Qt 6.4.2 下
     // 会段错误(见 unit_test/topo/topo-pco-probe);每次重建表头后都
     // 重新设置一次,保证列宽策略始终生效。
-    if (m_teimac_table->horizontalHeader()->count() > 7)
-        m_teimac_table->horizontalHeader()->setSectionResizeMode(7, QHeaderView::Stretch);
+    // 例外:手动适配过(m_teimac_col7_fit_width >= 0)时保持 Interactive
+    // 定宽,不回 Stretch,宽度只随下次手动适配重测。
+    if (m_teimac_table->horizontalHeader()->count() > 7) {
+        if (m_teimac_col7_fit_width >= 0) {
+            m_teimac_table->horizontalHeader()->setSectionResizeMode(7, QHeaderView::Interactive);
+            m_teimac_table->horizontalHeader()->resizeSection(7, m_teimac_col7_fit_width);
+        } else {
+            m_teimac_table->horizontalHeader()->setSectionResizeMode(7, QHeaderView::Stretch);
+        }
+    }
 
     const TopoState* st = nullptr;
     // 历史回放模式读冻结快照,否则读窗口持有的实时展示副本
