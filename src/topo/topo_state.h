@@ -72,6 +72,7 @@ struct TopoAnomaly {
     quint64 mac_old = 0;      ///< 冲突中先出现的 MAC(TeiMultipleMac 有意义)
     bool    is_rf = false;    ///< 介质(振荡项有意义;false=载波 true=无线)
     int     trips = 0;        ///< 出现次数(冲突次数 / 往返次数)
+    int     persisted_trips = 0; ///< 当前内存汇总已写入 SQLite 的次数(内部增量游标)
     int     value_from = -1;  ///< 最近一次变化前值(振荡项;冲突项=旧 TEI/旧 MAC 数值无意义)
     int     value_to = -1;    ///< 最近一次变化后值(振荡项)
     qint64  first_ms = 0;     ///< 首次时间(epoch ms)

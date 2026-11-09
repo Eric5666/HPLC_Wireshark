@@ -255,27 +255,40 @@ void TopoReplayWorker::apply_frame(const TopoFrameInput& f, TopoStateMap& states
     }
     if (touched && changed) changed->insert(f.net_id);
     if (touched && write_anomalies) {
-        const auto state = states.constFind(f.net_id);
-        if (state != states.cend()) persist_anomalies(f.net_id, state.value(), f.frame_index);
+        auto state = states.find(f.net_id);
+        if (state != states.end()) persist_anomalies(f.net_id, state.value(), f.frame_index);
     }
 }
 
-bool TopoReplayWorker::persist_anomalies(quint32 nid, const TopoState& state, qint64 frame_index) {
+bool TopoReplayWorker::persist_anomalies(quint32 nid, TopoState& state, qint64 frame_index) {
     SqliteDb* db = static_cast<SqliteDb*>(m_db);
     if (!db || m_store_failed) return false;
     SqliteStmt* stmt = nullptr;
-    const char* sql = "INSERT OR REPLACE INTO topo_anomalies"
+    // The bounded in-memory projection may evict an aggregate. Persist only the
+    // not-yet-written trip delta and let SQLite merge it into the durable row.
+    // Replacing a row with the projection's local count would lose older history.
+    const char* sql = "INSERT INTO topo_anomalies"
         "(nid,merge_key,kind,tei,tei_old,mac,mac_old,is_rf,trips,value_from,value_to,first_ms,last_ms,first_frame,last_frame)"
-        " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)";
+        " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
+        " ON CONFLICT(nid,merge_key) DO UPDATE SET"
+        " kind=excluded.kind,tei=excluded.tei,tei_old=excluded.tei_old,"
+        " mac=excluded.mac,mac_old=excluded.mac_old,is_rf=excluded.is_rf,"
+        " trips=topo_anomalies.trips+excluded.trips,"
+        " value_from=excluded.value_from,value_to=excluded.value_to,"
+        // First occurrence fields are immutable after insertion. Frame order is
+        // authoritative; timestamps can move backwards when clocks are corrected.
+        " last_ms=excluded.last_ms,last_frame=excluded.last_frame";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         report_sqlite_error(QStringLiteral("prepare anomaly upsert"));
         return false;
     }
     bool ok = true;
-    for (const TopoAnomaly& a : state.anomalies) {
+    for (TopoAnomaly& a : state.anomalies) {
         // Persist only aggregates touched by this input frame. Rewriting the bounded UI
         // projection would both be quadratic and lose older rows after a replay rebuild.
         if (a.last_frame != frame_index) continue;
+        const int trips_delta = a.trips - a.persisted_trips;
+        if (trips_delta <= 0) continue;
         sqlite3_reset(stmt); sqlite3_clear_bindings(stmt);
         const QByteArray merge_key = topo_anomaly_merge_key(nid, a).toUtf8();
         sqlite3_bind_int64(stmt, 1, nid);
@@ -286,7 +299,7 @@ bool TopoReplayWorker::persist_anomalies(quint32 nid, const TopoState& state, qi
         sqlite3_bind_int64(stmt, 6, sqlite3_int64(a.mac));
         sqlite3_bind_int64(stmt, 7, sqlite3_int64(a.mac_old));
         sqlite3_bind_int(stmt, 8, a.is_rf ? 1 : 0);
-        sqlite3_bind_int(stmt, 9, a.trips);
+        sqlite3_bind_int(stmt, 9, trips_delta);
         sqlite3_bind_int(stmt, 10, a.value_from);
         sqlite3_bind_int(stmt, 11, a.value_to);
         sqlite3_bind_int64(stmt, 12, a.first_ms);
@@ -294,6 +307,7 @@ bool TopoReplayWorker::persist_anomalies(quint32 nid, const TopoState& state, qi
         sqlite3_bind_int64(stmt, 14, a.first_frame);
         sqlite3_bind_int64(stmt, 15, a.last_frame);
         if (sqlite3_step(stmt) != SQLITE_DONE) { ok = false; break; }
+        a.persisted_trips = a.trips;
     }
     sqlite3_finalize(stmt);
     if (!ok) report_sqlite_error(QStringLiteral("persist topology anomalies"));
@@ -439,6 +453,7 @@ void TopoReplayWorker::request_anomaly_page(quint64 request_id, quint32 nid, qin
         a.tei = quint16(sqlite3_column_int(stmt, 1)); a.tei_old = quint16(sqlite3_column_int(stmt, 2));
         a.mac = quint64(sqlite3_column_int64(stmt, 3)); a.mac_old = quint64(sqlite3_column_int64(stmt, 4));
         a.is_rf = sqlite3_column_int(stmt, 5) != 0; a.trips = sqlite3_column_int(stmt, 6);
+        a.persisted_trips = a.trips;
         a.value_from = sqlite3_column_int(stmt, 7); a.value_to = sqlite3_column_int(stmt, 8);
         a.first_ms = sqlite3_column_int64(stmt, 9); a.last_ms = sqlite3_column_int64(stmt, 10);
         a.first_frame = sqlite3_column_int64(stmt, 11); a.last_frame = sqlite3_column_int64(stmt, 12);

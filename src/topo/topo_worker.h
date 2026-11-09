@@ -87,7 +87,7 @@ private:
     bool clear_store();
     void apply_frame(const TopoFrameInput& frame, TopoStateMap& states,
                      QSet<quint32>* changed_nids = nullptr, bool persist_anomalies = false);
-    bool persist_anomalies(quint32 nid, const TopoState& state, qint64 frame_index);
+    bool persist_anomalies(quint32 nid, TopoState& state, qint64 frame_index);
     void maybe_checkpoint(qint64 frame_index);
     void rebuild_live_from(qint64 frame_index);
     bool state_at(qint64 target_frame, TopoStateMap& states);

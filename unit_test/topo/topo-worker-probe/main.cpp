@@ -61,6 +61,27 @@ TopoFrameInput association_frame(qint64 frame, quint64 mac) {
     return f;
 }
 
+TopoFrameInput association_frame_for(qint64 frame, quint16 tei, quint64 mac) {
+    TopoFrameInput f = association_frame(frame, mac);
+    f.events[0].nodes[0].tei = tei;
+    f.msdu_src_tei = tei;
+    return f;
+}
+
+TopoFrameInput restart_frame_for(qint64 frame, quint32 nid, quint16 tei,
+                                 quint64 mac, int restart_count) {
+    TopoFrameInput f;
+    f.frame_index = frame;
+    f.epoch_ms = 1000 + frame;
+    f.net_id = nid;
+    f.msdu_present = true;
+    f.msdu_src_tei = tei;
+    f.msdu_src_mac = mac;
+    f.restart_count = restart_count;
+    f.frame_kind = TopoEventKind::Other;
+    return f;
+}
+
 TopoFrameInput ordinary_frame(qint64 frame) {
     TopoFrameInput f;
     f.frame_index = frame;
@@ -274,6 +295,135 @@ int main(int argc, char** argv) {
     }
     CHECK("SQLite keeps one up-to-date aggregate when anomaly MAC fields change and after replay",
           anomaly_history_survives_replay);
+
+    bool target_anomaly_evicted_from_projection = false;
+    bool evicted_anomaly_aggregate_preserved_before_replay = false;
+    bool evicted_anomaly_aggregate_values_latest_before_replay = false;
+    bool evicted_anomaly_aggregate_preserved_after_replay = false;
+    bool evicted_anomaly_aggregate_values_latest_after_replay = false;
+    int eviction_snapshot_count = -1;
+    bool eviction_setup_started = false;
+    {
+        TopoController controller;
+        QEventLoop eviction_loop;
+        QTimer eviction_timeout;
+        eviction_timeout.setSingleShot(true);
+        QObject::connect(&eviction_timeout, &QTimer::timeout, &eviction_loop, &QEventLoop::quit);
+        QObject::connect(&controller, &TopoController::live_states_reset, &app,
+            [&](const TopoStateMap& states) {
+                if (eviction_setup_started) return;
+                const auto state = states.constFind(kNid);
+                if (state == states.cend()) return;
+                eviction_setup_started = true;
+                eviction_snapshot_count = state->anomalies.size();
+                const auto target = std::find_if(state->anomalies.cbegin(), state->anomalies.cend(),
+                    [](const TopoAnomaly& a) {
+                        return a.kind == TopoAnomalyKind::TeiMultipleMac && a.tei == 100;
+                    });
+                target_anomaly_evicted_from_projection = target == state->anomalies.cend();
+
+                // Reintroduce the evicted TEI-keyed aggregate with a new MAC and a
+                // changed restart-count transition, then query before/after replay.
+                TopoFrameInput recurrence = association_frame_for(20466, 100, 0x1000000000002ULL);
+                recurrence.epoch_ms = 900; // clock correction must not rewrite first_ms
+                recurrence.events[0].epoch_ms = recurrence.epoch_ms;
+                recurrence.restart_count = 3;
+                controller.submit_frame(recurrence);
+                controller.request_anomaly_page(8002, kNid, 0, 5000);
+            });
+        QObject::connect(&controller, &TopoController::anomaly_page_ready, &app,
+            [&](const TopoAnomalyPage& page) {
+                if (page.request_id == 8002) {
+                    const auto it = std::find_if(page.items.cbegin(), page.items.cend(), [](const TopoAnomaly& a) {
+                        return a.kind == TopoAnomalyKind::TeiMultipleMac && a.tei == 100;
+                    });
+                    evicted_anomaly_aggregate_preserved_before_replay = it != page.items.cend()
+                        && it->trips == 2 && it->first_frame == 2 && it->first_ms == 1002
+                        && it->last_frame == 20466 && it->last_ms == 900
+                        && it->mac == 0x1000000000002ULL && it->mac_old == 0x1000000000001ULL;
+                    const auto restart = std::find_if(page.items.cbegin(), page.items.cend(), [](const TopoAnomaly& a) {
+                        return a.kind == TopoAnomalyKind::RestartCountOscillation && a.tei == 100;
+                    });
+                    evicted_anomaly_aggregate_values_latest_before_replay = restart != page.items.cend()
+                        && restart->trips == 3 && restart->first_frame == 5 && restart->first_ms == 1005
+                        && restart->last_frame == 20466 && restart->last_ms == 900
+                        && restart->value_from == 2 && restart->value_to == 3;
+
+                    TopoFrameInput late;
+                    late.frame_index = 8195;
+                    late.epoch_ms = 9195;
+                    late.net_id = kNid;
+                    controller.submit_frame(late);
+                    controller.request_anomaly_page(8003, kNid, 0, 5000);
+                    return;
+                }
+                if (page.request_id != 8003) return;
+                const auto it = std::find_if(page.items.cbegin(), page.items.cend(), [](const TopoAnomaly& a) {
+                    return a.kind == TopoAnomalyKind::TeiMultipleMac && a.tei == 100;
+                });
+                evicted_anomaly_aggregate_preserved_after_replay = it != page.items.cend()
+                    && it->trips == 2 && it->first_frame == 2 && it->first_ms == 1002
+                    && it->last_frame == 20466 && it->last_ms == 900
+                    && it->mac == 0x1000000000002ULL && it->mac_old == 0x1000000000001ULL;
+                const auto restart = std::find_if(page.items.cbegin(), page.items.cend(), [](const TopoAnomaly& a) {
+                    return a.kind == TopoAnomalyKind::RestartCountOscillation && a.tei == 100;
+                });
+                evicted_anomaly_aggregate_values_latest_after_replay = restart != page.items.cend()
+                    && restart->trips == 3 && restart->first_frame == 5 && restart->first_ms == 1005
+                    && restart->last_frame == 20466 && restart->last_ms == 900
+                    && restart->value_from == 2 && restart->value_to == 3;
+                eviction_loop.quit();
+            });
+
+        // Frame 1 establishes TEI 100 / MAC A; frame 2 changes it to MAC B and
+        // creates the target anomaly with trips=1 and first_frame=2. Then 4096
+        // distinct TEI subjects each change MAC once, producing one TeiMultipleMac
+        // key; each then has a restart-count oscillation, producing a second distinct
+        // key. Together these 4096 newer subjects truly evict TEI 100.
+        controller.submit_frame(association_frame_for(1, 100, 0x1000000000000ULL));
+        controller.submit_frame(association_frame_for(2, 100, 0x1000000000001ULL));
+        // Keep a second aggregate with meaningful value_from/value_to fields. Its
+        // last pre-eviction transition is 3->2; recurrence must replace that with 2->3.
+        controller.submit_frame(restart_frame_for(3, kNid, 100, 0x1000000000001ULL, 3));
+        controller.submit_frame(restart_frame_for(4, kNid, 100, 0x1000000000001ULL, 2));
+        controller.submit_frame(restart_frame_for(5, kNid, 100, 0x1000000000001ULL, 3));
+        controller.submit_frame(restart_frame_for(6, kNid, 100, 0x1000000000001ULL, 2));
+        qint64 frame = 7;
+        for (int i = 0; i < 2048; ++i) {
+            const quint16 tei = quint16(200 + i);
+            controller.submit_frame(association_frame_for(frame++, tei, 0x300000000000ULL + quint64(i) * 2));
+            controller.submit_frame(association_frame_for(frame++, tei, 0x300000000001ULL + quint64(i) * 2));
+            for (int restart_count : {3, 2, 3}) {
+                TopoFrameInput sample;
+                sample.frame_index = frame++;
+                sample.epoch_ms = 1000 + sample.frame_index;
+                sample.net_id = kNid;
+                sample.msdu_present = true;
+                sample.msdu_src_tei = tei;
+                sample.msdu_src_mac = 0x300000000001ULL + quint64(i) * 2;
+                sample.restart_count = restart_count;
+                controller.submit_frame(sample);
+            }
+        }
+        controller.request_live_snapshot();
+        eviction_timeout.start(60000);
+        eviction_loop.exec();
+    }
+    std::printf("DIAG eviction_snapshot_count=%d evicted=%d before_replay=%d latest_values_before=%d after_replay=%d latest_values_after=%d\n",
+                eviction_snapshot_count, target_anomaly_evicted_from_projection,
+                evicted_anomaly_aggregate_preserved_before_replay,
+                evicted_anomaly_aggregate_values_latest_before_replay,
+                evicted_anomaly_aggregate_preserved_after_replay,
+                evicted_anomaly_aggregate_values_latest_after_replay);
+    CHECK("old anomaly is truly evicted from the 4096-entry in-memory projection",
+          eviction_snapshot_count == 4096 && target_anomaly_evicted_from_projection);
+    CHECK("SQLite retains trips, original first fields, and latest fields after eviction",
+          evicted_anomaly_aggregate_preserved_before_replay);
+    CHECK("SQLite replaces latest value fields after an evicted aggregate recurs",
+          evicted_anomaly_aggregate_values_latest_before_replay);
+    CHECK("late-frame replay rebuild preserves the same anomaly aggregate",
+          evicted_anomaly_aggregate_preserved_after_replay
+          && evicted_anomaly_aggregate_values_latest_after_replay);
 
     TopoState bounded_history;
     for (int i = 1; i <= 5000; ++i) {
