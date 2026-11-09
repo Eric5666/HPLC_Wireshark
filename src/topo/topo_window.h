@@ -173,8 +173,13 @@ private:
     /// @brief 重建「异常/冲突」表(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)
     void rebuild_anomaly_table();
     /// @brief 一次性把本窗口各表(邻居/TEI-MAC、路由变更、异常/冲突)列宽按内容重排
-    /// @details 表头策略为 ResizeToContents/Stretch 时 resizeColumnsToContents 无效,
-    ///          故临时切 Interactive 量一次再还原原策略;过窄列给最小宽度下限。
+    /// @details 只随手动点击(适应视图)调整一次,不跟随刷新自适应:
+    ///          固定宽度(Interactive)列直接量内容宽并钳到上下限;
+    ///          TEI-MAC 表第 7 列(邻居表)平时 Stretch 占满剩余宽度,
+    ///          手动适配时改 Interactive 量一次内容宽并记住宽度,
+    ///          后续重建保持定宽,下次手动适配再重测。
+    ///          其余按内容自适应(ResizeToContents)的列本来就随内容变,
+    ///          不在此处理。
     void fit_tables_once();
     /// @brief 历史回放模式下高亮冻结帧对应的路由表行(不滚动,不移除其他行)
     void highlight_history_row();
@@ -195,6 +200,7 @@ private:
     QTableView*         m_teimac_table;
     QStandardItemModel* m_teimac_model;
     QLineEdit*          m_teimac_search;
+    int m_teimac_col7_fit_width = -1; ///< TEI-MAC 表第 7 列手动适配宽度(>=0 时重建保持 Interactive 定宽;-1=未适配过,保持 Stretch)
     // 异常/冲突表(独立页签;与路由变更事件表分离)
     QTableView*         m_anom_table = nullptr;
     QStandardItemModel* m_anom_model = nullptr;
