@@ -135,8 +135,12 @@ On Linux, if the dir is not writable, installation requests elevation via
 pkexec(1).
 Each installed plugin gets `meta.json`: `{ "enabled": bool, "installed_at" }`.
 Re-installing the same name replaces it (= update). `uninstall(name)`
-deletes the dir; name is restricted to a single path segment
-(`..`, `/`, `\` rejected).
+deletes the dir. The plugin `name` (manifest and feed) must match
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (`plugin_name_is_safe`, enforced by
+`read_plugin_manifest`); install / uninstall / enable all resolve the
+directory through `PluginMarket::plugin_dir_path()`, which also requires a
+direct child of the install root and refuses entries (incl. symlinks)
+whose real path leaves it.
 
 ## Enable / disable
 

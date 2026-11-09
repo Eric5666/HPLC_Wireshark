@@ -416,12 +416,35 @@ void PluginMarket::finish_install_from_zip(const QString& zip_path,
     }
 }
 
+QString PluginMarket::plugin_dir_path(const QString& base_dir,
+                                      const QString& name) {
+    // 白名单:单级目录名,不含分隔符/盘符,不是 "." / ".."
+    if (!plugin_name_is_safe(name)) return QString();
+    // QDir::absoluteFilePath 不规范化 "..",必须 cleanPath 后再比较
+    const QString base = QDir::cleanPath(QDir(base_dir).absolutePath());
+    const QString dest = QDir::cleanPath(base + QLatin1Char('/') + name);
+    if (!dest.startsWith(base + QLatin1Char('/')) ||
+        QFileInfo(dest).absolutePath() != base)
+        return QString();  // 只能是 base 的一级子目录
+    // 已存在(含符号链接):真实路径也必须是安装根的一级子目录,
+    // 防止覆盖安装/卸载时 removeRecursively 跟随链接删到目录外
+    const QFileInfo fi(dest);
+    if (fi.exists() || fi.isSymLink()) {
+        const QString cbase = QFileInfo(base).canonicalFilePath();
+        const QString cdest = fi.canonicalFilePath();
+        if (cbase.isEmpty() || cdest.isEmpty() ||
+            QFileInfo(cdest).absolutePath() != cbase)
+            return QString();
+    }
+    return dest;
+}
+
 bool PluginMarket::deploy_staged(const QString& staged_dir,
                                  const QString& plugin_name, QString* err) {
-    const QString base = QDir(default_install_dir()).absolutePath();
-    const QString dest = QDir(base).absoluteFilePath(plugin_name);
-    // 路径穿越防护:目标必须在安装目录下
-    if (!dest.startsWith(base + QLatin1Char('/'))) {
+    const QString base = QDir::cleanPath(QDir(default_install_dir()).absolutePath());
+    // 路径穿越防护:目标必须是安装目录下的一级子目录
+    const QString dest = plugin_dir_path(base, plugin_name);
+    if (dest.isEmpty()) {
         if (err) *err = QStringLiteral("unsafe plugin name: ") + plugin_name;
         return false;
     }
@@ -502,13 +525,9 @@ QList<InstalledPlugin> PluginMarket::installed_plugins() const {
 }
 
 bool PluginMarket::set_enabled(const QString& name, bool enabled) {
-    if (name.isEmpty() || name == QStringLiteral(".") ||
-        name == QStringLiteral("..") || name.contains(QLatin1Char('/')) ||
-        name.contains(QLatin1Char('\\')))
-        return false;
-    const QString base = QDir(default_install_dir()).absolutePath();
-    const QString pdir = QDir(base).absoluteFilePath(name);
-    if (!pdir.startsWith(base + QLatin1Char('/'))) return false;
+    // 路径穿越防护:与 deploy_staged/uninstall 共用 plugin_dir_path
+    const QString pdir = plugin_dir_path(default_install_dir(), name);
+    if (pdir.isEmpty()) return false;
     if (!QDir(pdir).exists()) return false;
     QFile mf(meta_path(pdir));
     QJsonObject o;
@@ -531,14 +550,9 @@ bool PluginMarket::set_enabled(const QString& name, bool enabled) {
 }
 
 bool PluginMarket::uninstall(const QString& name) {
-    // 路径穿越防护:name 必须是单级目录名
-    if (name.isEmpty() || name == QStringLiteral(".") ||
-        name == QStringLiteral("..") || name.contains(QLatin1Char('/')) ||
-        name.contains(QLatin1Char('\\')))
-        return false;
-    const QString base = QDir(default_install_dir()).absolutePath();
-    const QString pdir = QDir(base).absoluteFilePath(name);
-    if (!pdir.startsWith(base + QLatin1Char('/'))) return false;
+    // 路径穿越防护:name 必须是单级目录名(与 deploy_staged/set_enabled 共用)
+    const QString pdir = plugin_dir_path(default_install_dir(), name);
+    if (pdir.isEmpty()) return false;
     if (!QDir(pdir).exists()) return false;
     // 先卸载插件释放 native DLL 文件锁(Windows 删不掉被加载的 dll)
     if (unload_cb) unload_cb();

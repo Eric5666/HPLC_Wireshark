@@ -125,6 +125,10 @@ public:
                                            const QList<MarketPlugin>& feed);
 
     // ---- 静态工具(可独立测试) ----
+    /// @brief 安装根目录 base 下插件 name 的目录路径(路径穿越防护,三处入口共用)
+    /// @return 合法时返回规范化绝对路径;name 不合白名单、不是 base 的一级子目录、
+    ///         或已存在目录(含符号链接)解析后落在 base 之外时返回空串
+    static QString plugin_dir_path(const QString& base_dir, const QString& name);
     static bool verify_sha256(const QString& file_path,
                               const QString& expected_hex);
     static bool unzip_to_dir(const QString& zip_path, const QString& dest_dir,

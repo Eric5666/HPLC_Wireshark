@@ -167,6 +167,25 @@ inline QString plugin_resolve_native_entry(const QString& plugin_dir,
 #endif
 }
 
+/// @brief 插件名(= 安装目录名)白名单:[A-Za-z0-9][A-Za-z0-9._-]{0,63}
+/// @details 名字会被拼成安装目录并在覆盖安装/卸载时整目录删除,
+///          必须是单级目录名:不含 '/' '\\' ':',不能是 "." / ".."(首字符须为字母数字)。
+inline bool plugin_name_is_safe(const QString& name) {
+    if (name.isEmpty() || name.size() > 64) return false;
+    for (int i = 0; i < name.size(); ++i) {
+        const QChar c = name.at(i);
+        const bool alnum = (c >= QLatin1Char('a') && c <= QLatin1Char('z')) ||
+                           (c >= QLatin1Char('A') && c <= QLatin1Char('Z')) ||
+                           (c >= QLatin1Char('0') && c <= QLatin1Char('9'));
+        if (alnum) continue;
+        if (i > 0 && (c == QLatin1Char('.') || c == QLatin1Char('_') ||
+                      c == QLatin1Char('-')))
+            continue;
+        return false;
+    }
+    return true;
+}
+
 /// @brief 从插件目录读取并校验 plugin.json
 inline PluginManifest read_plugin_manifest(const QString& plugin_dir) {
     PluginManifest m;
@@ -247,6 +266,7 @@ inline PluginManifest read_plugin_manifest(const QString& plugin_dir) {
     }
 
     if (m.name.isEmpty())         { m.error = QStringLiteral("missing 'name'"); return m; }
+    if (!plugin_name_is_safe(m.name)) { m.error = QStringLiteral("invalid 'name' (allowed: [A-Za-z0-9][A-Za-z0-9._-], max 64)"); return m; }
     if (m.runtime.isEmpty())      { m.error = QStringLiteral("missing 'runtime'"); return m; }
     if (m.entry.isEmpty())        { m.error = QStringLiteral("missing 'entry'"); return m; }
     if (m.api_version <= 0)       { m.error = QStringLiteral("missing/invalid 'api_version'"); return m; }
