@@ -84,6 +84,12 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
                 return trl::L("OFDMA/TDA 站点数为保留值 0(表10/表12 仅定义 1-3)");
             }
             info.sof_stations.clear();
+            // eFC(表11/13)固定位于 byte16-31:站点1-3 字段读到最多 byte27,PB 自 byte32 起。
+            // 上游只保证 FCH 16B,截断帧在此拒收,避免越界读(与南网 nw_2026_parser size()>=32 门一致)
+            if (body.size() < 32) {
+                info.pb_num = 0; info.pb_size = 0;
+                return trl::L("OFDMA/TDA eFC 截断(帧长 %1B < 32B)").arg(body.size());
+            }
             int blk = 32;   // PB 起点:FCH 16B + eFC 16B(表11/13 固定 16 字节)
             bool any_reassembly_bad = false;   // 任一站序列号落位失败(缺块/越界/冲突)
             for (int si = 0; si < n_sites; ++si) {
@@ -281,6 +287,8 @@ struct I18nRegSof {
         trl::register_en("PB 块超出帧长", "PB block exceeds frame length");
         trl::register_en("OFDMA/TDA 站点数为保留值 0(表10/表12 仅定义 1-3)",
                          "OFDMA/TDA Station Count Is Reserved Value 0 (Tables 10/12 Define 1-3 Only)");
+        trl::register_en("OFDMA/TDA eFC 截断(帧长 %1B < 32B)",
+                         "OFDMA/TDA eFC Truncated (Frame Length %1B < 32B)");
         trl::register_en("帧子类型为保留值(表7 仅定义 0-3)",
                          "Frame Subtype Is Reserved Value (Table 7 Defines 0-3 Only)");
         trl::register_en("OFDMA PB 大小越界(copy_mode=%1 → %2B，协议限 72/136)",

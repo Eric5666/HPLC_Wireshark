@@ -1271,7 +1271,13 @@ local function dissect_sof_vf(tvb, tree, is_rf)
             -- 表13 TDA 每站 4B×[TEI/符号数9b/频段/分集/RSV], 站点数决定条数
             -- eFC 固定 16 字节(表11/13 内部字节号 0-15) ⇒ PB 自 byte32 起
             local sn = read_bits(tvb, 7*8+3, 2)
-            if ftype == 2 then
+            if tvb:len() < 32 then
+                -- eFC 截断(帧长 < 32B): 不读 byte16 之后的站点字段(与 Qt 解析器同口径)
+                if sn >= 1 then
+                    tree:add_expert_info(PI_MALFORMED, PI_WARN,
+                        T("OFDMA/TDA eFC 截断(帧长 < 32B)", "OFDMA/TDA eFC Truncated (Frame Length < 32B)"))
+                end
+            elseif ftype == 2 then
                 for s = 1, sn do
                     local b = 16 + (s - 1) * 3
                     add_val(tree, f.efc1_st_tei, tvb, b, 2, read_bits(tvb, b*8, 12))
@@ -2616,6 +2622,11 @@ function gw.dissector(tvb, pinfo, tree)
                     root:add_expert_info(PI_MALFORMED, PI_WARN,
                         T("OFDMA/TDA 站点数为保留值 0(表10/表12 仅定义 1-3)",
                           "OFDMA/TDA Station Count Is Reserved Value 0 (Tables 10/12 Define 1-3 Only)"))
+                elseif tvb:len() < 32 then
+                    -- eFC(byte16-31)截断: 拒绝逐站 PB 分组, 避免越界取 tvb(与 Qt 解析器同口径)
+                    root:add_expert_info(PI_MALFORMED, PI_WARN,
+                        T("OFDMA/TDA eFC 截断(帧长 < 32B)", "OFDMA/TDA eFC Truncated (Frame Length < 32B)"))
+                    return tvb:len()
                 else
                     local blk = 32
                     for s = 0, n_sites - 1 do

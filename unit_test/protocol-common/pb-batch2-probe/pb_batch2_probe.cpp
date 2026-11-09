@@ -14,6 +14,9 @@
 #include "bplcframe.h"
 #include "packetlistmodel.h"
 #include "gw_2026_sof_parser.h"
+#include "gw_2026_tree.h"
+#include <QTreeWidgetItem>
+#include <vector>
 #include "gw_2022_sof_parser.h"
 #include "nw_2021_parser.h"
 #include "fieldtools.h"
@@ -761,6 +764,55 @@ static void test_gw_multi_station_pairing() {
     }
 }
 
+// ── H1:OFDMA/TDA eFC 截断(帧长 < 32B)不得越界读 ──
+// 帧放在**恰好等长**的堆缓冲(QByteArray::fromRawData),ASan 下任何越界读都会报错。
+static void test_gw_efc_truncated() {
+    for (quint8 dt : {quint8(2), quint8(3)}) {          // 2=OFDMA 3=TDA
+        for (quint8 sn = 1; sn <= 3; ++sn) {             // 站点数码 1-3(读 eFC 站点 1-3)
+            bool all_rej = true, no_sta = true;
+            for (int len = 16; len < 32; ++len) {
+                std::vector<quint8> buf(size_t(len), 0xFF);   // 0xFF:字段全 1,最大化读取范围
+                quint8* p = buf.data();
+                set_bits(p, 7, 0, 3, dt);
+                set_bits(p, 7, 3, 2, sn);
+                set_bits(p, 11, 3, 5, 3);                     // 站0 分集拷贝 3 → 72B
+                const QByteArray raw = QByteArray::fromRawData(
+                    reinterpret_cast<const char*>(p), len);
+                MpduInfo info; MsduState msdu; QByteArray complete;
+                const QString err = gw_2026_sof::assemble(raw, info, msdu, complete, 0, false);
+                if (err.isEmpty()) all_rej = false;
+                if (!info.sof_stations.isEmpty()) no_sta = false;
+                // 字段树(被拒帧同样会在 UI 中渲染)
+                PacketEntry e = gw_entry(info, raw, 1);
+                e.accepted = false;
+                e.mpdu.sof_data_type = dt;
+                e.mpdu.sof_tf_symbol_pos = sn;
+                QTreeWidgetItem root;
+                GW_2026_TreeBuilder().build(&root, e);
+            }
+            char name[96];
+            std::snprintf(name, sizeof(name), "efc-trunc/%s sn=%u: rejected len 16..31",
+                          dt == 2 ? "ofdma" : "tda", sn);
+            check(name, all_rej);
+            std::snprintf(name, sizeof(name), "efc-trunc/%s sn=%u: no stations", dt == 2 ? "ofdma" : "tda", sn);
+            check(name, no_sta);
+        }
+    }
+    // 恰好 32B(eFC 完整、无 PB)不应被 eFC 门拒绝为「截断」
+    {
+        std::vector<quint8> buf(32, 0);
+        set_bits(buf.data(), 7, 0, 3, 2);
+        set_bits(buf.data(), 7, 3, 2, 1);
+        set_bits(buf.data(), 11, 3, 5, 3);
+        set_bits(buf.data() + 16, 2, 0, 5, 3);
+        const QByteArray raw = QByteArray::fromRawData(reinterpret_cast<const char*>(buf.data()), 32);
+        MpduInfo info; MsduState msdu; QByteArray complete;
+        const QString err = gw_2026_sof::assemble(raw, info, msdu, complete, 0, false);
+        check("efc-trunc/ofdma len=32: not rejected as eFC-truncated",
+              !err.contains(QStringLiteral("eFC")));
+    }
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     {
@@ -779,6 +831,7 @@ int main(int argc, char** argv) {
     test_gw_multi_reorder();
     test_gw_span_caliber();
     test_gw_multi_station_pairing();
+    test_gw_efc_truncated();
     std::printf("\nRESULT: %s (%d failures)\n",
                 g_fails ? "FAILURES" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;
