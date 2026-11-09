@@ -1,5 +1,5 @@
 /// @file market_safety_probe.cpp
-/// @brief 插件市场安全回归探针:插件名/安装目录路径穿越(H2)
+/// @brief 插件市场安全回归探针:插件名/安装目录路径穿越(H2)、zip 解包防护(H3)
 /// @details 无外部输入:zip 包用 miniz 现场合成,安装目录为
 ///          <探针所在目录>/plugins(PluginMarket::default_install_dir),跑完清理。
 ///          预期输出 `RESULT: ALL PASS (0 failures)`,exit 0。
@@ -24,17 +24,38 @@ static void check(const char* name, bool ok) {
 using ZipEntry = std::pair<QByteArray, QByteArray>;  // 条目名(原样字节), 内容
 
 /// 用 miniz 合成 zip(条目名原样写入,用于构造恶意路径)
-static bool make_zip(const QString& path, const std::vector<ZipEntry>& entries) {
+static bool make_zip(const QString& path, const std::vector<ZipEntry>& entries,
+                     mz_uint level = MZ_DEFAULT_COMPRESSION) {
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     const QByteArray p = path.toLocal8Bit();
     if (!mz_zip_writer_init_file(&zip, p.constData(), 0)) return false;
+    // miniz 写端拒绝以 '/' 开头的名字:先以 '#' 占位写入,再在字节层改回 '/'
     bool ok = true;
-    for (const auto& e : entries)
-        ok = ok && mz_zip_writer_add_mem(&zip, e.first.constData(), e.second.constData(),
-                                         size_t(e.second.size()), MZ_DEFAULT_COMPRESSION);
+    QList<QByteArray> abs_names;
+    for (const auto& e : entries) {
+        QByteArray name = e.first;
+        if (name.startsWith('/')) {
+            name[0] = '#';
+            abs_names.append(name);
+        }
+        ok = ok && mz_zip_writer_add_mem(&zip, name.constData(), e.second.constData(),
+                                         size_t(e.second.size()), level);
+    }
     ok = mz_zip_writer_finalize_archive(&zip) && ok;
     mz_zip_writer_end(&zip);
+    if (ok && !abs_names.isEmpty()) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadWrite)) return false;
+        QByteArray all = f.readAll();
+        for (const QByteArray& n : abs_names) {
+            QByteArray fixed = n;
+            fixed[0] = '/';
+            all.replace(n, fixed);   // 本地头 + 中央目录两处,等长替换
+        }
+        f.seek(0);
+        ok = f.write(all) == all.size();
+    }
     return ok;
 }
 
@@ -133,6 +154,87 @@ static void test_install_traversal(const QString& root) {
     check("uninstall: valid ok", mk.uninstall(QStringLiteral("ok-name")));
 }
 
+// ── H3:zip 条目名校验 + 解包上限 ──
+static void test_zip_entry_names(const QString& root) {
+    const QString dest = root + QStringLiteral("/x/staged");
+    const char* bad[] = {"../evil.txt", "a/../../evil.txt", "/abs/evil.txt",
+                         "C:/Users/Public/evil.dll", "C:evil.dll",
+                         "\\\\server\\share\\evil", "\\Windows\\evil.dll",
+                         "a\\..\\..\\evil.txt", "..", "./", "sub/.."};
+    bool all_rej = true;
+    for (const char* b : bad) {
+        const bool rej = PluginMarket::safe_extract_path(dest, QString::fromLatin1(b)).isEmpty();
+        if (!rej) std::printf("  not rejected: %s\n", b);
+        all_rej = all_rej && rej;
+    }
+    check("zip path: abs/drive/UNC/backslash/.. rejected", all_rej);
+    check("zip path: 'sub/x.js' accepted",
+          PluginMarket::safe_extract_path(dest, QStringLiteral("sub/x.js")) ==
+              QDir::cleanPath(QDir(dest).absolutePath() + QStringLiteral("/sub/x.js")));
+    check("zip path: 'a..b.txt' accepted (not a '..' component)",
+          !PluginMarket::safe_extract_path(dest, QStringLiteral("a..b.txt")).isEmpty());
+
+    // 端到端:含恶意条目的包整体拒绝,且不在目标外落盘(也不写合法条目:先校验后写)
+    for (const char* b : {"../evil.txt", "C:evil.txt", "\\\\srv\\s\\evil.txt", "/tmp/evil.txt"}) {
+        const QString zip = root + QStringLiteral("/slip.zip");
+        QFile::remove(zip);
+        make_zip(zip, {{"ok.txt", "1"}, {b, "pwned"}});
+        QDir(dest).removeRecursively();
+        QString err;
+        const bool ok = PluginMarket::unzip_to_dir(zip, dest, &err);
+        check(qPrintable(QStringLiteral("unzip: entry '%1' rejected").arg(QString::fromLatin1(b))),
+              !ok && err.startsWith(QStringLiteral("unsafe entry")));
+        check(qPrintable(QStringLiteral("unzip: '%1' wrote nothing").arg(QString::fromLatin1(b))),
+              !QFile::exists(root + QStringLiteral("/x/evil.txt")) &&
+                  !QFile::exists(dest + QStringLiteral("/ok.txt")));
+    }
+    // 正常包(含子目录)照常解包
+    {
+        const QString zip = root + QStringLiteral("/fine.zip");
+        make_zip(zip, {{"plugin.json", "{}"}, {"lib/", ""}, {"lib/util.js", "2"}});
+        QDir(dest).removeRecursively();
+        QString err;
+        check("unzip: normal package with subdir ok",
+              PluginMarket::unzip_to_dir(zip, dest, &err) &&
+                  QFile::exists(dest + QStringLiteral("/lib/util.js")));
+    }
+}
+
+static void test_zip_limits(const QString& root) {
+    const QString dest = root + QStringLiteral("/lim/staged");
+    QString err;
+    {   // 条目数上限 4096
+        std::vector<ZipEntry> many;
+        for (int i = 0; i < 4097; ++i)
+            many.push_back({QByteArray("f") + QByteArray::number(i), QByteArray("x")});
+        const QString zip = root + QStringLiteral("/many.zip");
+        make_zip(zip, many, MZ_BEST_SPEED);
+        check("unzip: >4096 entries rejected",
+              !PluginMarket::unzip_to_dir(zip, dest, &err) &&
+                  err.startsWith(QStringLiteral("too many")));
+    }
+    {   // 单条目上限 64 MB
+        const QString zip = root + QStringLiteral("/big.zip");
+        make_zip(zip, {{"big.bin", QByteArray(64 * 1024 * 1024 + 1, '\0')}}, MZ_BEST_SPEED);
+        QDir(dest).removeRecursively();
+        check("unzip: entry > 64MB rejected",
+              !PluginMarket::unzip_to_dir(zip, dest, &err) &&
+                  err.startsWith(QStringLiteral("zip entry too large")) &&
+                  !QFile::exists(dest + QStringLiteral("/big.bin")));
+    }
+    {   // 总量上限 256 MB(5 × 60 MB)
+        const QByteArray chunk(60 * 1024 * 1024, '\0');
+        const QString zip = root + QStringLiteral("/bomb.zip");
+        make_zip(zip, {{"a", chunk}, {"b", chunk}, {"c", chunk}, {"d", chunk}, {"e", chunk}},
+                 MZ_BEST_SPEED);
+        QDir(dest).removeRecursively();
+        check("unzip: total > 256MB rejected",
+              !PluginMarket::unzip_to_dir(zip, dest, &err) &&
+                  err.startsWith(QStringLiteral("zip content too large")));
+        QFile::remove(zip);
+    }
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("BPLC_MarketSafetyProbe"));
@@ -146,6 +248,8 @@ int main(int argc, char** argv) {
     test_plugin_dir_path(tmp.path());
     test_manifest_name(tmp.path());
     test_install_traversal(tmp.path());
+    test_zip_entry_names(tmp.path());
+    test_zip_limits(tmp.path());
     QDir(PluginMarket::default_install_dir()).removeRecursively();
     std::printf("\nRESULT: %s (%d failures)\n", g_fails ? "FAILURES" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;

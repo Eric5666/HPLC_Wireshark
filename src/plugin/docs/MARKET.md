@@ -128,7 +128,10 @@ plugin.json   # manifest, see plugin_api/plugin_manifest.h
 2. Offline install (`Install from file...`): same chain minus sha256
    (no feed to compare against) — manifest validity and entry-file
    existence are still enforced.
-3. Zip-slip guard: entries with absolute paths or `..` are rejected.
+3. Zip-slip guard (`PluginMarket::safe_extract_path`): entries with absolute
+   paths, drive letters (`C:/x`, `C:x`), UNC paths, backslashes or any `..`
+   component are rejected, and the whole package is refused before anything
+   is written. Limits: at most 4096 entries, 64 MB per entry, 256 MB total.
 
 Install dir: `<applicationDirPath>/plugins/<name>/` (next to the executable).
 On Linux, if the dir is not writable, installation requests elevation via

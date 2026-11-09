@@ -587,6 +587,53 @@ bool PluginMarket::verify_sha256(const QString& file_path,
     return h.result().toHex() == expected_hex.toLower().toLatin1();
 }
 
+QString PluginMarket::safe_extract_path(const QString& dest_dir,
+                                        const QString& entry_name) {
+    // zip 条目名一律视为不可信:规范要求 '/' 分隔,出现 '\\' 直接拒绝
+    // (Windows 上 "\\Windows\\x"、"\\\\server\\share\\x" 都是绝对/UNC 路径)
+    if (entry_name.isEmpty() || entry_name.contains(QLatin1Char('\\')) ||
+        entry_name.contains(QLatin1Char(':')) ||          // 盘符 C:/x、C:x 与 ADS
+        entry_name.startsWith(QLatin1Char('/')) ||
+        QDir::isAbsolutePath(entry_name) ||
+        entry_name.contains(QChar(0)))
+        return QString();
+    for (const QString& part : entry_name.split(QLatin1Char('/')))
+        if (part == QStringLiteral("..")) return QString();
+    const QString base = QDir::cleanPath(QDir(dest_dir).absolutePath());
+    const QString out = QDir::cleanPath(base + QLatin1Char('/') + entry_name);
+    if (!out.startsWith(base + QLatin1Char('/'))) return QString();
+    return out;
+}
+
+namespace {
+/// 解包上限(zip 炸弹防护):单条目 64 MB、总量 256 MB、条目数 4096
+constexpr mz_uint64 kZipMaxEntryBytes = 64ull * 1024 * 1024;
+constexpr mz_uint64 kZipMaxTotalBytes = 256ull * 1024 * 1024;
+constexpr mz_uint kZipMaxEntries = 4096;
+
+/// 解压写回调:实际写出字节数不得超过中央目录声明的大小(防声明值作假)
+struct CappedFileWriter {
+    QFile* file;
+    mz_uint64 limit;
+    mz_uint64 written;
+};
+size_t capped_file_write(void* opaque, mz_uint64 ofs, const void* buf, size_t n) {
+    auto* w = static_cast<CappedFileWriter*>(opaque);
+    if (ofs != w->written || w->written + n > w->limit) return 0;  // 非顺序/超限 → 中止
+    if (w->file->write(static_cast<const char*>(buf), qint64(n)) != qint64(n))
+        return 0;
+    w->written += n;
+    return n;
+}
+
+/// 父目录真实路径(解析符号链接后)仍须位于解包根内
+bool real_dir_inside(const QString& dir, const QString& canonical_root) {
+    const QString c = QFileInfo(dir).canonicalFilePath();
+    return !c.isEmpty() &&
+           (c == canonical_root || c.startsWith(canonical_root + QLatin1Char('/')));
+}
+}  // namespace
+
 bool PluginMarket::unzip_to_dir(const QString& zip_path,
                                 const QString& dest_dir, QString* err) {
     mz_zip_archive zip;
@@ -599,29 +646,69 @@ bool PluginMarket::unzip_to_dir(const QString& zip_path,
         return false;
     }
     const mz_uint n = mz_zip_reader_get_num_files(&zip);
+    if (n > kZipMaxEntries) {
+        mz_zip_reader_end(&zip);
+        if (err) *err = QStringLiteral("too many zip entries: %1").arg(n);
+        return false;
+    }
     QDir().mkpath(dest_dir);
-    bool ok = true;
+    const QString root = QFileInfo(dest_dir).canonicalFilePath();
+    bool ok = !root.isEmpty();
+    if (!ok && err) *err = QStringLiteral("cannot create ") + dest_dir;
+    // 先按中央目录校验全部条目(路径 + 声明大小),全部通过才开始写盘
+    mz_uint64 total = 0;
     for (mz_uint i = 0; i < n && ok; ++i) {
         mz_zip_archive_file_stat st;
         if (!mz_zip_reader_file_stat(&zip, i, &st)) {
             ok = false;
             break;
         }
-        QString rel = QString::fromUtf8(st.m_filename);
-        // 防 zip-slip:拒绝绝对路径与 ".."
-        if (rel.startsWith(QLatin1Char('/')) || rel.contains(QStringLiteral(".."))) {
+        const QString rel = QString::fromUtf8(st.m_filename);
+        // 防 zip-slip:绝对路径/盘符/UNC/反斜杠/".." 组件一律拒绝
+        if (safe_extract_path(dest_dir, rel).isEmpty()) {
             ok = false;
             if (err) *err = QStringLiteral("unsafe entry: ") + rel;
             break;
         }
-        const QString out_path =
-            QDir(dest_dir).absoluteFilePath(rel);
-        if (mz_zip_reader_is_file_a_directory(&zip, i)) {
-            QDir().mkpath(out_path);
-            continue;
+        if (st.m_uncomp_size > kZipMaxEntryBytes) {
+            ok = false;
+            if (err) *err = QStringLiteral("zip entry too large: ") + rel;
+            break;
         }
-        QDir().mkpath(QFileInfo(out_path).absolutePath());
-        if (!mz_zip_reader_extract_to_file(&zip, i, out_path.toLocal8Bit().constData(), 0)) {
+        total += st.m_uncomp_size;
+        if (total > kZipMaxTotalBytes) {
+            ok = false;
+            if (err) *err = QStringLiteral("zip content too large");
+            break;
+        }
+    }
+    for (mz_uint i = 0; i < n && ok; ++i) {
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, i, &st)) {
+            ok = false;
+            break;
+        }
+        const QString rel = QString::fromUtf8(st.m_filename);
+        const QString out_path = safe_extract_path(dest_dir, rel);
+        const QString out_dir = mz_zip_reader_is_file_a_directory(&zip, i)
+                                    ? out_path
+                                    : QFileInfo(out_path).absolutePath();
+        QDir().mkpath(out_dir);
+        if (!real_dir_inside(out_dir, root)) {
+            ok = false;
+            if (err) *err = QStringLiteral("unsafe entry: ") + rel;
+            break;
+        }
+        if (mz_zip_reader_is_file_a_directory(&zip, i)) continue;
+        QFile out(out_path);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            ok = false;
+            if (err) *err = QStringLiteral("extract failed: ") + rel;
+            break;
+        }
+        CappedFileWriter w{&out, st.m_uncomp_size, 0};
+        if (!mz_zip_reader_extract_to_callback(&zip, i, capped_file_write, &w, 0) ||
+            w.written != st.m_uncomp_size) {
             ok = false;
             if (err) *err = QStringLiteral("extract failed: ") + rel;
         }

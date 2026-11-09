@@ -131,8 +131,14 @@ public:
     static QString plugin_dir_path(const QString& base_dir, const QString& name);
     static bool verify_sha256(const QString& file_path,
                               const QString& expected_hex);
+    /// @brief 解包到 dest_dir:拒绝不安全条目名(见 safe_extract_path),
+    ///        限制单条目 64 MB / 总量 256 MB / 条目数 4096
     static bool unzip_to_dir(const QString& zip_path, const QString& dest_dir,
                              QString* err);
+    /// @brief zip 条目在 dest_dir 下的落盘路径;绝对路径、盘符、UNC、反斜杠、
+    ///        ".." 组件或规范化后不在 dest_dir 内时返回空串
+    static QString safe_extract_path(const QString& dest_dir,
+                                     const QString& entry_name);
     /// @brief 语义化版本比较: <0(a<b) 0(==) >0(a>b)
     static int compare_version(const QString& a, const QString& b);
     /// @brief 当前宿主版本是否满足 min_app_version
