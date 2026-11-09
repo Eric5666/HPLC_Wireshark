@@ -12,6 +12,17 @@
 4. （Unix）解析途中 SIGKILL lua_echo 的 host：在途请求须 < 1 s 返回，GUI 线程收到 `disabled: ...` 状态；
 5. `stop_all()` 之后的迟到请求必须立即失败返回；随后重新 `loadAll` 可再次解析（插件市场更新流程）；
 6. 走 `aboutToQuit` 正常退出路径（停插件、在 IPC 线程关 socket、停 IPC 线程）。
+7. （异步图形 API，Unix）另生成 `lua_gfx_nofont`（lua_graphics 去掉画字，宿主是 QCoreApplication
+   画不了字），用真实 `PluginGraphicsView` 做异步渲染往返：
+   - host `SIGSTOP` 2 s：GUI 每 5 ms 发图形事件、每 60 ms 要求重绘，GUI 1 ms 定时器最大迟到须 < 20 ms；
+     旧图保持；卡死期间最多 1 个渲染在途（合并），恢复后补发 1 次并应用；全部事件 ack；
+   - host `SIGSTOP` 5.6 s：异步请求 5 s 超时以失败回调（不早于 4.9 s），GUI 不卡；
+     回调上下文已销毁的请求不回调；迟到 ack 被丢弃，无残留登记；恢复后插件可用。
+
+阶段 2、3 的图形事件在有异步 API 的版本（`BPLC_PLUGIN_ASYNC_GRAPHICS`）上走
+`send_graphics_event_async`，在旧提交上回落到同步 `send_graphics_event`，因此同一源码可在
+f01697d / 013d9a8 上编译做对比；`--bench-only` 只跑握手 + 阶段 3。
+探针同时捕获 `wait_response called on the GUI thread` 告警（GUI 线程阻塞等插件 IPC）并判失败。
 
 要求全部请求拿到响应、插件不被禁用；探针安装 `qInstallMessageHandler`，全程出现任何含
 `another thread` / `different thread` 的 Qt 告警（如 `QSocketNotifier ... another thread`、

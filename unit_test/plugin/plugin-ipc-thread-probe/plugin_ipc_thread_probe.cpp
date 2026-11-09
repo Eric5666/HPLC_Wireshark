@@ -9,6 +9,14 @@
 ///   lua_graphics 发一次图形事件,同时 1 ms PreciseTimer 记录 GUI 事件循环迟到量
 ///   (max / p99)与解析吞吐(parses/s)。另测一轮不带图形事件的纯解析负载。
 ///   结果同时以 `LATENCY ...` 机器可读行输出(--bench-json <path> 另存 JSON)。
+///   ④ (异步图形 API,BPLC_PLUGIN_ASYNC_GRAPHICS)真实 PluginGraphicsView 异步渲染
+///   (lua_gfx_nofont:去掉文字绘制的 lua_graphics,宿主是 QCoreApplication 画不了字);
+///   host 卡死(SIGSTOP 2 s)期间 GUI 每 5 ms 发图形事件并反复要求重绘:GUI 1 ms 定时器
+///   最大迟到须 < 20 ms、旧图保持、渲染请求合并(在途时只补发 1 次)、恢复后全部 ack;
+///   SIGSTOP 5.6 s:异步请求 5 s 超时以失败回调、GUI 不卡、迟到 ack 被丢弃;
+///   上下文对象销毁后回调不执行。
+///   源码可在旧提交(无异步 API)上编译:图形请求回落到同步 API,④ 跳过;
+///   --bench-only 只跑握手 + ③(三方对比用)。
 ///   要求:全部请求拿到响应、插件不被禁用、无 timeout-disabled 状态;
 ///   全程不得出现 Qt 跨线程告警("another thread"/"different thread")。
 ///   bplc-plugin-host 须与探针同目录;可用 --host <path> 指定,探针会复制过来。
@@ -32,6 +40,8 @@
 #include <cstdio>
 #include <vector>
 #ifdef Q_OS_UNIX
+#include <signal.h>
+#include <sys/types.h>
 #include <time.h>
 #endif
 
@@ -47,6 +57,9 @@ static double thread_cpu_ms() {
 }
 
 #include "plugin_manager.h"
+#ifdef BPLC_PLUGIN_ASYNC_GRAPHICS
+#include "plugin_graphics_view.h"
+#endif
 
 static int g_fails = 0;
 static void check(const char* name, bool ok) {
@@ -60,7 +73,8 @@ static QStringList g_thread_warnings;
 static QtMessageHandler g_prev_handler = nullptr;
 static void probe_msg_handler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg) {
     if (msg.contains(QLatin1String("another thread")) ||
-        msg.contains(QLatin1String("different thread"))) {
+        msg.contains(QLatin1String("different thread")) ||
+        msg.contains(QLatin1String("wait_response called on the GUI thread"))) {
         QMutexLocker l(&g_msg_mutex);
         g_thread_warnings << msg;
     }
@@ -104,7 +118,7 @@ static int parse_in_worker(const QString& pid, int n, const std::function<void()
     th->start();
     *gui_ok = 0;
     *gui_total = 0;
-    while (!done) {
+    while (!done) {   // gui_work 内的计数经指针别名更新
         if (gui_work) gui_work();
         QEventLoop loop;
         QTimer::singleShot(1, &loop, &QEventLoop::quit);
@@ -151,15 +165,27 @@ static LatencyStats measure_gui_latency(const QString& parse_pid, const QString&
     });
     QTimer gfx;
     bool in_gfx = false;   // 旧设计里 GUI 等待跑嵌套事件循环,防止重入
+    QObject gctx;          // 异步回调上下文
+    int gfx_done = 0;
     if (gfx_every_ms > 0) {
         gfx.setInterval(gfx_every_ms);
         QObject::connect(&gfx, &QTimer::timeout, [&]() {
             if (in_gfx) return;
             in_gfx = true;
-            ++st.gfx_total;
             GraphicsEvent ev;
             ev.type = GraphicsEventType::MousePress;
+#ifdef BPLC_PLUGIN_ASYNC_GRAPHICS
+            // 发后即返回,ack 异步回调
+            if (pm.send_graphics_event_async(gfx_pid, ev, &gctx, [&](quint64, bool ok, bool) {
+                    ++gfx_done;
+                    if (ok) ++st.gfx_ok;
+                }))
+                ++st.gfx_total;
+#else
+            ++st.gfx_total;
             if (pm.send_graphics_event(gfx_pid, ev)) ++st.gfx_ok;
+            ++gfx_done;
+#endif
             in_gfx = false;
         });
     }
@@ -190,6 +216,7 @@ static LatencyStats measure_gui_latency(const QString& parse_pid, const QString&
     tick.stop();
     gfx.stop();
     for (QThread* th : ths) { th->wait(); delete th; }
+    spin_until([&] { return gfx_done >= st.gfx_total; }, 6000);   // 在途 ack 收尾(不计入测量)
     st.parses_ok = ok;
     st.throughput = st.elapsed_ms > 0 ? st.parses_ok * 1000.0 / st.elapsed_ms : 0;
     st.ticks = int(late.size());
@@ -225,6 +252,63 @@ static void print_stats(const char* tag, const LatencyStats& s) {
                 s.gfx_ok, s.gfx_total, s.max_late_ms, s.p99_late_ms, s.p50_late_ms, s.ticks, s.gui_cpu_ms);
 }
 
+/// 生成 lua_gfx_nofont:lua_graphics 去掉 set_font/draw_text(宿主是 QCoreApplication,
+/// 画字会崩溃 —— 既有问题),换协议 id,用于真实渲染往返
+static bool make_nofont_plugin(const QString& src, const QString& dst) {
+    if (!copy_dir(src, dst)) return false;
+    auto patch = [](const QString& path, const std::function<QByteArray(QByteArray)>& fn) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) return false;
+        const QByteArray d = fn(f.readAll());
+        f.close();
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+        return f.write(d) == d.size();
+    };
+    const bool a = patch(dst + QStringLiteral("/plugin.json"), [](QByteArray d) {
+        return d.replace("LUAGRAPH_2024", "LUAGFXNF_2024").replace("\"lua-graphics\"", "\"lua-gfx-nofont\"");
+    });
+    const bool b = patch(dst + QStringLiteral("/graphics.lua"), [](QByteArray d) {
+        QList<QByteArray> out;
+        for (const QByteArray& line : d.split('\n'))
+            if (!line.contains("set_font") && !line.contains("draw_text")) out << line;
+        return out.join('\n').replace("LUAGRAPH_2024", "LUAGFXNF_2024");
+    });
+    return a && b;
+}
+
+#if defined(BPLC_PLUGIN_ASYNC_GRAPHICS) && defined(Q_OS_UNIX)
+/// 找到加载 plugin_dir_tag 的 host 进程 pid(pgrep -f)
+static qint64 host_pid(const QString& plugin_dir_tag) {
+    QProcess pg;
+    pg.start(QStringLiteral("pgrep"), {QStringLiteral("-f"),
+                                       QStringLiteral("bplc-plugin-host.*") + plugin_dir_tag});
+    pg.waitForFinished(3000);
+    const QList<QByteArray> ls = pg.readAllStandardOutput().trimmed().split('\n');
+    return ls.isEmpty() ? -1 : ls.first().toLongLong();
+}
+#endif
+
+/// GUI 1 ms PreciseTimer 迟到量记录器(stall 测试用)
+struct LateMeter {
+    QElapsedTimer clock;
+    qint64 last_ns = -1;
+    double max_late = 0;
+    int ticks = 0;
+    QTimer tick;
+    LateMeter() {
+        tick.setTimerType(Qt::PreciseTimer);
+        tick.setInterval(1);
+        QObject::connect(&tick, &QTimer::timeout, [this]() {
+            const qint64 now = clock.nsecsElapsed();
+            if (last_ns >= 0) max_late = std::max(max_late, (now - last_ns) / 1e6 - 1.0);
+            last_ns = now;
+            ++ticks;
+        });
+    }
+    void start() { clock.start(); last_ns = -1; max_late = 0; ticks = 0; tick.start(); }
+    void stop() { tick.stop(); }
+};
+
 int main(int argc, char** argv) {
     g_prev_handler = qInstallMessageHandler(probe_msg_handler);
     QApplication app(argc, argv);
@@ -241,9 +325,12 @@ int main(int argc, char** argv) {
     if (!tmp.isValid()) return 2;
     const QString ex = QStringLiteral(BPLC_REPO_DIR "/src/plugin/examples");
     const QString plugins = tmp.path() + QStringLiteral("/plugins");
-    check("copy lua_echo/lua_graphics examples",
+    check("copy lua_echo/lua_graphics examples (+ lua_gfx_nofont)",
           copy_dir(ex + QStringLiteral("/lua_echo"), plugins + QStringLiteral("/lua_echo")) &&
-              copy_dir(ex + QStringLiteral("/lua_graphics"), plugins + QStringLiteral("/lua_graphics")));
+              copy_dir(ex + QStringLiteral("/lua_graphics"), plugins + QStringLiteral("/lua_graphics")) &&
+              make_nofont_plugin(ex + QStringLiteral("/lua_graphics"),
+                                 plugins + QStringLiteral("/lua_gfx_nofont")));
+    const bool bench_only = QCoreApplication::arguments().contains(QStringLiteral("--bench-only"));
 
     QStringList bad_status;
     QObject::connect(&PluginManager::instance(), &PluginManager::plugin_status_changed,
@@ -254,13 +341,18 @@ int main(int argc, char** argv) {
     pm.loadAll(plugins);
     const QString echo = QStringLiteral("LUAECHO_2024");
     const QString gfx = QStringLiteral("LUAGRAPH_2024");
-    spin_until([&] { return pm.is_plugin_protocol(echo) && pm.is_plugin_protocol(gfx); }, 15000);
-    check("plugins handshaked (ready)", pm.is_plugin_protocol(echo) && pm.is_plugin_protocol(gfx));
+    const QString gnf = QStringLiteral("LUAGFXNF_2024");
+    spin_until([&] { return pm.is_plugin_protocol(echo) && pm.is_plugin_protocol(gfx) &&
+                            pm.is_plugin_protocol(gnf); }, 15000);
+    check("plugins handshaked (ready)", pm.is_plugin_protocol(echo) && pm.is_plugin_protocol(gfx) &&
+                                            pm.is_plugin_protocol(gnf));
+    QElapsedTimer t;
+    if (bench_only) goto bench;
 
+    {
     // ① worker 解析 + GUI 事件循环空跑
     const int n1 = 1500;
     int gok = 0, gtot = 0;
-    QElapsedTimer t;
     t.start();
     const int ok1 = parse_in_worker(echo, n1, nullptr, &gok, &gtot);
     std::printf("  phase1: %d/%d parses answered in %lld ms\n", ok1, n1, (long long)t.elapsed());
@@ -272,12 +364,27 @@ int main(int argc, char** argv) {
     //   需要 QGuiApplication,宿主会崩溃(既有问题,与 H6 无关,见修复说明)
     const int n2 = 3000;
     t.restart();
+#ifdef BPLC_PLUGIN_ASYNC_GRAPHICS
+    int gdone = 0;
+    QObject gctx;
+    const int ok2 = parse_in_worker(gfx, n2, [&]() {
+        GraphicsEvent ev;
+        ev.type = GraphicsEventType::MousePress;
+        if (pm.send_graphics_event_async(gfx, ev, &gctx, [&](quint64, bool ok, bool) {
+                ++gdone;
+                if (ok) ++gok;
+            }))
+            ++gtot;
+    }, &gok, &gtot);
+    spin_until([&] { return gdone == gtot; }, 6000);   // 收尾:剩余 ack 异步到达
+#else
     const int ok2 = parse_in_worker(gfx, n2, [&]() {
         ++gtot;
         GraphicsEvent ev;
         ev.type = GraphicsEventType::MousePress;
         if (pm.send_graphics_event(gfx, ev)) ++gok;
     }, &gok, &gtot);
+#endif
     std::printf("  phase2: %d/%d parses, %d/%d graphics events in %lld ms\n", ok2, n2, gok, gtot,
                 (long long)t.elapsed());
     check("worker parses all answered during GUI requests", ok2 == n2);
@@ -285,7 +392,10 @@ int main(int argc, char** argv) {
     check("lua-graphics still enabled", pm.is_plugin_protocol(gfx));
     for (const QString& s : bad_status) std::printf("  status: %s\n", qPrintable(s));
     check("no disabled/timeout status emitted", bad_status.isEmpty());
+    }
 
+bench:
+    {
     // ③ GUI 延迟 / 吞吐测量(2 worker × 5000,lua_echo)
     const int lw = 2, ln = 5000;
     const LatencyStats ls0 = measure_gui_latency(echo, gfx, lw, ln, 0);
@@ -306,6 +416,124 @@ int main(int argc, char** argv) {
         QFile jf(QCoreApplication::arguments().at(ji + 1));
         if (jf.open(QIODevice::WriteOnly)) jf.write(QJsonDocument(o).toJson());
     }
+    }
+    if (bench_only) {
+        pm.stop_all();
+        std::printf("\nRESULT: %s (%d failures)\n", g_fails ? "FAILURES" : "ALL PASS", g_fails);
+        return g_fails ? 1 : 0;
+    }
+
+#if defined(BPLC_PLUGIN_ASYNC_GRAPHICS) && defined(Q_OS_UNIX)
+    // ④ 异步图形:真实视图渲染、host 卡死期间 GUI 不阻塞、合并、超时、上下文销毁
+    {
+        bad_status.clear();
+        PluginGraphicsView view(&pm, gnf);
+        view.resize(320, 240);
+        view.show();
+        spin_until([&] { return view.renders_applied() >= 1; }, 5000);
+        std::printf("  render: applied %llu, image %dx%d\n", (unsigned long long)view.renders_applied(),
+                    view.image().width(), view.image().height());
+        check("async render: view received image", view.renders_applied() >= 1 &&
+                  view.image().size() == QSize(320, 240));
+        // 合并:无卡顿时,连续 5 次重绘要求(间隔 > 50 ms 节流)各发 1 次
+        const qint64 hp = host_pid(QStringLiteral("lua_gfx_nofont"));
+        check("found lua_gfx_nofont host pid", hp > 0);
+
+        // ④a host SIGSTOP 2 s:GUI 每 5 ms 发图形事件 + 每 60 ms 要求重绘
+        const QImage before = view.image();
+        const quint64 sent0 = view.renders_sent(), applied0 = view.renders_applied();
+        int ev_sent = 0, ev_done = 0, ev_ok = 0;
+        QTimer evt;
+        evt.setInterval(5);
+        QObject::connect(&evt, &QTimer::timeout, [&]() {
+            GraphicsEvent ev;
+            ev.type = GraphicsEventType::MouseMove;
+            if (pm.send_graphics_event_async(gnf, ev, &view, [&](quint64, bool ok, bool) {
+                    ++ev_done;
+                    if (ok) ++ev_ok;
+                }))
+                ++ev_sent;
+        });
+        QTimer redraw;
+        redraw.setInterval(60);
+        QObject::connect(&redraw, &QTimer::timeout, [&]() { view.on_plugin_request_redraw(); });
+        LateMeter lm;
+        ::kill(pid_t(hp), SIGSTOP);
+        QElapsedTimer st;
+        st.start();
+        lm.start();
+        evt.start();
+        redraw.start();
+        spin_until([&] { return st.elapsed() >= 2000; }, 2500);
+        const double stall_late = lm.max_late;   // 计到恢复前(含下方 100 ms)
+        const int stall_ticks = lm.ticks;
+        const quint64 sent_during = view.renders_sent() - sent0;
+        const bool kept_image = view.image().cacheKey() == before.cacheKey();
+        redraw.stop();
+        evt.stop();
+        spin_until([] { return false; }, 100);   // 让已排上的 50 ms 节流定时器在卡死期间触发
+        const quint64 sent_stalled = view.renders_sent() - sent0;
+        ::kill(pid_t(hp), SIGCONT);
+        spin_until([&] { return ev_done == ev_sent && !view.render_in_flight() &&
+                                pm.pending_async_requests() == 0; }, 5000);
+        spin_until([] { return false; }, 200);   // 合并补发的那次渲染回来
+        lm.stop();
+        std::printf("  stall 2s: GUI 1ms-timer max lateness %.2f ms (%d ticks); events %d sent, %d acked "
+                    "after resume; renders sent during stall %llu (redraw asked ~33x), total renders %llu, "
+                    "applied %llu\n",
+                    stall_late, stall_ticks, ev_sent, ev_ok, (unsigned long long)sent_during,
+                    (unsigned long long)(view.renders_sent() - sent0),
+                    (unsigned long long)(view.renders_applied() - applied0));
+        check("stall 2s: GUI max lateness < 20 ms", stall_late < 20.0 && stall_ticks > 1000);
+        check("stall 2s: last good image kept while host stalled", kept_image && !before.isNull());
+        check("stall 2s: renders coalesced (<= 1 in flight while stalled)",
+              sent_during <= 1 && sent_stalled <= 1);
+        check("stall 2s: all events acked after resume", ev_sent > 300 && ev_ok == ev_sent);
+        check("stall 2s: coalesced follow-up render applied",
+              view.renders_sent() - sent0 == 2 && view.renders_applied() - applied0 == 2);
+
+        // ④b host SIGSTOP 5.6 s:异步请求 5 s 超时 → 失败回调;GUI 不卡;迟到 ack 丢弃
+        bool to_done = false, to_ok = true;
+        qint64 to_ms = -1;
+        QElapsedTimer tt;
+        lm.start();
+        ::kill(pid_t(hp), SIGSTOP);
+        tt.start();
+        GraphicsEvent ev;
+        ev.type = GraphicsEventType::MousePress;
+        const quint64 tseq = pm.send_graphics_event_async(gnf, ev, &view, [&](quint64, bool ok, bool) {
+            to_done = true;
+            to_ok = ok;
+            to_ms = tt.elapsed();
+        });
+        // 上下文在回调前销毁:回调不得执行
+        bool dead_cb = false;
+        {
+            QObject tmp_ctx;
+            pm.send_graphics_event_async(gnf, ev, &tmp_ctx, [&](quint64, bool, bool) { dead_cb = true; });
+        }
+        spin_until([&] { return tt.elapsed() >= 5600; }, 6000);
+        const double to_late = lm.max_late;
+        ::kill(pid_t(hp), SIGCONT);
+        spin_until([] { return false; }, 300);   // 迟到 ack 到达(须被丢弃)
+        lm.stop();
+        std::printf("  stall 5.6s: seq %llu callback ok=%d after %lld ms; GUI max lateness %.2f ms; "
+                    "pending after resume %d\n",
+                    (unsigned long long)tseq, int(to_ok), (long long)to_ms, to_late,
+                    pm.pending_async_requests());
+        check("timeout: async request fails after ~5 s (not before)",
+              tseq > 0 && to_done && !to_ok && to_ms >= 4900 && to_ms < 5600);
+        check("timeout: GUI max lateness < 20 ms", to_late < 20.0);
+        check("timeout: callback skipped for destroyed context", !dead_cb);
+        check("timeout: late ack dropped, nothing pending", pm.pending_async_requests() == 0);
+        int ok_after = -1;
+        pm.send_graphics_event_async(gnf, ev, &view, [&](quint64, bool ok, bool) { ok_after = ok; });
+        spin_until([&] { return ok_after >= 0; }, 2000);
+        check("timeout: plugin still usable afterwards", ok_after == 1 && pm.is_plugin_protocol(gnf));
+        for (const QString& s2 : bad_status) std::printf("  status: %s\n", qPrintable(s2));
+        check("stall: no disabled/timeout status emitted", bad_status.isEmpty());
+    }
+#endif
 
 #ifdef Q_OS_UNIX
     // ③b host 崩溃:worker 解析途中 SIGKILL lua_echo 的 host,断线须立即唤醒

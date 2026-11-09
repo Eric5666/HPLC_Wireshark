@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QDeadlineTimer>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -17,6 +18,8 @@
 #include <QThread>
 #include <QTimer>
 #include <QWriteLocker>
+
+#include <memory>
 
 #include "plugin_ipc.h"
 #include "plugin_serialization.h"
@@ -28,6 +31,18 @@ constexpr int kHandshakeTimeoutMs = 10000;
 constexpr int kParseTimeoutMs = 5000;
 constexpr int kHeartbeatIntervalMs = 5000;
 constexpr int kHeartbeatTimeoutMs = 15000;
+constexpr int kGraphicsTimeoutMs = 5000;     ///< 异步图形请求超时
+constexpr int kAsyncSweepIntervalMs = 50;    ///< 超时扫描粒度
+/// 单调时钟(ms),用于异步请求截止时刻
+qint64 steady_ms() {
+    static QElapsedTimer t = [] { QElapsedTimer e; e.start(); return e; }();
+    return t.elapsed();
+}
+/// 当前线程是否 GUI(主)线程
+bool on_gui_thread() {
+    const QCoreApplication* app = QCoreApplication::instance();
+    return app && QThread::currentThread() == app->thread();
+}
 } // namespace
 
 PluginManager& PluginManager::instance() {
@@ -39,6 +54,8 @@ PluginManager::PluginManager(QObject* parent) : QObject(parent) {
     m_hb_timer.setInterval(kHeartbeatIntervalMs);
     connect(&m_hb_timer, &QTimer::timeout, this, &PluginManager::checkHeartbeats);
     m_hb_timer.start();
+    m_async_timer.setInterval(kAsyncSweepIntervalMs);
+    connect(&m_async_timer, &QTimer::timeout, this, &PluginManager::sweep_async_timeouts);
 }
 
 PluginManager::~PluginManager() {
@@ -106,6 +123,7 @@ void PluginManager::stop_all() {
         rt->ready = false;
         rt->retired.store(true);
         wake_waiters(rt);
+        fail_async(rt);   // 在途异步图形请求以失败结束(排队回调;上下文已销毁则丢弃)
         unregister_parser(rt->manifest.protocol_id);
     }
     // 第二遍(IPC 线程,同步):发 Shutdown、断开并释放 socket/server。
@@ -264,6 +282,7 @@ void PluginManager::on_new_connection(PluginRuntime* rt) {
 void PluginManager::on_host_disconnected(PluginRuntime* rt) {
     rt->connected = false;
     wake_waiters(rt);   // 等待中的请求立即失败返回(wait_response 查 connected)
+    fail_async(rt);     // 在途异步图形请求排队失败回调
     if (rt->retired.load()) return;
     // 状态/信号/协议注册表归 GUI 线程:排队过去停用
     const QString pid = rt->manifest.protocol_id;
@@ -299,10 +318,35 @@ void PluginManager::on_host_ready_read(PluginRuntime* rt) {
             quint64 rseq = 0;
             ds >> rseq;
             QMutexLocker lock(&rt->ipc_mutex);
-            if (rt->waiting.contains(rseq)) {   // 已超时放弃的迟到响应直接丢弃
+            if (rt->waiting.contains(rseq)) {   // 同步等待方(worker 解析)
                 rt->responses.insert(rseq, frame);
                 rt->resp_cv.wakeAll();
+                continue;
             }
+            // 异步图形请求:取出登记项(之后超时扫描不会再看到它,回调恰好一次),
+            // 在 IPC 线程解码后排队交给 GUI 线程。未登记(已超时丢弃/发后不管)
+            // 的迟到响应直接丢弃。
+            auto it = rt->async_reqs.find(rseq);
+            if (it == rt->async_reqs.end()) continue;
+            PluginAsyncRequest req = std::move(it.value());
+            rt->async_reqs.erase(it);
+            lock.unlock();
+            PluginAsyncResult res;
+            if (mt == plugin_ipc::MsgType::RenderResponse &&
+                req.kind == PluginAsyncRequest::Render) {
+                bool rok = false;
+                QImage img;
+                ds >> rok >> img;
+                res.ok = rok && ds.status() == QDataStream::Ok;
+                if (res.ok) res.image = img;
+            } else if (mt == plugin_ipc::MsgType::EventAck &&
+                       req.kind == PluginAsyncRequest::Event) {
+                bool redraw = false;
+                ds >> redraw;
+                res.ok = ds.status() == QDataStream::Ok;
+                res.needs_redraw = res.ok && redraw;
+            }   // 类型与登记不符:按失败回调
+            deliver_async(std::move(req), res);
             continue;
         }
         if (mt == plugin_ipc::MsgType::Pong) {
@@ -419,6 +463,14 @@ bool PluginManager::wait_response(PluginRuntime* rt, quint64 seq,
     // 任何请求线程(worker / GUI)统一用条件变量等 IPC 线程投递响应;
     // 停用、退役或断线时被 wake_waiters 立即唤醒。GUI 不再跑嵌套事件循环。
     Q_ASSERT(QThread::currentThread() != m_ipc_thread);
+    // GUI 线程绝不应阻塞等插件 IPC(图形请求已全部异步化)。仍被调用说明
+    // 有新的 GUI 调用方误用了同步路径:告警(debug 下断言)以便尽早发现。
+    if (on_gui_thread()) {
+        qWarning("PluginManager: wait_response called on the GUI thread "
+                 "(blocking plugin IPC on GUI is not allowed; use the async API)");
+        Q_ASSERT_X(false, "PluginManager::wait_response",
+                   "blocking plugin IPC on the GUI thread");
+    }
     QDeadlineTimer deadline(timeout_ms);
     QMutexLocker lock(&rt->ipc_mutex);
     while (!rt->responses.contains(seq) && !rt->retired.load() &&
@@ -472,6 +524,7 @@ bool PluginManager::parse_via_plugin(const QString& protocol_id,
         if (rt->disabled.exchange(true)) return false;
         rt->ready = false;
         wake_waiters(rt);   // 同插件其他等待者立即返回
+        fail_async(rt);     // 同插件在途异步图形请求排队失败回调
         const QString reason = r.reject_reason;
         QMetaObject::invokeMethod(this, [this, rt, protocol_id, reason]() {
             if (rt->retired.load()) return;
@@ -508,6 +561,7 @@ void PluginManager::disable_plugin(const QString& plugin_id,
     rt->disable_reason = reason;
     rt->ready = false;
     wake_waiters(rt);   // 等待中的请求立即失败返回,不必等满超时
+    fail_async(rt);     // 在途异步图形请求排队失败回调(不在本调用内重入回调)
     unregister_parser(rt->manifest.protocol_id);
     emit plugin_status_changed(plugin_id, QStringLiteral("disabled: ") + reason);
 }
@@ -536,65 +590,155 @@ void PluginManager::checkHeartbeats() {
     }
 }
 
-// ---- 图形(Phase3) ----
-
-namespace {
-constexpr int kGraphicsTimeoutMs = 5000;
-} // namespace
+// ---- 图形(Phase3):GUI 线程异步请求 ----
 
 bool PluginManager::has_graphics(const QString& protocol_id) const {
     const PluginRuntime* rt = find_runtime(protocol_id);
     return rt && rt->manifest.graphics;
 }
 
-QImage PluginManager::request_render(const QString& protocol_id,
-                                     int w, int h) {
-    PluginRuntime* rt = find_runtime(protocol_id);
-    if (!rt) return QImage();
-    if (!rt->ready || rt->disabled || !rt->connected.load()) return QImage();
-    if (!rt->manifest.graphics) return QImage();
-
-    const quint64 seq = begin_request(rt);
-    QByteArray payload;
-    QDataStream o(&payload, QIODevice::WriteOnly);
-    o.setVersion(plugin_ipc::kStreamVersion);
-    o << seq << w << h;
-    post_message(rt, static_cast<quint8>(plugin_ipc::MsgType::RenderRequest),
-                 payload);
-
-    QByteArray fr;
-    if (!wait_response(rt, seq, kGraphicsTimeoutMs, &fr)) return QImage();
-    QDataStream ds(fr);
-    ds.setVersion(plugin_ipc::kStreamVersion);
-    quint8 t = 0; quint64 rseq = 0; bool rok = false;
-    QImage img;
-    ds >> t >> rseq >> rok >> img;
-    return rok ? img : QImage();
+quint64 PluginManager::start_async(PluginRuntime* rt, PluginAsyncRequest::Kind kind,
+                                   QObject* context,
+                                   std::function<void(const PluginAsyncResult&)> cb,
+                                   const std::function<QByteArray(quint64)>& make_payload,
+                                   quint8 msg_type) {
+    if (!rt->ready || rt->disabled || rt->retired.load() || !rt->connected.load())
+        return 0;
+    if (!rt->manifest.graphics) return 0;
+    const quint64 seq = ++rt->seq;
+    const bool cb_registered = bool(cb);
+    if (cb) {
+        PluginAsyncRequest req;
+        req.kind = kind;
+        req.ctx = context;
+        req.cb = std::move(cb);
+        req.deadline_ms = steady_ms() + kGraphicsTimeoutMs;
+        QMutexLocker lock(&rt->ipc_mutex);
+        // 在锁内复查:断线/停用方先置标志再取锁 fail_async,二者必有其一看到对方,
+        // 登记项不会成为孤儿(兜底还有超时扫描)
+        if (!rt->connected.load() || rt->disabled.load() || rt->retired.load())
+            return 0;
+        rt->async_reqs.insert(seq, std::move(req));
+    }
+    post_message(rt, msg_type, make_payload(seq));
+    if (cb_registered && !m_async_timer.isActive()) m_async_timer.start();   // 超时扫描
+    return seq;
 }
 
-bool PluginManager::send_graphics_event(const QString& protocol_id,
-                                        const GraphicsEvent& e) {
+quint64 PluginManager::request_render_async(const QString& protocol_id, int w, int h,
+                                            QObject* context, RenderCallback cb) {
+    Q_ASSERT_X(!QCoreApplication::instance() || QThread::currentThread() == thread(),
+               "PluginManager::request_render_async", "must be called on the GUI thread");
+    if (!context || !cb) return 0;
     PluginRuntime* rt = find_runtime(protocol_id);
-    if (!rt) return false;
-    if (!rt->ready || rt->disabled || !rt->connected.load()) return false;
-    if (!rt->manifest.graphics) return false;
+    if (!rt) return 0;
+    auto seq_holder = std::make_shared<quint64>(0);
+    const quint64 seq = start_async(
+        rt, PluginAsyncRequest::Render, context,
+        [cb = std::move(cb), seq_holder](const PluginAsyncResult& r) {
+            cb(*seq_holder, r.ok, r.image);
+        },
+        [w, h](quint64 s) {
+            QByteArray payload;
+            QDataStream o(&payload, QIODevice::WriteOnly);
+            o.setVersion(plugin_ipc::kStreamVersion);
+            o << s << w << h;
+            return payload;
+        },
+        static_cast<quint8>(plugin_ipc::MsgType::RenderRequest));
+    *seq_holder = seq;   // 回调总是排队执行,此时 seq 已写入
+    return seq;
+}
 
-    const quint64 seq = begin_request(rt);
-    QByteArray payload;
-    QDataStream o(&payload, QIODevice::WriteOnly);
-    o.setVersion(plugin_ipc::kStreamVersion);
-    o << seq << e;
-    post_message(rt,
-                 static_cast<quint8>(plugin_ipc::MsgType::GraphicsEventMsg),
-                 payload);
+quint64 PluginManager::send_graphics_event_async(const QString& protocol_id,
+                                                 const GraphicsEvent& e,
+                                                 QObject* context, EventCallback cb) {
+    Q_ASSERT_X(!QCoreApplication::instance() || QThread::currentThread() == thread(),
+               "PluginManager::send_graphics_event_async", "must be called on the GUI thread");
+    if (cb && !context) return 0;
+    PluginRuntime* rt = find_runtime(protocol_id);
+    if (!rt) return 0;
+    auto seq_holder = std::make_shared<quint64>(0);
+    std::function<void(const PluginAsyncResult&)> inner;
+    if (cb) {
+        inner = [cb = std::move(cb), seq_holder](const PluginAsyncResult& r) {
+            cb(*seq_holder, r.ok, r.needs_redraw);
+        };
+    }
+    const quint64 seq = start_async(
+        rt, PluginAsyncRequest::Event, context, std::move(inner),
+        [e](quint64 s) {
+            QByteArray payload;
+            QDataStream o(&payload, QIODevice::WriteOnly);
+            o.setVersion(plugin_ipc::kStreamVersion);
+            o << s << e;
+            return payload;
+        },
+        static_cast<quint8>(plugin_ipc::MsgType::GraphicsEventMsg));
+    *seq_holder = seq;
+    return seq;
+}
 
-    QByteArray fr;
-    if (!wait_response(rt, seq, kGraphicsTimeoutMs, &fr)) return false;
-    QDataStream ds(fr);
-    ds.setVersion(plugin_ipc::kStreamVersion);
-    quint8 t = 0; quint64 rseq = 0; bool redraw = false;
-    ds >> t >> rseq >> redraw;
-    return redraw;
+void PluginManager::deliver_async(PluginAsyncRequest req, const PluginAsyncResult& res) {
+    // 任意线程 → 排队到本对象(GUI 线程)。上下文只在 GUI 线程解引用:
+    // 已销毁则不回调。管理器析构时未执行的排队调用随之丢弃。
+    QMetaObject::invokeMethod(this, [req = std::move(req), res]() {
+        if (req.ctx.isNull() || !req.cb) return;
+        req.cb(res);
+    }, Qt::QueuedConnection);
+}
+
+void PluginManager::fail_async(PluginRuntime* rt) {
+    QHash<quint64, PluginAsyncRequest> taken;
+    {
+        QMutexLocker lock(&rt->ipc_mutex);
+        taken.swap(rt->async_reqs);
+    }
+    for (auto it = taken.begin(); it != taken.end(); ++it)
+        deliver_async(std::move(it.value()), PluginAsyncResult{});
+}
+
+int PluginManager::pending_async_requests() const {
+    QList<PluginRuntime*> rts;
+    {
+        QReadLocker rl(&m_plugins_lock);
+        rts = m_plugins.values();
+    }
+    int n = 0;
+    for (PluginRuntime* rt : rts) {
+        QMutexLocker lock(&rt->ipc_mutex);
+        n += rt->async_reqs.size();
+    }
+    return n;
+}
+
+void PluginManager::sweep_async_timeouts() {
+    // GUI 线程:过期登记项从表中摘除(迟到响应随后在 IPC 线程被丢弃),
+    // 以失败排队回调。只持锁做摘除,不在锁内回调。
+    const qint64 now = steady_ms();
+    QList<PluginRuntime*> rts;
+    {
+        QReadLocker rl(&m_plugins_lock);
+        rts = m_plugins.values();
+    }
+    int remaining = 0;
+    for (PluginRuntime* rt : rts) {
+        QList<PluginAsyncRequest> expired;
+        {
+            QMutexLocker lock(&rt->ipc_mutex);
+            for (auto it = rt->async_reqs.begin(); it != rt->async_reqs.end();) {
+                if (it.value().deadline_ms <= now) {
+                    expired.append(std::move(it.value()));
+                    it = rt->async_reqs.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            remaining += rt->async_reqs.size();
+        }
+        for (PluginAsyncRequest& r : expired) deliver_async(std::move(r), PluginAsyncResult{});
+    }
+    if (remaining == 0) m_async_timer.stop();
 }
 
 void PluginManager::register_graphics_view(const QString& protocol_id,
