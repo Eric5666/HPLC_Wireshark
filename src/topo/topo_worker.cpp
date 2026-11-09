@@ -176,7 +176,7 @@ bool TopoReplayWorker::insert_frame(const TopoFrameInput& frame) {
 }
 
 bool TopoReplayWorker::visit_frames(qint64 after_frame, qint64 through_frame,
-                                    const std::function<void(const TopoFrameInput&)>& visitor) {
+                                    const std::function<bool(const TopoFrameInput&)>& visitor) {
     SqliteDb* db = static_cast<SqliteDb*>(m_db);
     if (!db || m_store_failed) return false;
     SqliteStmt* stmt = nullptr;
@@ -200,7 +200,10 @@ bool TopoReplayWorker::visit_frames(qint64 after_frame, qint64 through_frame,
             report_store_error(QStringLiteral("Corrupt topology frame in replay store"));
             return false;
         }
-        visitor(frame);
+        if (!visitor(frame)) {
+            sqlite3_finalize(stmt);
+            return false;
+        }
     }
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) {
@@ -210,9 +213,9 @@ bool TopoReplayWorker::visit_frames(qint64 after_frame, qint64 through_frame,
     return true;
 }
 
-void TopoReplayWorker::apply_frame(const TopoFrameInput& f, TopoStateMap& states,
+bool TopoReplayWorker::apply_frame(const TopoFrameInput& f, TopoStateMap& states,
                                    QSet<quint32>* changed, bool write_anomalies) {
-    if (f.net_id == 0) return;
+    if (f.net_id == 0) return true;
     bool touched = false;
     auto mark = [&] { touched = true; };
     for (const TopoEvent& e : f.events) {
@@ -256,8 +259,9 @@ void TopoReplayWorker::apply_frame(const TopoFrameInput& f, TopoStateMap& states
     if (touched && changed) changed->insert(f.net_id);
     if (touched && write_anomalies) {
         auto state = states.find(f.net_id);
-        if (state != states.end()) persist_anomalies(f.net_id, state.value(), f.frame_index);
+        if (state != states.end() && !persist_anomalies(f.net_id, state.value(), f.frame_index)) return false;
     }
+    return true;
 }
 
 bool TopoReplayWorker::persist_anomalies(quint32 nid, TopoState& state, qint64 frame_index) {
@@ -353,25 +357,50 @@ void TopoReplayWorker::submit_frame(const TopoFrameInput& frame) {
 void TopoReplayWorker::rebuild_live_from(qint64 frame_index) {
     Q_UNUSED(frame_index);
     SqliteDb* db = static_cast<SqliteDb*>(m_db);
-    if (!db || sqlite3_exec(db, "DELETE FROM topo_anomalies", nullptr, nullptr, nullptr) != SQLITE_OK) {
-        report_sqlite_error(QStringLiteral("reset anomaly index before replay"));
+    if (!db || m_store_failed) return;
+
+    // The derived anomaly index is rebuilt from the authoritative ordered frame log.
+    // Keep the previous complete index visible if reading or inserting any row fails.
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        report_sqlite_error(QStringLiteral("begin topology replay rebuild"));
         return;
     }
-    // A late frame can change anomaly identity and merged counts. Rebuild the derived
-    // anomaly index and live topology from the authoritative ordered frame log.
+    if (sqlite3_exec(db, "DELETE FROM topo_anomalies", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        const QString detail = QString::fromUtf8(sqlite3_errmsg(db));
+        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+        report_store_error(QStringLiteral("Topology SQLite reset anomaly index before replay failed: %1").arg(detail));
+        return;
+    }
+
     TopoStateMap rebuilt;
     QMap<qint64, TopoStateMap> rebuilt_checkpoints;
     qint64 last_frame = -1;
     const bool read_ok = visit_frames(-1, -1, [&](const TopoFrameInput& f) {
-        apply_frame(f, rebuilt, nullptr, true);
+        if (!apply_frame(f, rebuilt, nullptr, true)) return false;
         last_frame = qMax(last_frame, f.frame_index);
         if (f.frame_index > 0 && f.frame_index % m_checkpoint_interval == 0) {
             rebuilt_checkpoints.insert(f.frame_index, checkpoint_state(rebuilt));
             while (rebuilt_checkpoints.size() > m_max_checkpoints)
                 rebuilt_checkpoints.erase(rebuilt_checkpoints.begin());
         }
+        return true;
     });
-    if (!read_ok) return;
+    if (!read_ok || m_store_failed) {
+        // SQLite error reporting may set m_store_failed, but rollback must still run
+        // directly on the open connection to preserve the old materialized index.
+        if (sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr) != SQLITE_OK) {
+            const QString detail = QString::fromUtf8(sqlite3_errmsg(db));
+            report_store_error(QStringLiteral("Topology SQLite rollback after replay failure failed: %1").arg(detail));
+        }
+        return;
+    }
+    if (sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        const QString detail = QString::fromUtf8(sqlite3_errmsg(db));
+        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+        report_store_error(QStringLiteral("Topology SQLite commit replay rebuild failed: %1").arg(detail));
+        return;
+    }
+
     m_live_states = std::move(rebuilt);
     m_checkpoints = std::move(rebuilt_checkpoints);
     m_last_applied_frame = last_frame;
@@ -389,7 +418,7 @@ bool TopoReplayWorker::state_at(qint64 target_frame, TopoStateMap& states) {
         states = cp.value();
     }
     return visit_frames(base_frame, target_frame,
-                        [&](const TopoFrameInput& f) { apply_frame(f, states); });
+                        [&](const TopoFrameInput& f) { return apply_frame(f, states); });
 }
 
 void TopoReplayWorker::publish_live_snapshot() { emit live_states_reset(m_live_states); }

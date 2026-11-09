@@ -7,6 +7,8 @@
 #include <QEventLoop>
 #include <QThread>
 #include <QTimer>
+#include <QTemporaryDir>
+#include <sqlite3.h>
 #include <atomic>
 #include <algorithm>
 #include <cstdio>
@@ -424,6 +426,131 @@ int main(int argc, char** argv) {
     CHECK("late-frame replay rebuild preserves the same anomaly aggregate",
           evicted_anomaly_aggregate_preserved_after_replay
           && evicted_anomaly_aggregate_values_latest_after_replay);
+
+    bool rebuild_failure_triggered = false;
+    bool rebuild_rollback_preserved_old_index = false;
+    bool rebuild_test_timed_out = false;
+    {
+        QTemporaryDir db_dir;
+        const QString db_path = db_dir.filePath(QStringLiteral("rebuild-rollback.sqlite3"));
+        QThread rebuild_thread;
+        auto* rebuild_worker = new TopoReplayWorker(db_path, 2, 4);
+        rebuild_worker->moveToThread(&rebuild_thread);
+        QObject::connect(&rebuild_thread, &QThread::started,
+                         rebuild_worker, &TopoReplayWorker::initialize);
+        QEventLoop rebuild_loop;
+        QTimer rebuild_timeout;
+        rebuild_timeout.setSingleShot(true);
+        QObject::connect(&rebuild_timeout, &QTimer::timeout, &rebuild_loop, [&] {
+            rebuild_test_timed_out = true;
+            rebuild_loop.quit();
+        });
+        bool rebuild_store_ready = false;
+        QString rebuild_db_path;
+        QObject::connect(rebuild_worker, &TopoReplayWorker::storage_ready, &app,
+            [&](const QString& path) {
+                rebuild_store_ready = true;
+                rebuild_db_path = path;
+                QMetaObject::invokeMethod(rebuild_worker, [rebuild_worker] {
+                    rebuild_worker->submit_frame(association_frame_for(1, 5, 0x5000));
+                    rebuild_worker->submit_frame(association_frame_for(2, 5, 0x5001));
+                    rebuild_worker->submit_frame(association_frame_for(3, 6, 0x6000));
+                    rebuild_worker->submit_frame(association_frame_for(4, 6, 0x6001));
+                    rebuild_worker->request_anomaly_page(9101, kNid, 0, 10);
+                }, Qt::QueuedConnection);
+            }, Qt::QueuedConnection);
+        QObject::connect(rebuild_worker, &TopoReplayWorker::anomaly_page_ready, &app,
+            [&](const TopoAnomalyPage& page) {
+                if (page.request_id != 9101) return;
+                const auto tei5 = std::find_if(page.items.cbegin(), page.items.cend(), [](const TopoAnomaly& a) {
+                    return a.kind == TopoAnomalyKind::TeiMultipleMac && a.tei == 5;
+                });
+                const auto tei6 = std::find_if(page.items.cbegin(), page.items.cend(), [](const TopoAnomaly& a) {
+                    return a.kind == TopoAnomalyKind::TeiMultipleMac && a.tei == 6;
+                });
+                if (page.total != 2 || tei5 == page.items.cend() || tei6 == page.items.cend()) {
+                    ++failures;
+                    std::printf("FAIL transaction rollback fixture has two baseline anomaly rows\n");
+                    rebuild_loop.quit();
+                    return;
+                }
+
+                sqlite3* db = nullptr;
+                if (sqlite3_open16(rebuild_db_path.utf16(), &db) != SQLITE_OK) {
+                    if (db) sqlite3_close(db);
+                    ++failures;
+                    std::printf("FAIL open topology DB to install replay failure trigger\n");
+                    rebuild_loop.quit();
+                    return;
+                }
+                sqlite3_busy_timeout(db, 2000);
+                char* error = nullptr;
+                const int trigger_rc = sqlite3_exec(db,
+                    "CREATE TRIGGER fail_rebuild_tei6 BEFORE INSERT ON topo_anomalies "
+                    "WHEN NEW.tei=6 BEGIN SELECT RAISE(ABORT,'injected replay rebuild failure'); END;",
+                    nullptr, nullptr, &error);
+                sqlite3_free(error);
+                sqlite3_close(db);
+                if (trigger_rc != SQLITE_OK) {
+                    ++failures;
+                    std::printf("FAIL install topology replay failure trigger\n");
+                    rebuild_loop.quit();
+                    return;
+                }
+
+                // A duplicate/out-of-order frame invokes full replay. TEI 5 is
+                // inserted first during rebuild; TEI 6 then fails, so rollback
+                // must discard partial writes and restore both baseline rows.
+                QMetaObject::invokeMethod(rebuild_worker, [rebuild_worker] {
+                    rebuild_worker->submit_frame(ordinary_frame(3));
+                }, Qt::QueuedConnection);
+            });
+        QObject::connect(rebuild_worker, &TopoReplayWorker::worker_error, &app,
+            [&](const QString& message) {
+                rebuild_failure_triggered = message.contains(QStringLiteral("persist topology anomalies"));
+                if (!rebuild_failure_triggered) {
+                    ++failures;
+                    std::fprintf(stderr, "unexpected rebuild test worker error: %s\n", qPrintable(message));
+                    rebuild_loop.quit();
+                    return;
+                }
+                sqlite3* db = nullptr;
+                sqlite3_stmt* stmt = nullptr;
+                if (sqlite3_open16(rebuild_db_path.utf16(), &db) == SQLITE_OK
+                    && sqlite3_prepare_v2(db,
+                        "SELECT COUNT(*),COALESCE(SUM(trips),0),MIN(first_frame),MAX(last_frame) "
+                        "FROM topo_anomalies WHERE nid=?1", -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_int64(stmt, 1, kNid);
+                    if (sqlite3_step(stmt) == SQLITE_ROW) {
+                        rebuild_rollback_preserved_old_index = sqlite3_column_int(stmt, 0) == 2
+                            && sqlite3_column_int(stmt, 1) == 2
+                            && sqlite3_column_int64(stmt, 2) == 2
+                            && sqlite3_column_int64(stmt, 3) == 4;
+                    }
+                }
+                if (stmt) sqlite3_finalize(stmt);
+                if (db) sqlite3_close(db);
+                rebuild_loop.quit();
+            }, Qt::QueuedConnection);
+
+        rebuild_thread.start();
+        rebuild_timeout.start(10000);
+        rebuild_loop.exec();
+        if (rebuild_store_ready) {
+            QMetaObject::invokeMethod(rebuild_worker, "shutdown", Qt::BlockingQueuedConnection);
+            rebuild_thread.quit();
+            rebuild_thread.wait();
+            delete rebuild_worker;
+        } else {
+            rebuild_thread.quit();
+            rebuild_thread.wait();
+            delete rebuild_worker;
+        }
+    }
+    CHECK("failed replay rebuild is injected after a partial anomaly-index insert",
+          rebuild_failure_triggered && !rebuild_test_timed_out);
+    CHECK("replay rebuild rollback preserves the previous complete SQLite anomaly index",
+          rebuild_rollback_preserved_old_index);
 
     TopoState bounded_history;
     for (int i = 1; i <= 5000; ++i) {

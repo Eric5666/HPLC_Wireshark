@@ -83,9 +83,9 @@ private:
     bool open_store();
     bool insert_frame(const TopoFrameInput& frame);
     bool visit_frames(qint64 after_frame, qint64 through_frame,
-                      const std::function<void(const TopoFrameInput&)>& visitor);
+                      const std::function<bool(const TopoFrameInput&)>& visitor);
     bool clear_store();
-    void apply_frame(const TopoFrameInput& frame, TopoStateMap& states,
+    bool apply_frame(const TopoFrameInput& frame, TopoStateMap& states,
                      QSet<quint32>* changed_nids = nullptr, bool persist_anomalies = false);
     bool persist_anomalies(quint32 nid, TopoState& state, qint64 frame_index);
     void maybe_checkpoint(qint64 frame_index);
