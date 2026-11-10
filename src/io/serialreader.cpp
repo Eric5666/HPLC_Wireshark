@@ -176,6 +176,18 @@ void ReaderWorker::on_serial_ready_read() {
     try_extract_frame();
 }
 
+int ReaderWorker::last_bcd_tag_offset(const QByteArray& buf) {
+    // 先按"8 字节都是 BCD 数字"快筛(随机数据命中率约 5e-4),命中再做完整日期校验
+    const auto* p = reinterpret_cast<const uchar*>(buf.constData());
+    for (qsizetype k = buf.size() - 8; k >= 0; --k) {
+        bool digits = true;
+        for (int j = 0; j < 8 && digits; ++j)
+            digits = (p[k + j] >> 4) <= 9 && (p[k + j] & 0x0F) <= 9;
+        if (digits && bcd_ms_of(buf.mid(k, 8)) >= 0) return int(k);
+    }
+    return -1;
+}
+
 bool ReaderWorker::try_consume_bcd_tag() {
     // 仅文件回放有段间 8B 标注;合法 BCD 不含 0x3C/0x3D/0x3E,不会误吃帧哨兵
     if (m_cfg.mode != ReaderMode::FilePlayback || m_in_buf.size() < 8)
@@ -207,6 +219,8 @@ void ReaderWorker::emit_drop_frame(const QByteArray& wire, const QString& reason
 
 void ReaderWorker::try_extract_frame() {
     while (!m_in_buf.isEmpty()) {
+        // 每帧检查中止:大块回放时 stop() 不必等整块切完
+        if (m_abort.load()) return;
         if (!m_get3c) {
             // 段间 8B 标注可能独占本段缓冲(0x3C 在下一次 1024B read)
             if (try_consume_bcd_tag())
@@ -217,9 +231,21 @@ void ReaderWorker::try_extract_frame() {
                 // 文件块末尾可能是下一段 BCD 的前 1~7B,留待下次 read 补齐。
                 if (m_cfg.mode == ReaderMode::FilePlayback && m_in_buf.size() < 8)
                     return;
-                // 无 0x3C:剔除 1 字节,回到循环顶重新匹配 8B BCD(滑窗对齐帧头)
-                m_in_buf.remove(0, 1);
-                continue;
+                // 无 0x3C:整段一次性丢弃(旧做法每次丢 1 字节再全量 indexOf,O(n²))。
+                // 串口:没有 BCD 标注,全部丢弃。回放:与逐字节滑窗等价——取缓冲内
+                // 最后一个完整 8B 标注(多个标注依次生效时最后一个胜出),否则只保留
+                // 末尾 7 字节(可能是下一段标注的前缀)。
+                if (m_cfg.mode != ReaderMode::FilePlayback) {
+                    m_in_buf.clear();
+                    return;
+                }
+                const int tag = last_bcd_tag_offset(m_in_buf);
+                if (tag >= 0) {
+                    m_in_buf.remove(0, tag);   // 循环顶 try_consume_bcd_tag 吃掉它
+                    continue;
+                }
+                m_in_buf.remove(0, m_in_buf.size() - 7);
+                return;
             }
             if (idx > 0) {
                 // 0x3C 前紧贴完整 8B 标注(标注前允许有噪声)

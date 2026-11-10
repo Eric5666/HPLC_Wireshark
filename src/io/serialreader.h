@@ -79,6 +79,8 @@ private:
     qint64 bcd_ms_of(const QByteArray& bcd8);
     /// @brief 文件回放:缓冲开头若为完整 8B BCD 段标注则消费并重置时间轴
     bool try_consume_bcd_tag();
+    /// @brief 缓冲内最后一个合法 8B BCD 标注的偏移;无则 -1(O(n),无 0x3C 时整段丢弃用)
+    int last_bcd_tag_offset(const QByteArray& buf);
 
     QSerialPort* m_serial;
     QFile*       m_file;
