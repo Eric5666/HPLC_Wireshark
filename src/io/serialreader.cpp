@@ -3,6 +3,7 @@
 #include "serialreader.h"
 #include "i18n.h"
 #include "playbackwriter.h"
+#include "parse_anomaly.h"
 #include "QsLog.h"
 #include <QSerialPortInfo>
 #include <QRegularExpression>
@@ -341,11 +342,14 @@ void ReaderWorker::try_extract_frame() {
         wire.reserve(frame.size() + 2);
         wire.append(char(0x3C)).append(frame).append(char(0x3E));
 
-        // 反转义 0x3D
+        // 反转义 0x3D(方案 A,用户 2026-11 裁决):非法/悬空 0x3D 当普通数据,不再 DROP;
+        // 仅 warn 一条诊断(现场模块帧尾附带 ASCII 调试日志时不对 '=' 转义)。
         QByteArray unesc;
-        if (!playback::unescape_frame_data(frame, unesc)) {
-            emit_drop_frame(wire, trl::L("DROP:非法或悬空的 0x3D 转义"), m_frame_rx_us);
-            continue;
+        int lenient_fixes = 0;
+        playback::unescape_frame_data(frame, unesc, &lenient_fixes);
+        if (lenient_fixes > 0) {
+            pa::warn(QStringLiteral("serial:unescape_lenient"),
+                     trl::L("反转义宽松处理 %1 处非法 0x3D（当普通数据）").arg(lenient_fixes));
         }
 
         // 旧格式兼容:帧体 data 开头带 8B 逐帧 BCD 标签(无 raw_wire 时
@@ -640,7 +644,8 @@ struct I18nRegSerialReader {
         trl::register_en("文件回放结束", "File replay ended");
         trl::register_en("DROP:双 0x3C 成帧垃圾", "DROP: framing garbage between two 0x3C");
         trl::register_en("DROP:帧长小于 FCH(16B)", "DROP: frame shorter than FCH (16B)");
-        trl::register_en("DROP:非法或悬空的 0x3D 转义", "DROP: invalid or dangling 0x3D escape");
+        trl::register_en("反转义宽松处理 %1 处非法 0x3D（当普通数据）",
+                         "Unescape Lenient: %1 invalid 0x3D treated as plain data");
         trl::register_en("DROP:未闭合帧超过最大长度", "DROP: unterminated frame exceeds maximum size");
         trl::register_en("DROP:帧超过最大长度", "DROP: frame exceeds maximum size");
     }
