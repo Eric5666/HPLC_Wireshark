@@ -12,8 +12,9 @@
 4. （Unix）解析途中 SIGKILL lua_echo 的 host：在途请求须 < 1 s 返回，GUI 线程收到 `disabled: ...` 状态；
 5. `stop_all()` 之后的迟到请求必须立即失败返回；随后重新 `loadAll` 可再次解析（插件市场更新流程）；
 6. 走 `aboutToQuit` 正常退出路径（停插件、在 IPC 线程关 socket、停 IPC 线程）。
-7. （异步图形 API，Unix）另生成 `lua_gfx_nofont`（lua_graphics 去掉画字，宿主是 QCoreApplication
-   画不了字），用真实 `PluginGraphicsView` 做异步渲染往返：
+7. （异步图形 API，Unix）原版 `lua_graphics`（`set_font`/`draw_text`）经真实 host 渲染出图，
+   host 不崩、插件仍启用（host 为 QGuiApplication + offscreen 平台）；
+   另生成 `lua_gfx_nofont`（lua_graphics 去掉画字、换协议 id），用真实 `PluginGraphicsView` 做异步渲染往返：
    - host `SIGSTOP` 2 s：GUI 每 5 ms 发图形事件、每 60 ms 要求重绘，GUI 1 ms 定时器最大迟到须 < 20 ms；
      旧图保持；卡死期间最多 1 个渲染在途（合并），恢复后补发 1 次并应用；全部事件 ack；
    - host `SIGSTOP` 5.6 s：异步请求 5 s 超时以失败回调（不早于 4.9 s），GUI 不卡；

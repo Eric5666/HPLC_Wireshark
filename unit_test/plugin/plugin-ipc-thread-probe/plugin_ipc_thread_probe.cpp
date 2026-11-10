@@ -252,8 +252,9 @@ static void print_stats(const char* tag, const LatencyStats& s) {
                 s.gfx_ok, s.gfx_total, s.max_late_ms, s.p99_late_ms, s.p50_late_ms, s.ticks, s.gui_cpu_ms);
 }
 
-/// 生成 lua_gfx_nofont:lua_graphics 去掉 set_font/draw_text(宿主是 QCoreApplication,
-/// 画字会崩溃 —— 既有问题),换协议 id,用于真实渲染往返
+/// 生成 lua_gfx_nofont:lua_graphics 去掉 set_font/draw_text,换协议 id,用于 SIGSTOP/合并等
+/// 渲染往返用例(历史原因:宿主曾是 QCoreApplication,画字会崩;现已改 QGuiApplication,
+/// 画字由 "text render" 用例单独覆盖)
 static bool make_nofont_plugin(const QString& src, const QString& dst) {
     if (!copy_dir(src, dst)) return false;
     auto patch = [](const QString& path, const std::function<QByteArray(QByteArray)>& fn) {
@@ -360,8 +361,7 @@ int main(int argc, char** argv) {
     check("lua-echo still enabled", pm.is_plugin_protocol(echo));
 
     // ② 同一连接:worker 解析 + GUI 线程反复发图形事件(MousePress → 脚本返回 true)
-    //   注:不用 request_render —— bplc-plugin-host 以 QCoreApplication 运行,脚本画文字
-    //   需要 QGuiApplication,宿主会崩溃(既有问题,与 H6 无关,见修复说明)
+    //   注:不用 request_render(渲染另见 ④;本段只测事件往返)
     const int n2 = 3000;
     t.restart();
 #ifdef BPLC_PLUGIN_ASYNC_GRAPHICS
@@ -435,6 +435,18 @@ bench:
                     view.image().width(), view.image().height());
         check("async render: view received image", view.renders_applied() >= 1 &&
                   view.image().size() == QSize(320, 240));
+        // 画文字:原版 lua_graphics(set_font/draw_text)经真实 host 渲染。
+        // host 改为 QGuiApplication(offscreen)前,这里 host 进程崩溃、无图像
+        {
+            PluginGraphicsView tview(&pm, gfx);
+            tview.resize(320, 240);
+            tview.show();
+            spin_until([&] { return tview.renders_applied() >= 1; }, 5000);
+            check("text render: lua_graphics with set_font/draw_text rendered by host",
+                  tview.renders_applied() >= 1 && tview.image().size() == QSize(320, 240));
+            check("text render: host still running, plugin still enabled",
+                  pm.is_plugin_protocol(gfx) && host_pid(QStringLiteral("lua_graphics")) > 0);
+        }
         // 合并:无卡顿时,连续 5 次重绘要求(间隔 > 50 ms 节流)各发 1 次
         const qint64 hp = host_pid(QStringLiteral("lua_gfx_nofont"));
         check("found lua_gfx_nofont host pid", hp > 0);
