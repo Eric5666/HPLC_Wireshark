@@ -122,6 +122,8 @@ MainWindow::MainWindow(QWidget* parent)
     }, Qt::QueuedConnection);
     connect(m_topo_controller, &TopoController::history_ready,
             this, &MainWindow::on_topo_history_ready, Qt::QueuedConnection);
+    connect(m_topo_controller, &TopoController::history_failed,
+            this, &MainWindow::on_topo_history_failed, Qt::QueuedConnection);
     connect(m_topo_controller, &TopoController::worker_error, this, [this](const QString& message) {
         qWarning().noquote() << message;
         if (m_status_left) m_status_left->setToolTip(message);
@@ -1112,6 +1114,18 @@ void MainWindow::on_topo_history_ready(quint64 request_id, qint64 target_frame, 
     }
     if (!m_topo_hist_active) return;
     m_topo_window->show_history(states, active, target_frame, target_ms);
+}
+
+void MainWindow::on_topo_history_failed(quint64 request_id, qint64 target_frame, qint64 target_ms,
+                                        bool active, const QString& message) {
+    if (request_id != m_topo_request_id || !m_topo_window) return;
+    if (target_frame != m_topo_hist_frame || target_ms != m_topo_hist_ms) return;
+    if (!active || !m_topo_hist_active) return;
+    on_topo_request_live();
+    if (m_status_left) {
+        m_status_left->setToolTip(message);
+        m_status_left->setText(trl::L("历史拓扑回放失败: ") + message);
+    }
 }
 
 void MainWindow::on_topo_request_live() {
