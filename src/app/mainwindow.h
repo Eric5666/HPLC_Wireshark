@@ -8,6 +8,7 @@
 #include <QByteArray>
 #include <QHash>
 #include <QList>
+#include <QMutex>
 #include <QVector>
 #include <atomic>
 #include "serialreader.h"

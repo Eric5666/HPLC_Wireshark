@@ -15,7 +15,6 @@
 #include <atomic>
 #include <memory>
 
-#include "ringbuffer.h"
 #include "bplcframe.h"
 #include "frame_credit.h"
 

@@ -23,10 +23,16 @@ nw2026-ul-probe、nextgen-probe、frame-probe-variant3），
 
 ## 生成脚本
 
-- `build_gw2026_ofdma_tda_sim.py`：生成上面两个 GW 构造帧
-  （输出已改为脚本所在目录）。
-- `build_nw2026_ul_ofdma.py`：生成 NW UL-OFDMA 相关帧
-  （输出已是脚本所在目录相对路径，无需改动）。
+本目录不再保留生成脚本副本，唯一来源为 `wireshark_support_plugins/`（CI 用的那份）：
+
+- `wireshark_support_plugins/build_gw2026_ofdma_tda_sim.py`：生成上面两个 GW 构造帧
+  `gw2026_ofdma_sim.bin`、`gw2026_tda_sim.bin`；
+- `wireshark_support_plugins/build_nw2026_ul_ofdma.py`：生成 NW UL-OFDMA 相关帧
+  （`nw2026_trigger.bin`、`nw2026_ul_ofdma_data.bin`、`nw2026_dl_sack.bin` 及更多变体）。
+
+两个脚本都写到脚本所在目录（`wireshark_support_plugins/`）；重建本目录的帧时把同名
+`.bin` 拷过来。2026-11 核对：上述 5 个文件与本目录已入库的 `.bin` 逐字节相同
+（原先这里的 GW 脚本副本缺 `import os`，已无法运行）。
 
 ## 原运行形式（恢复构建后）
 

@@ -4,7 +4,7 @@
 #   - serialreader.h/.cpp        ReaderWorker + SerialReader(线程化包装)
 #   - rawframeimporter.h/.cpp   裸 hex 文件一次性预读(备用)
 #
-# 依赖:common(bplcframe.h, ringbuffer.h), QtSerialPort
+# 依赖:common(bplcframe.h), QtSerialPort
 
 QT += serialport
 

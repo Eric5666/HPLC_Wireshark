@@ -86,7 +86,7 @@
 | protocol-nw/frame-probe-variant | NW_2021 帧变体探针 | ./build.sh | —（构建失败，无二进制） | 帧 .bin（见 `frames/frame-probe/`） | **构建失败**：与 coord-probe 同因，`main.cpp:68` 读 `MpduInfo.coord_option`，现为 `coord_duration`。原样记录，未改源码 |
 | protocol-nw/frame-probe-variant3 | NW_2021 MSDU 变体探针 | ./build.sh | ./build/probe/nw_msdu_probe \<帧.bin\> | 帧 .bin（见 `frames/frame-probe/`，如 `nw_frame_20261022.bin`） | 构建通过（经 qslog 构建脚本补齐），该帧 present=1，exit 0 |
 | protocol-nw/nw2026-ul-probe | NW_2026 UL-OFDMA 三件套探针（trigger + UL 数据 + SACK） | ./build.sh | ./build/probe/nw2026_ul_probe \<trigger\> \<ul\> \<sack\> | `../../frames/frame-probe/nw2026_trigger.bin`（32B）、`nw2026_ul_ofdma_data.bin`（296B）、`nw2026_dl_sack.bin`（32B） | trigger 与 UL 数据均 accept=1，exit 0 |
-| frames/frame-probe | NW_2021 帧探针 + GW/NW 构造帧生成脚本与输入 | ./build.sh | —（构建失败，无二进制） | 本目录 10 个小 .bin（已入库，见下表注）；生成脚本 `build_gw2026_ofdma_tda_sim.py`、`build_nw2026_ul_ofdma.py` | **构建失败**：与 coord-probe 同因，`main.cpp:67` 读 `MpduInfo.coord_option`，现为 `coord_duration`。原样记录，未改源码。注意：本目录的 .bin 仍是其他用例（gw2026-tree-probe、nw2026-ul-probe、nextgen-probe、frame-probe-variant3）的输入 |
+| frames/frame-probe | NW_2021 帧探针 + GW/NW 构造帧生成脚本与输入 | ./build.sh | —（构建失败，无二进制） | 本目录 10 个小 .bin（已入库，见下表注）；生成脚本见 `wireshark_support_plugins/build_gw2026_ofdma_tda_sim.py`、`build_nw2026_ul_ofdma.py`（本目录副本已删除） | **构建失败**：与 coord-probe 同因，`main.cpp:67` 读 `MpduInfo.coord_option`，现为 `coord_duration`。原样记录，未改源码。注意：本目录的 .bin 仍是其他用例（gw2026-tree-probe、nw2026-ul-probe、nextgen-probe、frame-probe-variant3）的输入 |
 | frames/nextgen-probe | 跨四协议批量跑器：对抓包逐帧跑指定解析器，统计接受/拒绝 | ./build.sh | ./build/probe/nextgen_probe \<nw2021\|nw2026\|gw2022\|gw2026\> \<抓包文件\> [detail] | 0x3C…0x3E 容器格式抓包；本用例无自带输入，可用 `../frame-probe/nw_frame_20261022.bin`（单帧容器） | 该单帧 nw2021：`total=1 accepted=1 sof=1 pb_crc_ok=1`，exit 0 |
 | frames/nextgen-probe-verify | 同上（verify 变体；main.cpp 与 nextgen-probe 相同，.pro 不同） | ./build.sh | ./build/probe/nextgen_probe \<which\> \<抓包文件\> [detail] | 同上 | 以 `topo-route-verify/user_frame_container.bin`（reader 容器格式，非 0x3C 串口格式）运行：`total=0`——输入格式不匹配所致，不是探针失败；二进制本身与 nextgen-probe 同源已验证 |
 | app/mirror-probe | UpdateMirrorResolver 探针：写 config.ini mirror_mode 再解析真实 update.json | ./build.sh | 在 `build/probe/` 目录下运行 `./mirror_probe [auto\|…]`；另有 `build/probe_fb/mirror_probe_fb`（fb 变体，见本用例 README） | 无（联网解析默认 update.json） | 构建通过；实测 `RESOLVED effective=https://raw.githubusercontent.com/aron566/HPLC_Wireshark/main/update.json prefix=(native)`，exit 0。注意：它把 `config.ini` 写到二进制同目录（即忽略的 `build/probe/` 内），不要在用例根目录运行；无网时 30 秒后 TIMEOUT exit 2 |
@@ -172,7 +172,8 @@
   写回旧目录）：`storage/golden/main.cpp` 的输出由绝对旧路径改为
   CWD 相对 `v3_n%1.bin`；`gw_topo_merge_craft.py`、
   `gw-learn-probe/gw_craft.py`、`learn-probe/craft_frames.py`、
-  `build_gw2026_ofdma_tda_sim.py` 的输出改为脚本所在目录。
+  `build_gw2026_ofdma_tda_sim.py` 的输出改为脚本所在目录（frame-probe 下的副本
+  已删除，统一用 `wireshark_support_plugins/` 那份）。
   故意**没改**的两处（输出本身超 1MB，改了就进仓库禁区）：
   `topo-route-verify/extract.py`、`gw-learn-probe/split_gw_capture.py`
   仍指向原位置数据集，见大文件留置清单。
