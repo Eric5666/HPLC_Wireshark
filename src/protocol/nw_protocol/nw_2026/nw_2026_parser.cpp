@@ -526,6 +526,11 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
                 // 高亮:单块级联 = 首块块体起点(整段连续);多块级联跨块不连续 → -1(逐块换算)
                 r.msdu_raw_base = (r.mpdu.pb_num == 1 && !res.blocks.isEmpty())
                                       ? res.blocks.first().body_raw_offset : -1;
+                // 用户 2026-11 裁决:聚合帧里任一级联帧 MSDU CRC32 FAIL 也要降级
+                // (摘要清空 + 只留 CRC 证据节点/其祖先 Cascade 分组),与单帧同口径。
+                // 必须在树建完、cascade/total_len/摘要赋值之后再 gate(否则 fail_evidence
+                // 复制的快照缺 cascade 标志);frame_crc_red 已用递归 msdu_crc_state 标红。
+                r.msdu = msdu_crc_gate(r.msdu);
             } else if (!res.msdu_body.isEmpty()) {
                 r.msdu_body = res.msdu_body;
                 // 表6:单跳帧协议(版本=2)仅无线信道支持;载波信道收到属异常(排查信道/串口错配)

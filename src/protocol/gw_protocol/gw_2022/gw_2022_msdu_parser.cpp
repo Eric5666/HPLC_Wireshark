@@ -2128,7 +2128,9 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
         const int crc_off = head_size + msdu_len;
         // MSDU 帧总长 = 头 + 数据区 + CRC 4B(不含 PB 填充);供整体高亮
         out.total_len = crc_off + 4;
-        if (crc_off + 4 <= body.size()) {
+        // msdu_len<=0:CRC32 遍历 len-4 会 0 次迭代 ⇒ 恒得 0,与全零存储字段"相等"而误报 OK。
+        // 无有效载荷时不产生 CRC 节点(三态 N-A),不得判 OK(用户 2026-11 裁决)。
+        if (msdu_len > 0 && crc_off + 4 <= body.size()) {
             quint32 stored = (quint8)body[crc_off]
                 | ((quint32)(quint8)body[crc_off + 1] << 8)
                 | ((quint32)(quint8)body[crc_off + 2] << 16)
