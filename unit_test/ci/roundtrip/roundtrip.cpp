@@ -430,30 +430,54 @@ void serial_regressions() {
 
 void malformed_frame_regressions() {
     const QByteArray valid = wire(1000);
+    // 用户 2026-11 裁决,方案 A:非法/悬空 0x3D 当普通数据,不再 DROP
+    // (原因与"禁止改回严格"见 docs/unescape_lenient_rationale.md)
     QByteArray invalid_escape = valid;
     invalid_escape[1] = char(0x3D);  // 0x3D 后接 0x00,不是合法补码
     const auto invalid = ReaderWorkerTestAccess::serial_frames(invalid_escape);
-    check(invalid.size() == 1 && !invalid[0].accepted
-              && invalid[0].error_reason.contains(QStringLiteral("0x3D")),
-          "serial framing rejects an invalid 0x3D escape");
+    check(invalid.size() == 1 && invalid[0].accepted,
+          "serial framing tolerates an invalid 0x3D escape (方案 A)");
 
     QByteArray dangling_escape = valid;
     dangling_escape[dangling_escape.size() - 2] = char(0x3D);  // 0x3E 前悬空
     const auto dangling = ReaderWorkerTestAccess::serial_frames(dangling_escape);
-    check(dangling.size() == 1 && !dangling[0].accepted,
-          "serial framing rejects a dangling 0x3D escape");
+    check(dangling.size() == 1 && dangling[0].accepted,
+          "serial framing tolerates a dangling 0x3D escape (方案 A)");
+
     const auto replay_invalid = ReaderWorkerTestAccess::file_frames(invalid_escape);
     const auto replay_dangling = ReaderWorkerTestAccess::file_frames(dangling_escape);
-    check(replay_invalid.size() == 1 && !replay_invalid[0].accepted
-              && replay_dangling.size() == 1 && !replay_dangling[0].accepted,
-          "file replay rejects invalid and dangling 0x3D escapes");
+    check(replay_invalid.size() == 1 && replay_invalid[0].accepted
+              && replay_dangling.size() == 1 && replay_dangling[0].accepted,
+          "file replay tolerates invalid and dangling 0x3D escapes (方案 A)");
 
     const QByteArray short_wire = QByteArray::fromHex("3c3dc33dc33dc33dc33e");
     check(ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(short_wire)).isEmpty(),
           "RawHex checks decoded length before reading timestamp bytes");
-    check(ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(invalid_escape)).isEmpty()
-              && ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(dangling_escape)).isEmpty(),
-          "RawHex rejects invalid and dangling 0x3D escapes");
+    check(!ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(invalid_escape)).isEmpty()
+              && !ReaderWorkerTestAccess::raw_hex_line(playback::hex_line_of(dangling_escape)).isEmpty(),
+          "RawHex tolerates invalid and dangling 0x3D escapes (方案 A)");
+
+    // 护栏 1(G1):合法转义不变 —— 3D C1/C2/C3 仍还原为 3E/3D/3C,宽松计数为 0。
+    {
+        const QByteArray esc = QByteArray::fromHex("3dc13dc23dc3");
+        QByteArray out;
+        int n = -1;
+        check(playback::unescape_frame_data(esc, out, &n)
+                  && n == 0 && out == QByteArray::fromHex("3e3d3c"),
+              "G1 合法转义 3D C1/C2/C3 仍还原为 3E/3D/3C(n==0)");
+    }
+    // 护栏 2(G2):0x3E 定界仍严格 —— 帧体内未转义 0x3E 仍在该处终止帧。
+    // 用 ≥26B 帧体:若把 0x3E 也放宽,整体会被当一帧接受;严格时应在首个 0x3E 切帧
+    // → 前缀过短被 DROP、后续字节保留待重同步。
+    {
+        QByteArray body(30, char(0x41));
+        body[3] = char(0x3E);                        // 帧体第 4 字节 = 未转义 0x3E
+        const QByteArray framed = QByteArray(1, char(0x3C)) + body;
+        int retained = -1;
+        const auto g2 = ReaderWorkerTestAccess::serial_frames(framed, &retained);
+        check(g2.size() == 1 && !g2[0].accepted,
+              "G2 0x3E 定界仍严格(帧体内 0x3E 仍终止帧 ⇒ 前缀过短被 DROP)");
+    }
 
     // 所有短解码长度都在时间链更新前拒绝,不是只保护 [2..5] 的访问。
     for (int n = 0; n < 26; ++n) {
