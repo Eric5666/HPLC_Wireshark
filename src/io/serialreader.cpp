@@ -15,7 +15,7 @@
 ReaderWorker::ReaderWorker(QObject* parent) : QObject(parent),
     m_serial(nullptr), m_file(nullptr),
     m_get3c(false), m_frame_rx_us(0), m_playback_base_ms(-1), m_first_frame(false),
-    m_last_ntb(0), m_last_ft(0), m_running(false), m_abort(false), m_active(false),
+    m_last_ntb(0), m_last_ft(0), m_running(false), m_active(false),
     m_raw_base_ms(-1),
     m_hex_seg_first(false), m_hex_seg_base_ts(0), m_hex_seg_base_us(0),
     m_last_local_ms(0), m_pending_seg_start(false), m_file_size(0), m_last_progress(-1),
@@ -26,18 +26,32 @@ ReaderWorker::~ReaderWorker() {
 }
 
 void ReaderWorker::abort() {
-    m_abort.store(true);
+    m_current_session.store(0);
+}
+
+quint64 ReaderWorker::begin_session() {
+    const quint64 id = m_session_gen.fetch_add(1) + 1;
+    m_current_session.store(id);
+    return id;
 }
 
 void ReaderWorker::start_reading(const ReaderConfig& cfg) {
+    start_session(cfg, begin_session());
+}
+
+void ReaderWorker::start_session(const ReaderConfig& cfg, quint64 session) {
     if (m_running) stop_reading();
+    m_run_session = session;
+    if (aborted()) {        // start 之后已 stop(或又 start 了新会话):不启动
+        emit finished();
+        return;
+    }
     if (m_file) {
         m_file->close();
         delete m_file;
         m_file = nullptr;
     }
     m_cfg = cfg;
-    m_abort.store(false);
     m_active.store(true);   // 采集/回放开始(串口/文件/裸hex 均计入)
     m_in_buf.clear();
     m_get3c = false;
@@ -85,7 +99,7 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
         m_frame_count = 0;
         // 一次性读完整文件(不用 timer,快速回放);每块 1MB,切帧即时 emit
         while (!m_file->atEnd()) {
-            if (m_abort.load()) break;   // 立即响应 stop()(切协议重建等)
+            if (aborted()) break;   // 立即响应 stop()(切协议重建等)
             QByteArray chunk = m_file->read(1024 * 1024);
             if (chunk.isEmpty()) break;
             m_in_buf.append(chunk);
@@ -122,7 +136,7 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
         m_raw_base_ms = -1;   // 未给出时间头 → 首帧用本地时刻作基准,段内按 NTB 差推进
         m_hex_seg_first = true;
         while (!m_file->atEnd()) {
-            if (m_abort.load()) break;   // 立即响应 stop()
+            if (aborted()) break;   // 立即响应 stop()
             QByteArray line = m_file->readLine().trimmed();
             if (line.isEmpty()) continue;
             // 时间头行(首帧时间文本,如 TIME: 2026-09-07 18:43:00.123)
@@ -142,9 +156,10 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
 }
 
 void ReaderWorker::stop_reading() {
+    // 只释放资源,不改会话号:排队中的 stop_reading 晚于新的 start() 执行时,
+    // 不能把新会话取消(取消由 GUI 线程 stop() 直接 abort() 完成)
     m_running = false;
     m_active.store(false);
-    m_abort.store(true);
     if (m_serial)   { m_serial->close(); m_serial->deleteLater(); m_serial = nullptr; }
     if (m_file)     { m_file->close(); m_file->deleteLater(); m_file = nullptr; }
     emit finished();
@@ -190,7 +205,7 @@ int ReaderWorker::last_bcd_tag_offset(const QByteArray& buf) {
 
 bool ReaderWorker::emit_frame(const BplcFrame& frame) {
     // 背压:在途帧已满时在此等待消费者;stop() 置中止标志后 50 ms 内放弃
-    if (m_credit && !m_credit->acquire([this]() { return m_abort.load(); }))
+    if (m_credit && !m_credit->acquire([this]() { return aborted(); }))
         return false;
     emit frame_ready(frame);
     return true;
@@ -228,7 +243,7 @@ void ReaderWorker::emit_drop_frame(const QByteArray& wire, const QString& reason
 void ReaderWorker::try_extract_frame() {
     while (!m_in_buf.isEmpty()) {
         // 每帧检查中止:大块回放时 stop() 不必等整块切完
-        if (m_abort.load()) return;
+        if (aborted()) return;
         if (!m_get3c) {
             // 段间 8B 标注可能独占本段缓冲(0x3C 在下一次 1024B read)
             if (try_consume_bcd_tag())
@@ -630,7 +645,7 @@ SerialReader::SerialReader(QObject* parent) : QObject(parent), m_thread(nullptr)
     m_worker->moveToThread(m_thread);
     connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
 
-    connect(this, &SerialReader::request_start, m_worker, &ReaderWorker::start_reading);
+    connect(this, &SerialReader::request_start, m_worker, &ReaderWorker::start_session);
     connect(this, &SerialReader::request_stop,  m_worker, &ReaderWorker::stop_reading);
 
     connect(m_worker, &ReaderWorker::frame_ready,    this, &SerialReader::on_frame);
@@ -643,14 +658,18 @@ SerialReader::SerialReader(QObject* parent) : QObject(parent), m_thread(nullptr)
 }
 
 SerialReader::~SerialReader() {
+    // 所有回放/切帧循环与背压等待都检查会话号,stop() 后在有限时间内返回,
+    // 因此可以无超时等待;旧实现 wait(2000) 超时后析构仍在运行的 QThread 会 qFatal
     stop();
     m_thread->quit();
-    m_thread->wait(2000);
+    m_thread->wait();
 }
 
 bool SerialReader::start(const ReaderConfig& cfg) {
     m_credit->reset();   // 新会话:上一会话未归还的额度作废
-    emit request_start(cfg);
+    // GUI 线程分配会话号:旧会话立即失效(回放循环/背压等待随即退出),
+    // 之后若紧跟 stop(),worker 再处理本次 start 时会直接返回
+    emit request_start(cfg, m_worker->begin_session());
     return true;
 }
 

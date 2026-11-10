@@ -105,13 +105,12 @@ FrameDispatcher::FrameDispatcher(QObject* parent)
 
 FrameDispatcher::~FrameDispatcher() {
     if (m_thread) {
+        // 不用 terminate():线程可能正持有 pa::mutex/分配器锁,强杀后退出时死锁或堆损坏。
+        // 置停止标志后积压帧直接跳过,quit 在当前这一帧解析完即返回(内置解析器 µs 级,
+        // 插件解析受 IPC 超时约束),因此无超时等待是有界的。
+        if (m_worker) m_worker->request_stop();
         m_thread->quit();
-        if (!m_thread->wait(2000)) {
-            // 线程 2 秒未退出(异常):强制终止兜底,避免 QThread 析构时
-            // 线程仍运行触发 qFatal("Destroyed while thread is still running")。
-            m_thread->terminate();
-            m_thread->wait();
-        }
+        m_thread->wait();
     }
 }
 

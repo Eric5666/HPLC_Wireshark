@@ -145,6 +145,43 @@ int main(int argc, char** argv) {
         check(ms < 1000, "abort stops replay within 1 s");
     }
 
+    // ⑤ L5:start() 紧跟 stop(),worker 稍后处理 start 也不得回放(旧实现整文件回放完)
+    {
+        QByteArray big;
+        for (int i = 0; i < 20; ++i) big += frames;
+        QTemporaryDir dir;
+        QFile f(dir.filePath("big.bin"));
+        f.open(QIODevice::WriteOnly); f.write(big); f.close();
+        ReaderConfig cfg;
+        cfg.mode = ReaderMode::FilePlayback;
+        cfg.file_path = f.fileName();
+        SerialReader r;
+        int got = 0;
+        QObject::connect(&r, &SerialReader::frame_ready, [&](const BplcFrame&) { ++got; });
+        r.start(cfg);
+        r.stop();
+        QElapsedTimer t; t.start();
+        while (t.elapsed() < 800) { app.processEvents(); QThread::msleep(5); }
+        check(got == 0, "stop right after start cancels the queued start");
+        // 再次 start:新会话完整回放
+        got = 0;
+        r.start(cfg);
+        t.restart();
+        while (got < base.frames * 20 && t.elapsed() < 30000) { app.processEvents(); QThread::msleep(1); }
+        std::printf("  second session frames=%d\n", got);
+        check(got == base.frames * 20, "a later start replays the whole file");
+
+        // ⑥ L4:回放被背压阻塞(无消费者归还额度)时析构,必须很快返回且不 qFatal
+        auto* r2 = new SerialReader;
+        r2->flow_credit()->set_enabled(true);
+        r2->start(cfg);
+        QThread::msleep(100);   // 4096 帧后阻塞在额度上
+        QElapsedTimer td; td.start();
+        delete r2;
+        std::printf("  destroy while blocked: %lld ms\n", (long long)td.elapsed());
+        check(td.elapsed() < 1000, "SerialReader destructor returns promptly while replay is blocked");
+    }
+
     std::printf("reader_garbage_probe: %s (%d failures)\n", g_fail ? "FAIL" : "OK", g_fail);
     return g_fail ? 1 : 0;
 }
