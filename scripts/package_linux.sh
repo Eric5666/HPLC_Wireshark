@@ -65,16 +65,22 @@ if [ -n "$QT_PLUGINS" ] && [ -d "$QT_PLUGINS/platforms" ]; then
     # TLS 后端(更新检查/Sentry 上报走 HTTPS,缺它则 "No functional TLS backend")
     cp -r "$QT_PLUGINS/tls" AppDir/usr/lib/qt6/plugins/ 2>/dev/null || \
         echo "::warning::未找到 Qt TLS 插件($QT_PLUGINS/tls),HTTPS 功能将不可用"
-    # SQL 驱动(TOPO 历史存 SQLite:QSqlDatabase("QSQLITE") 打开数据库,缺它则
-    # 驱动加载失败、拓扑历史写不进库)。只拷用到的 libqsqlite.so,不拷整目录
-    # (mysql/odbc/psql 等驱动用不到)。缺失直接失败,不让坏包流出去。
-    if [ -f "$QT_PLUGINS/sqldrivers/libqsqlite.so" ]; then
-        mkdir -p AppDir/usr/lib/qt6/plugins/sqldrivers
-        cp "$QT_PLUGINS/sqldrivers/libqsqlite.so" AppDir/usr/lib/qt6/plugins/sqldrivers/
-    else
-        echo "::error::未找到 Qt SQLite 驱动($QT_PLUGINS/sqldrivers/libqsqlite.so),TOPO 历史数据库将无法打开" >&2
-        exit 1
-    fi
+fi
+# SQL 驱动(TOPO 历史存 SQLite:QSqlDatabase("QSQLITE") 打开数据库,缺它则
+# 驱动加载失败、拓扑历史写不进库)。只拷用到的 libqsqlite.so,不拷整目录
+# (mysql/odbc/psql 等驱动用不到)。缺失直接失败,不让坏包流出去。
+# 本检查独立于 platforms 目录:即使 platforms 缺失也要检查,不能因为
+# 平台插件拷不了就悄悄跳过驱动检查。
+if [ -z "$QT_PLUGINS" ]; then
+    echo "::error::无法确定 Qt 插件目录(qmake -query QT_INSTALL_PLUGINS 为空),无法检查 SQLite 驱动" >&2
+    exit 1
+fi
+if [ -f "$QT_PLUGINS/sqldrivers/libqsqlite.so" ]; then
+    mkdir -p AppDir/usr/lib/qt6/plugins/sqldrivers
+    cp "$QT_PLUGINS/sqldrivers/libqsqlite.so" AppDir/usr/lib/qt6/plugins/sqldrivers/
+else
+    echo "::error::未找到 Qt SQLite 驱动($QT_PLUGINS/sqldrivers/libqsqlite.so),TOPO 历史数据库将无法打开" >&2
+    exit 1
 fi
 echo "收集到 $(ls AppDir/usr/lib/*.so* 2>/dev/null | wc -l) 个库"
 
