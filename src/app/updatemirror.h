@@ -39,13 +39,13 @@ signals:
 private:
     void get(const QString& url, int timeoutMs,
              const std::function<void(QNetworkReply*)>& done);
-    void detectRegion();
-    void detectFromSource(int idx);   // 区域识别源链:0=trace,1=country.is,2=ipwho.is
-    void onRegion(const QString& countryCode);   // "" = 识别失败
-    void probeNative();
-    void probeMirror(int index);
+    void detect_region();
+    void detect_from_source(int idx);   // 区域识别源链:0=trace,1=country.is,2=ipwho.is
+    void on_region(const QString& countryCode);   // "" = 识别失败
+    void probe_native();
+    void probe_mirror(int index);
     void finish(const QString& effectiveUrl, const QString& prefix);
-    static bool looksLikeManifest(const QByteArray& body,
+    static bool looks_like_manifest(const QByteArray& body,
                                   const QString& manifest_key);
 
     QNetworkAccessManager* m_nam = nullptr;

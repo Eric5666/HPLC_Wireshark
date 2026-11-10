@@ -10,7 +10,7 @@
    分“纯解析”与“解析 + GUI 每 5 ms 一次图形事件”两轮，输出 `LATENCY ...` 行，
    `--bench-json <path>` 另存 JSON（用于新旧设计对比，源码可直接在旧提交上编译）；
 4. （Unix）解析途中 SIGKILL lua_echo 的 host：在途请求须 < 1 s 返回，GUI 线程收到 `disabled: ...` 状态；
-5. `stop_all()` 之后的迟到请求必须立即失败返回；随后重新 `loadAll` 可再次解析（插件市场更新流程）；
+5. `stop_all()` 之后的迟到请求必须立即失败返回；随后重新 `load_all` 可再次解析（插件市场更新流程）；
 6. 走 `aboutToQuit` 正常退出路径（停插件、在 IPC 线程关 socket、停 IPC 线程）。
 7. （异步图形 API，Unix）原版 `lua_graphics`（`set_font`/`draw_text`）经真实 host 渲染出图，
    host 不崩、插件仍启用（host 为 QGuiApplication + offscreen 平台）；

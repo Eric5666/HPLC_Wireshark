@@ -313,7 +313,7 @@ struct LateMeter {
 int main(int argc, char** argv) {
     g_prev_handler = qInstallMessageHandler(probe_msg_handler);
     QApplication app(argc, argv);
-    // 宿主进程须与本程序同目录(PluginManager::hostBinaryPath)
+    // 宿主进程须与本程序同目录(PluginManager::host_binary_path)
     const QString host_dst = QCoreApplication::applicationDirPath() + QStringLiteral("/bplc-plugin-host");
     const int hi = QCoreApplication::arguments().indexOf(QStringLiteral("--host"));
     if (hi > 0 && hi + 1 < argc && !QFile::exists(host_dst))
@@ -339,7 +339,7 @@ int main(int argc, char** argv) {
                          if (st != QStringLiteral("ready")) bad_status << id + QStringLiteral(": ") + st;
                      });
     auto& pm = PluginManager::instance();
-    pm.loadAll(plugins);
+    pm.load_all(plugins);
     const QString echo = QStringLiteral("LUAECHO_2024");
     const QString gfx = QStringLiteral("LUAGRAPH_2024");
     const QString gnf = QStringLiteral("LUAGFXNF_2024");
@@ -604,7 +604,7 @@ bench:
           !pm.parse_via_plugin(echo, f, msdu, filt, &r) && t.elapsed() < 1000);
 
     // ⑤ stop_all 后重新加载(插件市场更新流程):IPC 通道可再次使用
-    pm.loadAll(plugins);
+    pm.load_all(plugins);
     spin_until([&] { return pm.is_plugin_protocol(echo); }, 15000);
     int gok5 = 0, gtot5 = 0;
     const int ok5 = pm.is_plugin_protocol(echo) ? parse_in_worker(echo, 200, nullptr, &gok5, &gtot5) : 0;

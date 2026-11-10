@@ -1492,7 +1492,7 @@ void MainWindow::on_open_plugin_market() {
     // 卸载后安装/删除失败:立即恢复加载(不必等关闭对话框)
     auto reload_all = [this]() {
         load_plugin_dirs(m_plugin_search_dirs);
-        PluginManager::instance().loadAll(
+        PluginManager::instance().load_all(
             QCoreApplication::applicationDirPath() + QStringLiteral("/plugins"));
     };
     dlg.set_reload_cb(reload_all);

@@ -52,7 +52,7 @@ PluginManager& PluginManager::instance() {
 
 PluginManager::PluginManager(QObject* parent) : QObject(parent) {
     m_hb_timer.setInterval(kHeartbeatIntervalMs);
-    connect(&m_hb_timer, &QTimer::timeout, this, &PluginManager::checkHeartbeats);
+    connect(&m_hb_timer, &QTimer::timeout, this, &PluginManager::check_heartbeats);
     m_hb_timer.start();
     m_async_timer.setInterval(kAsyncSweepIntervalMs);
     connect(&m_async_timer, &QTimer::timeout, this, &PluginManager::sweep_async_timeouts);
@@ -173,7 +173,7 @@ void PluginManager::wake_waiters(PluginRuntime* rt) {
     rt->resp_cv.wakeAll();
 }
 
-void PluginManager::loadAll(const QString& plugins_dir) {
+void PluginManager::load_all(const QString& plugins_dir) {
     const QDir d(plugins_dir);
     if (!d.exists()) return;
     for (const QString& sub : d.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
@@ -187,7 +187,7 @@ void PluginManager::loadAll(const QString& plugins_dir) {
     }
 }
 
-QStringList PluginManager::pluginProtocolIds() const {
+QStringList PluginManager::plugin_protocol_ids() const {
     QReadLocker rl(&m_plugins_lock);
     return m_plugins.keys();
 }
@@ -197,7 +197,7 @@ bool PluginManager::is_plugin_protocol(const QString& protocol_id) const {
     return rt && rt->ready && !rt->disabled;
 }
 
-static QString hostBinaryPath() {
+static QString host_binary_path() {
     // bplc-plugin-host 与主程序同目录
     return QCoreApplication::applicationDirPath()
          + QStringLiteral("/bplc-plugin-host");
@@ -207,7 +207,7 @@ bool PluginManager::start_plugin(const PluginManifest& m) {
     ensure_ipc_thread();
     auto* rt = new PluginRuntime;
     rt->manifest = m;
-    const QString sock_name = plugin_ipc::socketName(m.name);
+    const QString sock_name = plugin_ipc::socket_name(m.name);
     const QString pid = m.protocol_id;
 
     // server 在 IPC 线程创建(父对象 = 住在 IPC 线程的 ctx)并监听;
@@ -243,7 +243,7 @@ bool PluginManager::start_plugin(const PluginManifest& m) {
     connect(rt->process, &QProcess::errorOccurred,
             this, [this, pid]() { on_process_error(pid); });
 
-    rt->process->start(hostBinaryPath(),
+    rt->process->start(host_binary_path(),
         {QStringLiteral("--socket"), sock_name,
          QStringLiteral("--plugin"), m.dir_path});
     if (!rt->process->waitForStarted(5000)) {
@@ -575,7 +575,7 @@ void PluginManager::disable_plugin(const QString& plugin_id,
     emit plugin_status_changed(plugin_id, QStringLiteral("disabled: ") + reason);
 }
 
-void PluginManager::checkHeartbeats() {
+void PluginManager::check_heartbeats() {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     QMap<QString, PluginRuntime*> snapshot;
     {

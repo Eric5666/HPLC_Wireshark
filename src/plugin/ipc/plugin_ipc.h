@@ -82,7 +82,7 @@ inline FrameTake try_take_frame(QByteArray& buf, QByteArray& out) {
 
 /// @brief 本机 socket 名(主程序按插件 id 生成唯一名)
 /// @param plugin_id 插件 id
-inline QString socketName(const QString& plugin_id) {
+inline QString socket_name(const QString& plugin_id) {
     return QStringLiteral("bplc_plugin_%1_%2")
         .arg(plugin_id)
         .arg(QCoreApplication::applicationPid());

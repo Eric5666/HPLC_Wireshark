@@ -94,13 +94,13 @@ public:
     static PluginManager& instance();
 
     /// @brief 扫描并启动 plugins_dir 下所有插件
-    void loadAll(const QString& plugins_dir);
+    void load_all(const QString& plugins_dir);
     /// @brief 停掉全部插件 host 子进程并注销其解析器(退役式两遍处理,
     ///        见实现注释)。供应用退出与插件市场删除/更新旧版前调用——
     ///        host 进程映射着插件 DLL,不停机则 Windows 下删不掉旧目录。
     void stop_all();
     /// @brief 已注册的插件协议 id 列表(供 UI/配置)
-    QStringList pluginProtocolIds() const;
+    QStringList plugin_protocol_ids() const;
     /// @brief 协议 id 是否来自插件
     bool is_plugin_protocol(const QString& protocol_id) const;
 
@@ -186,7 +186,7 @@ private:
     /// @brief 超时扫描(GUI 线程定时器):过期的异步请求丢弃 seq 并以失败回调
     void sweep_async_timeouts();
     PluginRuntime* find_runtime(const QString& protocol_id) const;
-    void checkHeartbeats();
+    void check_heartbeats();
 
     mutable QReadWriteLock m_plugins_lock;    ///< 保护 m_plugins(GUI 增删,worker 查找)
     QMap<QString, PluginRuntime*> m_plugins;  ///< key: protocol_id

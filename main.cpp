@@ -172,7 +172,7 @@ int main(int argc, char* argv[]) {
     w.show();
 
     // 插件系统:扫描 plugins/ 并启动插件宿主进程(失败不影响主程序)
-    PluginManager::instance().loadAll(
+    PluginManager::instance().load_all(
         QCoreApplication::applicationDirPath() + QStringLiteral("/plugins"));
     // 退出时主动停掉全部 host 子进程,不留孤儿进程占着插件 DLL
     QObject::connect(&app, &QCoreApplication::aboutToQuit,
