@@ -28,7 +28,8 @@ static int failures = 0;
     if (!(cond)) { std::printf("FAIL: %s\n", msg); ++failures; } \
     else { std::printf("ok: %s\n", msg); } } while (0)
 
-/// @brief 3C/3E + 3D 反转义(与主程序 serialreader 同规则:0x3D xx → 0xFF-xx)
+/// @brief 3C/3E 定界 + 反转义(直接调生产函数 playback::unescape_frame_data,方案 A)
+/// @details 探针与生产共用同一反转义实现,不做第二套手写反转义(否则线缆字节解出结果不同)。
 static bool extract_frame(QByteArray& buf, QByteArray& out) {
     int idx = buf.indexOf(char(0x3C));
     if (idx < 0) return false;
@@ -36,13 +37,9 @@ static bool extract_frame(QByteArray& buf, QByteArray& out) {
     idx = buf.indexOf(char(0x3E));
     if (idx < 0) return false;
     const QByteArray esc = buf.left(idx);
-    QByteArray unesc;
-    for (int i = 0; i < esc.size(); ++i) {
-        quint8 b = (quint8)esc[i];
-        if (b == 0x3D && i + 1 < esc.size()) { ++i; unesc.append((char)(0xFF - (quint8)esc[i])); }
-        else unesc.append((char)b);
-    }
-    out = unesc;
+    buf.remove(0, idx + 1);
+    int n = 0;
+    playback::unescape_frame_data(esc, out, &n);
     return true;
 }
 
@@ -373,6 +370,12 @@ int main(int argc, char** argv) {
                   "W5e Info 列逐字一致");
             CHECK(frame_crc_red(e), "W5f 行红(PB 块 CRC 失败)");
             CHECK(n == 8 && r.accept, "W6 非法转义帧不再 DROP(进入解析且 accept=1)");
+
+            // 交叉断言(缺陷2):探针 extract_frame 与生产 unescape 走同一实现,解出结果一致
+            QByteArray buf2 = wire;
+            QByteArray via_extract;
+            extract_frame(buf2, via_extract);
+            CHECK(via_extract == out, "R5 探针 extract_frame 与生产 unescape 结果一致(同一实现)");
         }
 
         // W2:合法转义不变(3D C1/C2/C3 → 3E/3D/3C,n==0)
@@ -400,6 +403,164 @@ int main(int argc, char** argv) {
             int n = -1;
             const bool ok = playback::unescape_frame_data(esc, out, &n);
             CHECK(ok && n == 0 && out == esc, "W4 无 0x3D 帧逐字节一致、n==0");
+        }
+    }
+
+    // ===== R:递归三态/裁剪(缺陷 1:嵌套 CRC 节点漏判) =====
+    {
+        const auto mk_crc = [](const char* val) {
+            MsduFieldNode n;
+            n.name = QStringLiteral("MSDU CRC32");
+            n.value = QString::fromUtf8(val);
+            n.rel_start = 100;
+            n.rel_len = 4;
+            return n;
+        };
+        // R1: 聚合帧分组下嵌套 FAIL
+        {
+            MsduInfo m;
+            m.present = true;
+            m.cascade = true;
+            m.summary = QStringLiteral("聚合帧(1 帧: …)");
+            MsduFieldNode grp;
+            grp.name = QStringLiteral("Cascade MAC Frame[0]");
+            grp.rel_start = 0;
+            grp.rel_len = 200;
+            grp.children.append(mk_crc("0xdeadbeef FAIL"));
+            MsduFieldNode other;
+            other.name = QStringLiteral("APP Data");
+            other.value = QStringLiteral("…");
+            grp.children.append(other);
+            m.tree.append(grp);
+            CHECK(msdu_crc_state(m) == MsduCrcState::Fail, "R1a 嵌套 FAIL ⇒ 三态 Fail");
+            const MsduInfo ev = msdu_crc_fail_evidence(m);
+            CHECK(ev.summary.isEmpty(), "R1b 摘要清空");
+            CHECK(ev.tree.size() == 1 && ev.tree[0].name == QStringLiteral("Cascade MAC Frame[0]"),
+                  "R1c 保留祖先分组");
+            CHECK(ev.tree[0].children.size() == 1
+                      && ev.tree[0].children[0].name == QStringLiteral("MSDU CRC32"),
+                  "R1d 组下只有 CRC 节点");
+            CHECK(ev.tree[0].children[0].rel_start == 100 && ev.tree[0].children[0].rel_len == 4,
+                  "R1e rel_start/rel_len 原样保留");
+            PacketEntry pe;
+            pe.accepted = true;
+            pe.msdu = m;
+            pe.mpdu.fch_crc_checked = true;
+            pe.mpdu.fch_crc_ok = true;
+            CHECK(frame_crc_red(pe), "R1f 嵌套 FAIL 标红");
+        }
+        // R2: 嵌套 OK ⇒ Ok、不标红、不裁剪
+        {
+            MsduInfo m;
+            m.present = true;
+            m.summary = QStringLiteral("聚合帧(1 帧: …)");
+            MsduFieldNode grp;
+            grp.name = QStringLiteral("Cascade MAC Frame[0]");
+            grp.children.append(mk_crc("0x5d813887 OK"));
+            m.tree.append(grp);
+            CHECK(msdu_crc_state(m) == MsduCrcState::Ok, "R2a 嵌套 OK ⇒ Ok");
+            const MsduInfo g = msdu_crc_gate(m);
+            CHECK(g.tree.size() == 1 && g.summary == m.summary, "R2b OK 不裁剪、摘要保留");
+            PacketEntry pe;
+            pe.accepted = true;
+            pe.msdu = m;
+            pe.mpdu.fch_crc_checked = true;
+            pe.mpdu.fch_crc_ok = true;
+            CHECK(!frame_crc_red(pe), "R2c OK 不标红");
+        }
+        // R3: 两层以上嵌套(分组里再套分组)
+        {
+            MsduInfo m;
+            m.present = true;
+            MsduFieldNode outer;
+            outer.name = QStringLiteral("Cascade MAC Frame[1]");
+            MsduFieldNode inner;
+            inner.name = QStringLiteral("Inner Group");
+            inner.children.append(mk_crc("0x00000000 FAIL"));
+            outer.children.append(inner);
+            m.tree.append(outer);
+            CHECK(msdu_crc_state(m) == MsduCrcState::Fail, "R3a 两层嵌套 FAIL ⇒ Fail");
+            const MsduInfo ev = msdu_crc_fail_evidence(m);
+            CHECK(ev.tree.size() == 1 && ev.tree[0].children.size() == 1
+                      && ev.tree[0].children[0].children.size() == 1,
+                  "R3b 两层祖先分组均保留、组下仅 CRC 叶");
+        }
+        // R4: 无 CRC 节点 ⇒ N/A、不裁剪、不红
+        {
+            MsduInfo m;
+            m.present = true;
+            m.summary = QStringLiteral("MMeX");
+            MsduFieldNode n;
+            n.name = QStringLiteral("APP Data");
+            n.value = QStringLiteral("01 02");
+            m.tree.append(n);
+            CHECK(msdu_crc_state(m) == MsduCrcState::NotAvailable, "R4a 无 CRC ⇒ N/A");
+            const MsduInfo g = msdu_crc_gate(m);
+            CHECK(g.tree.size() == 1 && g.summary == m.summary, "R4b N/A 不裁剪");
+            PacketEntry pe;
+            pe.accepted = true;
+            pe.msdu = m;
+            pe.mpdu.fch_crc_checked = true;
+            pe.mpdu.fch_crc_ok = true;
+            CHECK(!frame_crc_red(pe), "R4c N/A 不红");
+        }
+        // R6: 聚合帧两个级联分组,[0] 无 CRC 后代、[1] 挂 FAIL ⇒ gate 丢弃 [0]、[1] 只留 CRC
+        {
+            MsduInfo m;
+            m.present = true;
+            m.cascade = true;
+            m.summary = QStringLiteral("聚合帧(2 帧: A, B)");
+            MsduFieldNode g0;
+            g0.name = QStringLiteral("Cascade MAC Frame[0]");
+            g0.rel_start = 0;
+            g0.rel_len = 50;
+            MsduFieldNode plain;
+            plain.name = QStringLiteral("APP Data");
+            plain.value = QStringLiteral("aa bb");
+            g0.children.append(plain);
+            m.tree.append(g0);
+            MsduFieldNode g1;
+            g1.name = QStringLiteral("Cascade MAC Frame[1]");
+            g1.rel_start = 52;
+            g1.rel_len = 60;
+            g1.children.append(mk_crc("0xdeadbeef FAIL"));
+            m.tree.append(g1);
+            CHECK(msdu_crc_state(m) == MsduCrcState::Fail, "R6a 聚合两级联[1] FAIL ⇒ Fail");
+            const MsduInfo ev = msdu_crc_gate(m);
+            CHECK(ev.summary.isEmpty(), "R6b 聚合摘要清空");
+            CHECK(ev.tree.size() == 1
+                      && ev.tree[0].name == QStringLiteral("Cascade MAC Frame[1]"),
+                  "R6c 无 CRC 后代的 [0] 被丢弃、保留 [1]");
+            CHECK(ev.tree[0].children.size() == 1
+                      && ev.tree[0].children[0].name == QStringLiteral("MSDU CRC32"),
+                  "R6d [1] 下只剩 CRC 证据节点");
+            CHECK(ev.tree[0].children[0].rel_start == 100
+                      && ev.tree[0].children[0].rel_len == 4,
+                  "R6e rel_start/rel_len 未改动");
+            PacketEntry pe;
+            pe.accepted = true;
+            pe.msdu = m;
+            pe.mpdu.fch_crc_checked = true;
+            pe.mpdu.fch_crc_ok = true;
+            CHECK(frame_crc_red(pe), "R6f 聚合 FAIL 标红");
+        }
+        // R7: 聚合帧两个级联都 OK ⇒ Ok、摘要保留、树不裁剪
+        {
+            MsduInfo m;
+            m.present = true;
+            m.cascade = true;
+            m.summary = QStringLiteral("聚合帧(2 帧: A, B)");
+            MsduFieldNode g0;
+            g0.name = QStringLiteral("Cascade MAC Frame[0]");
+            g0.children.append(mk_crc("0x11111111 OK"));
+            m.tree.append(g0);
+            MsduFieldNode g1;
+            g1.name = QStringLiteral("Cascade MAC Frame[1]");
+            g1.children.append(mk_crc("0x22222222 OK"));
+            m.tree.append(g1);
+            CHECK(msdu_crc_state(m) == MsduCrcState::Ok, "R7a 聚合两级联都 OK ⇒ Ok");
+            const MsduInfo g = msdu_crc_gate(m);
+            CHECK(g.summary == m.summary && g.tree.size() == 2, "R7b 摘要保留、树不裁剪");
         }
     }
 
