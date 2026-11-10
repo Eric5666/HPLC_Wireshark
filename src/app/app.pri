@@ -13,6 +13,7 @@ HEADERS += \
     $$PWD/framedispatcher.h \
     $$PWD/appconfig.h \
     $$PWD/updatemirror.h \
+    $$PWD/net_size_cap.h \
     $$PWD/theme.h
 
 SOURCES += \

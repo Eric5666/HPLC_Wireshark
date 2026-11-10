@@ -11,6 +11,7 @@
 #include <QUrl>
 
 #include "appconfig.h"
+#include "net_size_cap.h"
 
 namespace {
 constexpr int kRegionTimeoutMs  = 3500;   // 出口区域识别(每源)
@@ -31,6 +32,8 @@ void UpdateMirrorResolver::get(const QString& url, int timeoutMs,
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = m_nam->get(req);
+    // 探活只读区域 JSON / update.json,超过上限即中止(按普通探测失败处理)
+    netcap::cap_reply_size(reply, netcap::kMaxManifestBytes);
     auto* timer = new QTimer(reply);
     timer->setSingleShot(true);
     connect(timer, &QTimer::timeout, reply, &QNetworkReply::abort);

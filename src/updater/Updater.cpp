@@ -28,6 +28,7 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QMessageBox>
+#include <QNetworkReply>
 
 #include "Downloader.h"
 
@@ -322,7 +323,23 @@ void Updater::checkForUpdates()
   if (!userAgentString().isEmpty())
     request.setRawHeader("User-Agent", userAgentString().toUtf8());
 
-  m_manager->get(request);
+  // Local extension: cap the update definitions file at 1 MB
+  // (CVE-2026-116337); an oversized reply is aborted and treated as a
+  // network error in onReply().
+  QNetworkReply* reply = m_manager->get(request);
+  constexpr qint64 kMaxAppcastBytes = 1LL * 1024 * 1024;
+  auto check = [reply](qint64 received, qint64 total) {
+    if (received > kMaxAppcastBytes || total > kMaxAppcastBytes
+        || reply->bytesAvailable() > kMaxAppcastBytes)
+      reply->abort();
+  };
+  connect(reply, &QNetworkReply::metaDataChanged, reply, [reply, check]() {
+    bool ok = false;
+    const qint64 declared = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong(&ok);
+    check(0, ok ? declared : -1);
+  });
+  connect(reply, &QNetworkReply::downloadProgress, reply, check);
+  connect(reply, &QIODevice::readyRead, reply, [check]() { check(0, -1); });
 }
 
 /**

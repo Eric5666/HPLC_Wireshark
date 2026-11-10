@@ -45,6 +45,11 @@
 
 static const QString PARTIAL_DOWN(".part");
 
+// Local extension: hard cap on the installer size (CVE-2026-116337, Qt Network
+// HTTP response resource exhaustion). A malicious or compromised server must not
+// be able to fill memory or disk; the download is aborted past this size.
+static constexpr qint64 kMaxDownloadBytes = 512LL * 1024 * 1024;
+
 /**
  * @brief Constructs the Downloader widget.
  *
@@ -165,6 +170,8 @@ void Downloader::startDownload(const QUrl& url)
   }
 
   // Start download
+  m_savedBytes   = 0;      // local extension: size cap
+  m_sizeExceeded = false;
   m_reply     = m_manager->get(request);
   m_startTime = QDateTime::currentDateTime().toSecsSinceEpoch();
 
@@ -212,17 +219,30 @@ void Downloader::setUserAgentString(const QString& agent)
  */
 void Downloader::finished()
 {
-  if (!m_reply || m_reply->error() != QNetworkReply::NoError) {
+  if (!m_reply || m_reply->error() != QNetworkReply::NoError || m_sizeExceeded) {
     QFile::remove(m_downloadDir.filePath(m_fileName + PARTIAL_DOWN));
     if (m_reply) {
       m_reply->deleteLater();
       m_reply = nullptr;
+    }
+    // Local extension: tell the user why an oversized download stopped
+    if (m_sizeExceeded) {
+      const QString msg = tr("The update package exceeds the size limit (%1 MB)")
+                            .arg(kMaxDownloadBytes / (1024 * 1024));
+      m_ui->stopButton->setText(tr("Close"));
+      m_ui->downloadLabel->setText(tr("Update package rejected"));
+      m_ui->timeLabel->setText(msg);
+      QMessageBox::critical(this, tr("Error"), msg, QMessageBox::Close);
     }
     return;
   }
 
   // Flush any data not yet delivered through downloadProgress
   saveFile(0, 0);
+  if (m_sizeExceeded) {   // local extension: the final flush crossed the cap
+    finished();
+    return;
+  }
 
   // Rename file
   QFile::rename(m_downloadDir.filePath(m_fileName + PARTIAL_DOWN),
@@ -371,11 +391,31 @@ void Downloader::saveFile(qint64 received, qint64 total)
   }
 
   // Save downloaded data to disk
+  const QByteArray chunk = m_reply->readAll();
+  m_savedBytes += chunk.size();
+  if (m_savedBytes > kMaxDownloadBytes) {   // local extension: size cap
+    abortOversize();
+    return;
+  }
   QFile file(m_downloadDir.filePath(m_fileName + PARTIAL_DOWN));
   if (file.open(QIODevice::WriteOnly | QIODevice::Append)) {
-    file.write(m_reply->readAll());
+    file.write(chunk);
     file.close();
   }
+}
+
+/**
+ * @brief Local extension: aborts a download that exceeds kMaxDownloadBytes.
+ *
+ * abort() finishes the reply with OperationCanceledError; finished() then
+ * removes the partial file and reports the reason.
+ */
+void Downloader::abortOversize()
+{
+  if (!m_reply || m_sizeExceeded)
+    return;
+  m_sizeExceeded = true;
+  m_reply->abort();
 }
 
 /**
@@ -413,6 +453,14 @@ void Downloader::metaDataChanged()
   if (!m_reply)
     return;
 
+  // Local extension: reject an oversized declared Content-Length up front
+  bool lenOk = false;
+  const qint64 declared = m_reply->header(QNetworkRequest::ContentLengthHeader).toLongLong(&lenOk);
+  if (lenOk && declared > kMaxDownloadBytes) {
+    abortOversize();
+    return;
+  }
+
   QVariant variant = m_reply->header(QNetworkRequest::ContentDispositionHeader);
   if (variant.isValid()) {
     QString contentDisposition = QByteArray::fromPercentEncoding(variant.toByteArray()).constData();
@@ -433,6 +481,12 @@ void Downloader::metaDataChanged()
  */
 void Downloader::updateProgress(qint64 received, qint64 total)
 {
+  // Local extension: size cap (declared length or bytes received so far)
+  if (received > kMaxDownloadBytes || total > kMaxDownloadBytes) {
+    abortOversize();
+    return;
+  }
+
   if (total > 0) {
     m_ui->progressBar->setMinimum(0);
     m_ui->progressBar->setMaximum(100);

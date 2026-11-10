@@ -21,6 +21,7 @@
 #include <QUrl>
 
 #include "miniz.h"  // 3rdparty/miniz, public domain, zip 解包
+#include "net_size_cap.h"
 #include "updatemirror.h"
 
 namespace {
@@ -187,9 +188,14 @@ void PluginMarket::fetch_feed(const QString& url) {
                       QStringLiteral("BPLC_STA_Monitor/") +
                           QCoreApplication::applicationVersion());
         QNetworkReply* rep = m_nam->get(req);
+        netcap::cap_reply_size(rep, netcap::kMaxManifestBytes);
         connect(rep, &QNetworkReply::finished, this,
                 [this, rep, url, mirror_prefix]() {
             rep->deleteLater();
+            if (netcap::size_exceeded(rep)) {
+                emit feed_error(QStringLiteral("feed exceeds size limit"));
+                return;
+            }
             if (rep->error() != QNetworkReply::NoError) {
                 emit feed_error(rep->errorString());
                 return;
@@ -209,8 +215,13 @@ void PluginMarket::fetch_text(const QString& url,
                                const QString& mirror_prefix) {
     const QString request_url = resolve_market_url(url, mirror_prefix);
     QNetworkReply* rep = m_nam->get(QNetworkRequest(QUrl(request_url)));
+    netcap::cap_reply_size(rep, netcap::kMaxManifestBytes);
     connect(rep, &QNetworkReply::finished, this, [this, rep, url]() {
         rep->deleteLater();
+        if (netcap::size_exceeded(rep)) {
+            emit text_error(url, QStringLiteral("text exceeds size limit"));
+            return;
+        }
         if (rep->error() != QNetworkReply::NoError) {
             emit text_error(url, rep->errorString());
             return;
@@ -328,8 +339,15 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
     const QString package_url = resolve_market_url(v.url, plugin.mirror_prefix);
     emit install_progress(QStringLiteral("downloading ") + package_url);
     QNetworkReply* rep = m_nam->get(QNetworkRequest(QUrl(package_url)));
+    netcap::cap_reply_size(rep, netcap::kMaxPluginPackageBytes);
     connect(rep, &QNetworkReply::finished, this, [this, rep]() {
         rep->deleteLater();
+        if (netcap::size_exceeded(rep)) {
+            emit install_finished(false,
+                                  QStringLiteral("package exceeds size limit"),
+                                  m_pending_name);
+            return;
+        }
         if (rep->error() != QNetworkReply::NoError) {
             emit install_finished(false, rep->errorString(), m_pending_name);
             return;

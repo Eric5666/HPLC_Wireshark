@@ -93,6 +93,9 @@ private:
   QString m_userAgentString;
 
   QString m_expectedSha256;  ///< 本地扩展:安装包期望 SHA-256(来自 update.json "sha256")
+  qint64 m_savedBytes = 0;   ///< 本地扩展:已写入部分文件的字节数(大小上限)
+  bool m_sizeExceeded = false; ///< 本地扩展:因超过大小上限而中止
+  void abortOversize();      ///< 本地扩展:超过 kMaxDownloadBytes 时中止下载
 
   bool m_useCustomProcedures;
   bool m_mandatoryUpdate;
