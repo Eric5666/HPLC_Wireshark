@@ -245,6 +245,11 @@ jobs:
           fi
           "$BIN"
 
+          # MSDU CRC32 三态门控 + 反转义宽松(方案 A,用户 2026-11)W1-W6:
+          # 防止把 0x3D 反转义改回严格后无人察觉(门禁兜底)
+          (cd unit_test/protocol-nw/msdu-crc-gate-probe && bash build.sh)
+          ./unit_test/protocol-nw/msdu-crc-gate-probe/build/msdu_crc_gate_probe
+
   topology-worker-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
