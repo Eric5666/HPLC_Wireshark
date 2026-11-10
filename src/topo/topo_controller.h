@@ -33,6 +33,8 @@ signals:
     void live_states_reset(const TopoStateMap& states);
     void history_ready(quint64 request_id, qint64 target_frame, qint64 target_ms,
                        bool active, const TopoStateMap& states);
+    void history_failed(quint64 request_id, qint64 target_frame, qint64 target_ms,
+                        bool active, const QString& message);
     void worker_error(const QString& message);
     void frame_page_ready(const TopoFramePage& page);
     void anomaly_page_ready(const TopoAnomalyPage& page);

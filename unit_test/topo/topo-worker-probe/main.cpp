@@ -565,6 +565,137 @@ int main(int argc, char** argv) {
     CHECK("replay rebuild rollback preserves the previous complete SQLite anomaly index",
           rebuild_rollback_preserved_old_index);
 
+    bool open_history_failure_reported = false;
+    bool open_history_ready_emitted = false;
+    bool open_history_test_timed_out = false;
+    {
+        QTemporaryDir db_dir;
+        QThread thread;
+        // Using an existing directory as the database filename deterministically
+        // makes QSQLITE::open() fail without relying on filesystem permissions.
+        auto* worker = new TopoReplayWorker(db_dir.path(), 2, 4);
+        worker->moveToThread(&thread);
+        QObject::connect(&thread, &QThread::started, worker, &TopoReplayWorker::initialize);
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
+            open_history_test_timed_out = true;
+            loop.quit();
+        });
+        QObject::connect(worker, &TopoReplayWorker::worker_error, &app,
+            [worker](const QString& message) {
+                if (message.contains(QStringLiteral("Cannot open topology SQLite store"))) {
+                    QMetaObject::invokeMethod(worker, [worker] {
+                        worker->request_history(9201, 42, 4200, true);
+                    }, Qt::QueuedConnection);
+                }
+            }, Qt::QueuedConnection);
+        QObject::connect(worker, &TopoReplayWorker::history_ready, &app,
+            [&](quint64, qint64, qint64, bool, const TopoStateMap&) {
+                open_history_ready_emitted = true;
+                loop.quit();
+            }, Qt::QueuedConnection);
+        QObject::connect(worker, &TopoReplayWorker::history_failed, &app,
+            [&](quint64 request_id, qint64 target_frame, qint64 target_ms, bool active,
+                const QString& message) {
+                open_history_failure_reported = request_id == 9201 && target_frame == 42
+                    && target_ms == 4200 && active
+                    && message.contains(QStringLiteral("Cannot open topology SQLite store"));
+                loop.quit();
+            }, Qt::QueuedConnection);
+        thread.start();
+        timeout.start(10000);
+        loop.exec();
+        QMetaObject::invokeMethod(worker, "shutdown", Qt::BlockingQueuedConnection);
+        thread.quit();
+        thread.wait();
+        delete worker;
+    }
+    CHECK("history request reports database-open failure with request identity and reason",
+          open_history_failure_reported && !open_history_ready_emitted
+          && !open_history_test_timed_out);
+
+    bool reconstruction_history_failure_reported = false;
+    bool reconstruction_history_ready_emitted = false;
+    bool reconstruction_test_timed_out = false;
+    bool reconstruction_table_dropped = false;
+    {
+        QTemporaryDir db_dir;
+        const QString db_path = db_dir.filePath(QStringLiteral("history-reconstruction.sqlite3"));
+        QThread thread;
+        auto* worker = new TopoReplayWorker(db_path, 2, 4);
+        worker->moveToThread(&thread);
+        QObject::connect(&thread, &QThread::started, worker, &TopoReplayWorker::initialize);
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
+            reconstruction_test_timed_out = true;
+            loop.quit();
+        });
+        QObject::connect(worker, &TopoReplayWorker::storage_ready, &app,
+            [worker](const QString&) {
+                QMetaObject::invokeMethod(worker, [worker] {
+                    worker->submit_frame(association_frame_for(1, 5, 0x5000));
+                    worker->request_frame_page(9202, 0, 10);
+                }, Qt::QueuedConnection);
+            }, Qt::QueuedConnection);
+        QObject::connect(worker, &TopoReplayWorker::frame_page_ready, &app,
+            [&](const TopoFramePage& page) {
+                if (page.request_id != 9202) return;
+                if (page.total != 1) {
+                    loop.quit();
+                    return;
+                }
+                {
+                    QSqlDatabase failure_db = QSqlDatabase::addDatabase(
+                        QStringLiteral("QSQLITE"), QStringLiteral("topo-probe-history-failure"));
+                    failure_db.setDatabaseName(db_path);
+                    if (failure_db.open()) {
+                        QSqlQuery failure_query(failure_db);
+                        reconstruction_table_dropped = failure_query.exec(
+                            QStringLiteral("DROP TABLE topo_frames"));
+                    }
+                    failure_db.close();
+                    failure_db = QSqlDatabase();
+                    QSqlDatabase::removeDatabase(QStringLiteral("topo-probe-history-failure"));
+                }
+                if (!reconstruction_table_dropped) {
+                    loop.quit();
+                    return;
+                }
+                QMetaObject::invokeMethod(worker, [worker] {
+                    worker->request_history(9203, 1, 1001, true);
+                }, Qt::QueuedConnection);
+            }, Qt::QueuedConnection);
+        QObject::connect(worker, &TopoReplayWorker::history_ready, &app,
+            [&](quint64 request_id, qint64, qint64, bool, const TopoStateMap&) {
+                if (request_id == 9203) {
+                    reconstruction_history_ready_emitted = true;
+                    loop.quit();
+                }
+            }, Qt::QueuedConnection);
+        QObject::connect(worker, &TopoReplayWorker::history_failed, &app,
+            [&](quint64 request_id, qint64 target_frame, qint64 target_ms, bool active,
+                const QString& message) {
+                if (request_id != 9203) return;
+                reconstruction_history_failure_reported = target_frame == 1 && target_ms == 1001
+                    && active && message.contains(QStringLiteral("read topology frames"));
+                loop.quit();
+            }, Qt::QueuedConnection);
+        thread.start();
+        timeout.start(10000);
+        loop.exec();
+        QMetaObject::invokeMethod(worker, "shutdown", Qt::BlockingQueuedConnection);
+        thread.quit();
+        thread.wait();
+        delete worker;
+    }
+    CHECK("history request reports state-reconstruction failure instead of hanging",
+          reconstruction_table_dropped && reconstruction_history_failure_reported
+          && !reconstruction_history_ready_emitted && !reconstruction_test_timed_out);
+
     TopoState bounded_history;
     for (int i = 1; i <= 5000; ++i) {
         TopoEvent event = node_event(TopoEventKind::AssocCnf, i);
