@@ -31,7 +31,10 @@ void DispatcherWorker::on_replay_finished() {
 }
 
 void DispatcherWorker::on_frame(const BplcFrame& frame) {
-    if (m_stopped.load()) return;   // 已停止:立即返回,快速清空积压帧
+    if (m_stopped.load()) {          // 已停止:立即返回,快速清空积压帧
+        if (m_credit) m_credit->release();
+        return;
+    }
     QElapsedTimer t; t.start();
     ParseResult r;
     if (!frame.error_reason.isEmpty() || !frame.accepted) {
@@ -68,19 +71,13 @@ void DispatcherWorker::on_frame(const BplcFrame& frame) {
     r.meta.seg_start = frame.meta.seg_start;
     r.meta.replay_time_tag = frame.meta.replay_time_tag;
     emit parsed(r);
-    // 错协议快解析(跳过 MSDU 重组/字段树,µs 级)会以数十万帧/秒洪泛
-    // parsed 事件,饿死 GUI 的 flush timer 导致 pending 堆积卡顿。
-    // 补足到最小帧间隔 ~20µs(≈50K 帧/秒),匹配 GUI 列表渲染速度。
-    // 正常协议解析本就 ≥20µs,此分支不触发。
-    if (t.nsecsElapsed() < 20000) {
-        while (t.nsecsElapsed() < 20000)
-            QThread::yieldCurrentThread();
-    }
+    // 不再忙等限速:Reader 侧的在途额度(FrameCredit,GUI 处理完解析结果才归还)
+    // 把 Reader → 解析 → GUI 的积压限制在固定帧数内,错协议快解析也不会淹没 GUI。
     // 累计统计:每 5 万帧打一条进度,定位回灌卡顿在哪个环节
     const quint64 n = m_frame_count.fetch_add(1) + 1;
     m_parse_us.fetch_add(quint64(t.nsecsElapsed() / 1000));
     if (n % 50000 == 0) {
-        QLOG_INFO() << "parse progress:" << n << "frames, cumulative parse+throttle"
+        QLOG_INFO() << "parse progress:" << n << "frames, cumulative parse"
                     << (m_parse_us.load() / 1000) << "ms";
     }
 }
@@ -130,6 +127,22 @@ void FrameDispatcher::connect_source(QObject* source) {
             Qt::QueuedConnection);
 }
 
+void FrameDispatcher::set_flow_credit(std::shared_ptr<FrameCredit> credit) {
+    m_credit = std::move(credit);
+    if (!m_credit) return;
+    if (!m_worker) {                 // 无解析线程:没有消费者归还额度,不能限流
+        m_credit->set_enabled(false);
+        m_credit = nullptr;
+        return;
+    }
+    // worker 已在解析线程:排队过去设置,避免跨线程写 shared_ptr
+    DispatcherWorker* w = m_worker;
+    std::shared_ptr<FrameCredit> c = m_credit;
+    QMetaObject::invokeMethod(w, [w, c]() { w->set_flow_credit(c); }, Qt::QueuedConnection);
+    m_credit->reset();
+    m_credit->set_enabled(true);
+}
+
 void FrameDispatcher::disconnect_source(QObject* source) {
     if (source && m_worker)
         disconnect(source, nullptr, m_worker, nullptr);
@@ -144,9 +157,16 @@ void FrameDispatcher::shutdown() {
         disconnect(m_worker, nullptr, this, nullptr);
     }
     if (m_thread) m_thread->quit();
+    // 在途帧随旧解析线程丢弃,额度不会再归还:清零并暂停限流,直到新 dispatcher 接入
+    if (m_credit) {
+        m_credit->set_enabled(false);
+        m_credit->reset();
+        m_credit = nullptr;
+    }
 }
 
 void FrameDispatcher::on_parsed(const ParseResult& r) {
+    if (m_credit) m_credit->release();   // GUI 已接手这一帧:归还背压额度
     m_total.fetch_add(1);
     if (!r.accept) m_dropped.fetch_add(1);
 

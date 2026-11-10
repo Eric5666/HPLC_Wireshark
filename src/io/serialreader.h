@@ -13,9 +13,11 @@
 #include <QString>
 #include <QMetaType>
 #include <atomic>
+#include <memory>
 
 #include "ringbuffer.h"
 #include "bplcframe.h"
+#include "frame_credit.h"
 
 enum class ReaderMode {
     SerialPort,
@@ -52,6 +54,8 @@ public:
     void abort();
     /// @brief 是否正在采集/回放(线程安全;串口打开、文件/裸hex 回放期间为真)
     bool is_active() const { return m_active.load(); }
+    /// @brief 设置帧流背压额度(线程启动前调用;空=不限流)
+    void set_flow_credit(std::shared_ptr<FrameCredit> credit) { m_credit = std::move(credit); }
 
 public slots:
     void start_reading(const ReaderConfig& cfg);
@@ -70,6 +74,8 @@ private slots:
 private:
     friend class ReaderWorkerTestAccess;
     void try_extract_frame();
+    /// @brief 发出一帧:先取背压额度(在途满则等待,中止则丢弃并返回 false)
+    bool emit_frame(const BplcFrame& frame);
     void emit_drop_frame(const QByteArray& wire, const QString& reason,
                          qint64 arrival_us, const QByteArray& data = QByteArray());
     void process_raw_hex_line(const QByteArray& line);
@@ -93,6 +99,7 @@ private:
     qint64       m_last_ft;       ///< 上一帧 frame_time(回放时间轴基准)
     bool         m_running;
     std::atomic<bool> m_abort;   ///< 中止回放标志(GUI 线程 stop() 直接置位,while 循环检查)
+    std::shared_ptr<FrameCredit> m_credit; ///< 帧流背压额度(SerialReader 持有同一份)
     std::atomic<bool> m_active;  ///< 正在采集/回放(串口/文件/裸hex 均置位;供 is_running 查询)
     qint64       m_raw_base_ms;   ///< 裸 hex 文本首帧时间(epoch ms;-1=未给出,回退本地)
     bool         m_hex_seg_first; ///< 裸 hex 当前段首帧标志(段首用 TIME 头时间)
@@ -115,6 +122,8 @@ public:
     bool start(const ReaderConfig& cfg);
     void stop();
     bool is_running() const;   ///< 是否正在采集/回放(转发 worker 状态)
+    /// @brief 帧流背压额度:消费者(FrameDispatcher)处理完一帧后 release
+    std::shared_ptr<FrameCredit> flow_credit() const { return m_credit; }
 
 signals:
     void request_start(ReaderConfig cfg);
@@ -134,6 +143,7 @@ private slots:
 private:
     QThread*      m_thread;
     ReaderWorker* m_worker;
+    std::shared_ptr<FrameCredit> m_credit;
 };
 
 #endif // SERIALREADER_H

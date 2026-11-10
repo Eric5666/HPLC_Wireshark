@@ -108,6 +108,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_reader   = new SerialReader(this);
     m_dispatch = new FrameDispatcher(this);
     m_dispatch->connect_source(m_reader);
+    m_dispatch->set_flow_credit(m_reader->flow_credit());   // 背压:在途帧上限
 
     // TopoController owns domain processing, persistence and worker lifecycle.
     m_topo_controller = new TopoController(this);
@@ -853,6 +854,7 @@ void MainWindow::reset_dispatcher() {
     }
     m_dispatch = new FrameDispatcher(this);   // 按 config.ini 新协议实例化解析器
     m_dispatch->connect_source(m_reader);
+    m_dispatch->set_flow_credit(m_reader->flow_credit());   // 背压:在途帧上限
 
     connect(m_dispatch, &FrameDispatcher::parsed,
             this,       &MainWindow::on_parsed,
@@ -1551,7 +1553,11 @@ void MainWindow::run_plugin_autotest(const QString& plugins_dir,
                     connect(poll, &QTimer::timeout, this,
                             [this, poll, waits]() {
                                 ++(*waits);
-                                const bool idle = m_plugin_engine->is_idle();
+                                // 首个 finished 可能来自 start_file_import 里 stop() 的旧会话;
+                                // 背压下回放不再瞬间读完,须等 reader 结束且在途帧全部交给 GUI
+                                const bool idle = m_plugin_engine->is_idle()
+                                    && !m_reader->is_running()
+                                    && m_reader->flow_credit()->in_flight() == 0;
                                 if (idle || *waits > 1200) {  // 排空或 10min 超时
                                     poll->stop();
                                     poll->deleteLater();

@@ -10,6 +10,7 @@ QT += serialport
 
 HEADERS += \
     $$PWD/serialreader.h \
+    $$PWD/frame_credit.h \
     $$PWD/rawframeimporter.h
 
 SOURCES += \

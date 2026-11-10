@@ -188,6 +188,14 @@ int ReaderWorker::last_bcd_tag_offset(const QByteArray& buf) {
     return -1;
 }
 
+bool ReaderWorker::emit_frame(const BplcFrame& frame) {
+    // 背压:在途帧已满时在此等待消费者;stop() 置中止标志后 50 ms 内放弃
+    if (m_credit && !m_credit->acquire([this]() { return m_abort.load(); }))
+        return false;
+    emit frame_ready(frame);
+    return true;
+}
+
 bool ReaderWorker::try_consume_bcd_tag() {
     // 仅文件回放有段间 8B 标注;合法 BCD 不含 0x3C/0x3D/0x3E,不会误吃帧哨兵
     if (m_cfg.mode != ReaderMode::FilePlayback || m_in_buf.size() < 8)
@@ -214,7 +222,7 @@ void ReaderWorker::emit_drop_frame(const QByteArray& wire, const QString& reason
     drop.accepted = false;
     drop.error_reason = reason;
     ++m_frame_count;
-    emit frame_ready(drop);
+    emit_frame(drop);
 }
 
 void ReaderWorker::try_extract_frame() {
@@ -292,7 +300,7 @@ void ReaderWorker::try_extract_frame() {
                     // 下一真帧的时间仍以前一真帧为基准(commit 3 的解析器锚点同理)
                     ++m_frame_count;
                     drop.meta.local_rx_ms = QDateTime::currentMSecsSinceEpoch();  // 收帧本地时刻(回退显示时间用)
-                    emit frame_ready(drop);
+                    emit_frame(drop);
                 }
                 m_in_buf.remove(0, next_3c);
                 continue;
@@ -349,7 +357,7 @@ void ReaderWorker::try_extract_frame() {
                 drop.error_reason = trl::L("DROP:双 0x3C 成帧垃圾");
                 ++m_frame_count;
                 drop.meta.local_rx_ms = QDateTime::currentMSecsSinceEpoch();  // 收帧本地时刻(回退显示时间用)
-                emit frame_ready(drop);
+                emit_frame(drop);
             }
             m_in_buf.remove(0, idx3c);
             m_get3c = false;
@@ -415,7 +423,7 @@ void ReaderWorker::try_extract_frame() {
             drop.error_reason = trl::L("DROP:帧长小于 FCH(16B)");
             ++m_frame_count;
             drop.meta.local_rx_ms = QDateTime::currentMSecsSinceEpoch();  // 收帧本地时刻(回退显示时间用)
-            emit frame_ready(drop);
+            emit_frame(drop);
             continue;
         }
 
@@ -505,7 +513,7 @@ void ReaderWorker::try_extract_frame() {
         bf.meta.has_time_tag = false;
         bf.data = unesc;
         ++m_frame_count;
-        emit frame_ready(bf);
+        emit_frame(bf);
     }
 }
 
@@ -582,7 +590,7 @@ void ReaderWorker::process_raw_hex_line(const QByteArray& line) {
         bf.meta.local_rx_ms = QDateTime::currentMSecsSinceEpoch();  // 收帧本地时刻(解析器回退显示时间用)
         bf.raw_wire   = raw;   // 0x3C...0x3E 原样
         bf.data       = data;  // 反转义后的 [dlen][ts][media][MPDU]
-        emit frame_ready(bf);
+        emit_frame(bf);
         return;
     }
 }
@@ -617,6 +625,8 @@ qint64 ReaderWorker::bcd_ms_of(const QByteArray& b) {
 SerialReader::SerialReader(QObject* parent) : QObject(parent), m_thread(nullptr), m_worker(nullptr) {
     m_thread = new QThread(this);
     m_worker = new ReaderWorker();
+    m_credit = std::make_shared<FrameCredit>();   // 消费者接入前不限流(enabled=false)
+    m_worker->set_flow_credit(m_credit);
     m_worker->moveToThread(m_thread);
     connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
 
@@ -639,6 +649,7 @@ SerialReader::~SerialReader() {
 }
 
 bool SerialReader::start(const ReaderConfig& cfg) {
+    m_credit->reset();   // 新会话:上一会话未归还的额度作废
     emit request_start(cfg);
     return true;
 }

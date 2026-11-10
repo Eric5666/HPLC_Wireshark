@@ -4,7 +4,7 @@
 #define FRAMEDISPATCHER_H
 
 #include "iprotocolparser.h"
-#include "ringbuffer.h"
+#include "frame_credit.h"
 #include "statistics.h"
 #include <QObject>
 #include <QThread>
@@ -18,6 +18,8 @@ public:
                               QObject* parent = nullptr);
     /// @brief 请求停止:置位后 on_frame 立即返回不再解析(供 shutdown 快速清空积压帧)
     void request_stop() { m_stopped.store(true); }
+    /// @brief 背压额度(线程启动前设置):停止后跳过的帧在此归还
+    void set_flow_credit(std::shared_ptr<FrameCredit> c) { m_credit = std::move(c); }
 
 public slots:
     void on_frame(const BplcFrame& frame);
@@ -33,7 +35,8 @@ private:
     MsduState   m_msdu;
     std::atomic<bool> m_stopped{false};
     std::atomic<quint64> m_frame_count{0};  ///< 已解析帧数(日志统计)
-    std::atomic<quint64> m_parse_us{0};     ///< parse 累计耗时(µs,含节流补齐)
+    std::atomic<quint64> m_parse_us{0};     ///< parse 累计耗时(µs)
+    std::shared_ptr<FrameCredit> m_credit;  ///< 背压额度(可空)
 };
 
 class FrameDispatcher : public QObject {
@@ -45,6 +48,9 @@ public:
     FrameStatistics* statistics() { return &m_stats; }
 
     void connect_source(QObject* source);
+    /// @brief 接入数据源的背压额度:每帧解析结果在 GUI 线程 on_parsed 后归还
+    /// @details 无可用解析器(无 worker)时不接入,额度保持不限流,避免 Reader 永远等待。
+    void set_flow_credit(std::shared_ptr<FrameCredit> credit);
     void disconnect_source(QObject* source);
     /// @brief 立即停止解析:断开 worker 信号并退出解析线程;
     ///        供重建 dispatcher 时快速让旧线程停止处理积压帧。
@@ -63,6 +69,7 @@ private:
     FrameStatistics     m_stats;
     std::atomic<quint64> m_total{0};
     std::atomic<quint64> m_dropped{0};
+    std::shared_ptr<FrameCredit> m_credit;  ///< 背压额度(可空)
 };
 
 #endif // FRAMEDISPATCHER_H
