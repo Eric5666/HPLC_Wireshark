@@ -65,6 +65,16 @@ if [ -n "$QT_PLUGINS" ] && [ -d "$QT_PLUGINS/platforms" ]; then
     # TLS 后端(更新检查/Sentry 上报走 HTTPS,缺它则 "No functional TLS backend")
     cp -r "$QT_PLUGINS/tls" AppDir/usr/lib/qt6/plugins/ 2>/dev/null || \
         echo "::warning::未找到 Qt TLS 插件($QT_PLUGINS/tls),HTTPS 功能将不可用"
+    # SQL 驱动(TOPO 历史存 SQLite:QSqlDatabase("QSQLITE") 打开数据库,缺它则
+    # 驱动加载失败、拓扑历史写不进库)。只拷用到的 libqsqlite.so,不拷整目录
+    # (mysql/odbc/psql 等驱动用不到)。缺失直接失败,不让坏包流出去。
+    if [ -f "$QT_PLUGINS/sqldrivers/libqsqlite.so" ]; then
+        mkdir -p AppDir/usr/lib/qt6/plugins/sqldrivers
+        cp "$QT_PLUGINS/sqldrivers/libqsqlite.so" AppDir/usr/lib/qt6/plugins/sqldrivers/
+    else
+        echo "::error::未找到 Qt SQLite 驱动($QT_PLUGINS/sqldrivers/libqsqlite.so),TOPO 历史数据库将无法打开" >&2
+        exit 1
+    fi
 fi
 echo "收集到 $(ls AppDir/usr/lib/*.so* 2>/dev/null | wc -l) 个库"
 
