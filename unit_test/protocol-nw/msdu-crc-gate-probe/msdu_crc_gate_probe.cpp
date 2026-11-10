@@ -14,6 +14,7 @@
 #include "bplcframe.h"
 #include "crc.h"
 #include "msdu_crc_state.h"
+#include "pb_assembler.h"
 #include "nw_2021_parser.h"
 #include "gw_2026_parser.h"
 #include "packetlistmodel.h"   // UI 层逐字断言(Info / MSDU Type / ForegroundRole)
@@ -562,6 +563,49 @@ int main(int argc, char** argv) {
             const MsduInfo g = msdu_crc_gate(m);
             CHECK(g.summary == m.summary && g.tree.size() == 2, "R7b 摘要保留、树不裁剪");
         }
+    }
+
+    // ===== S: CRC32 learning policy and fail-evidence scalar sanitization =====
+    {
+        const auto set_crc = [](MsduInfo& m, const QString& value) {
+            MsduFieldNode n;
+            n.name = QStringLiteral("MSDU CRC32");
+            n.value = value;
+            m.tree.append(n);
+        };
+        MsduInfo good;
+        set_crc(good, QStringLiteral("0x12345678 OK"));
+        CHECK(msdu_crc_allows_learning(good, false),
+              "S1 MSDU CRC32 OK allows learning despite failed PB fallback");
+        MsduInfo bad;
+        set_crc(bad, QStringLiteral("0x12345678 FAIL"));
+        CHECK(!msdu_crc_allows_learning(bad, true),
+              "S2 MSDU CRC32 FAIL blocks learning even when PB fallback passes");
+        MsduInfo unavailable;
+        CHECK(!msdu_crc_allows_learning(unavailable, false)
+                  && msdu_crc_allows_learning(unavailable, true),
+              "S3 missing MSDU CRC uses PB fallback only");
+
+        bad.msdu_src_tei = 1;
+        bad.msdu_dst_tei = 2;
+        bad.msdu_src_mac = 0x112233445566ULL;
+        bad.msdu_dst_mac = 0xAABBCCDDEEFFULL;
+        bad.restart_count = 7;
+        bad.tei_mac_pairs.append({1, 0x112233445566ULL});
+        bad.orig_srcs.append({1, 0x112233445566ULL});
+        bad.orig_dsts.append({2, 0xAABBCCDDEEFFULL});
+        bad.topo_event.kind = TopoEventKind::AssocReq;
+        const MsduInfo evidence = msdu_crc_fail_evidence(bad);
+        CHECK(evidence.msdu_src_tei == -1 && evidence.msdu_dst_tei == -1
+                  && evidence.msdu_src_mac == 0 && evidence.msdu_dst_mac == 0,
+              "S4 failed CRC clears source/destination topology scalars");
+        CHECK(evidence.restart_count == kRestartCountInvalid,
+              "S5 failed CRC clears restart-count evidence");
+        CHECK(evidence.tei_mac_pairs.isEmpty() && evidence.orig_srcs.isEmpty()
+                  && evidence.orig_dsts.isEmpty()
+                  && evidence.topo_event.kind == TopoEventKind::Other
+                  && evidence.topo_extra_events.isEmpty(),
+              "S6 failed CRC clears all topology learning evidence");
     }
 
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", failures);

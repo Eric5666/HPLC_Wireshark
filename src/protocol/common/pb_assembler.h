@@ -78,11 +78,8 @@ struct AssembleResult {
                                    ///< 候选口径,待决策;在此之前保持本语义。
     bool all_crc_ok = true;        ///< 全部完整块 CRC24 通过
     QByteArray msdu_body;          ///< 全部块体依序拼接(分片重组缓冲/级联体流)
-    QVector<CascadeMac> cascade;   ///< 聚合级联拆分结果(any_aggregated 时有效;
-                                   ///< 已剔除与 CRC 失败块体相交的记录,见下)
-    int cascade_crc_skipped = 0;   ///< 聚合:因块 CRC 失败被剔除的级联记录数(用户
-                                   ///< 2026-10-29 定:CRC 失败块数据不准确不解析,
-                                   ///< 仅解析全部字节均来自 CRC 通过块的记录)
+    QVector<CascadeMac> cascade;   ///< 聚合级联拆分结果(any_aggregated 时有效);不按 PB CRC 剔除
+    int cascade_crc_skipped = 0;   ///< 兼容字段:现保持 0,CRC 决策由解析/学习调用方逐条完成
     int cascade_used = 0;          ///< 聚合:级联记录流有效长度(逐条 2+级联数据块长度
                                    ///< 累加,不含块体尾填充;非聚合=0)
     int cascade_break_declared_len = -1; ///< 聚合:级联 while 因"声明长度越界/非法"终止时,
@@ -260,24 +257,8 @@ inline AssembleResult assemble_pb_blocks(const QByteArray& raw, int pb_num,
             o += 2 + clen;
         }
         res.cascade_used = o;   // 级联记录流有效长度(块体尾填充不计,协议语义=逐条累加)
-        // CRC 失败块不解析(用户 2026-10-29 定):记录 span=[body_start,
-        // body_start+2+mac_len),只要与任一 CRC 失败块体区间
-        // [i*body_len,(i+1)*body_len) 相交即剔除;msdu_body 本身不动
-        // (高亮/块映射仍按原体流),cascade_used 亦保持原流长度。
-        QVector<CascadeMac> kept;
-        kept.reserve(res.cascade.size());
-        for (const CascadeMac& c : res.cascade) {
-            const int s = c.body_start, e = c.body_start + 2 + c.mac_len;
-            bool bad = false;
-            for (int i = 0; i < res.blocks.size() && !bad; ++i) {
-                if (res.blocks[i].crc_ok) continue;
-                const int bs = i * body_len, be = bs + body_len;
-                if (s < be && e > bs) bad = true;
-            }
-            if (bad) ++res.cascade_crc_skipped;
-            else kept.append(c);
-        }
-        res.cascade = kept;
+        // 不按 PB CRC 在此剔除级联段:只要单条 MSDU CRC32 正确,即使 PB 块
+        // CRC 错也可用于拓扑;CRC32 FAIL/N-A 的分段策略由解析/学习调用方逐条决定。
     }
     return res;
 }
@@ -290,6 +271,23 @@ inline AssembleResult assemble_pb_blocks(const QByteArray& raw, int pb_num,
 ///          pb_crc_ok=false 标红)。级联拆分同样必须先过本判据。
 inline bool body_parseable(const AssembleResult& r) {
     return r.reassembly_ok && !r.msdu_body.isEmpty();
+}
+
+/// @brief 级联记录是否完全避开 CRC 失败 PB 块(仅 MSDU CRC32 不可用时的回退门)。
+/// @details span 含 2B 级联头与 MAC 记录; blocks 必须与 body_start 的体流序一致。
+inline bool cascade_span_avoids_bad_blocks(const CascadeMac& c,
+                                           const QVector<PbBlock>& blocks,
+                                           int block_body_len) {
+    if (c.body_start < 0 || c.mac_len <= 0 || block_body_len <= 0) return false;
+    const int start = c.body_start;
+    const int end = start + 2 + c.mac_len;
+    for (int i = 0; i < blocks.size(); ++i) {
+        if (blocks[i].crc_ok) continue;
+        const int block_start = i * block_body_len;
+        const int block_end = block_start + block_body_len;
+        if (start < block_end && end > block_start) return false;
+    }
+    return true;
 }
 
 /// @brief 按**到达序(线序)**回填块头与 CRC(供 UI/树按线序逐块展示)。

@@ -77,6 +77,21 @@ inline MsduInfo msdu_crc_fail_evidence(const MsduInfo& in) {
     msdu_crc_prune(in.tree, kept);
     out.tree = kept;
     out.sta_mac = 0;
+    // CRC32 FAIL makes every payload-derived scalar unusable too. In particular,
+    // topo_input consumes these fields independently of the field tree.
+    out.simple_head = false;
+    out.msdu_seq = 0;
+    out.msdu_src_tei = -1;
+    out.msdu_dst_tei = -1;
+    out.msdu_send_type = -1;
+    out.msdu_src_mac = 0;
+    out.msdu_dst_mac = 0;
+    out.vlan_tag = 0;
+    out.msdu_type = 0;
+    out.restart_count = kRestartCountInvalid;
+    out.broadcast_direction = 0xFF;
+    out.route_hops_left = 0xFF;
+    out.total_len = -1;
     out.tei_mac_pairs.clear();
     out.orig_srcs.clear();
     out.orig_dsts.clear();
@@ -92,6 +107,16 @@ inline MsduInfo msdu_crc_fail_evidence(const MsduInfo& in) {
 /// @brief 解析结果统一收敛:MSDU CRC32 FAIL ⇒ 降级为证据节点,其余原样返回
 inline MsduInfo msdu_crc_gate(const MsduInfo& in) {
     return msdu_crc_state(in) == MsduCrcState::Fail ? msdu_crc_fail_evidence(in) : in;
+}
+
+/// @brief MSDU CRC32 outranks PB-block CRC for topology learning.
+/// @param pb_fallback_ok Legacy structural/PB check, used only when this MSDU has
+///        no available CRC32 evidence. A valid MSDU CRC permits learning even if
+///        one or more PB CRCs failed; a failed MSDU CRC never permits it.
+inline bool msdu_crc_allows_learning(const MsduInfo& msdu, bool pb_fallback_ok) {
+    const MsduCrcState state = msdu_crc_state(msdu);
+    return state == MsduCrcState::Ok
+        || (state == MsduCrcState::NotAvailable && pb_fallback_ok);
 }
 
 /// @brief 整行"CRC 失败标红"判据(UI 与探针共用,避免判据漂移)
