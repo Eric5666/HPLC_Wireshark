@@ -82,6 +82,8 @@ private slots:
     void replay_topo_history();        ///< 请求拓扑工作线程生成冻结快照
     void on_topo_history_ready(quint64 request_id, qint64 target_frame, qint64 target_ms,
                                bool active, const TopoStateMap& states);
+    void on_topo_history_failed(quint64 request_id, qint64 target_frame, qint64 target_ms,
+                                bool active, const QString& message);
     void on_ranges_selected(const QList<QPair<int, int>>& ranges, const QByteArray& copy_bytes);
     void on_flush_buffer();
     void refresh_status_bar();

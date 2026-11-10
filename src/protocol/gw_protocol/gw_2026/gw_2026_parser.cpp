@@ -14,6 +14,7 @@
 #include "gw_2026_ack_parser.h"
 #include "gw_2026_coord_parser.h"
 #include "common/fieldtools.h"
+#include "common/msdu_crc_state.h"
 #include "common/bcd.h"
 #include "crc.h"
 #include "QsLog.h"
@@ -48,6 +49,8 @@ GW_2026_Parser::GW_2026_Parser() {}
 // 学习层合并(供 OFDMA/TDA 站点 MSDU 用):对全并、头对以对形式并入、topo 事件首个进 topo_event、其余进 topo_extra_events;
 // 头对字段见 HDC2.0 4-2 表2 标准 MAC 帧头;不改 present/摘要/树显示(站点 MSDU 仅作学习源,不进包列表 MSDU 列)。
 static void merge_msdu_learn(MsduInfo& dst, const MsduInfo& src) {
+    // Defense in depth: never merge learning from an MSDU with failed CRC32.
+    if (msdu_crc_state(src) == MsduCrcState::Fail) return;
     for (const auto& p : src.tei_mac_pairs) dst.tei_mac_pairs.append(p);
     if (src.msdu_src_tei > 0 && src.msdu_src_mac != 0)
         dst.tei_mac_pairs.append({(quint16)src.msdu_src_tei, src.msdu_src_mac});
@@ -291,14 +294,14 @@ GW_2026_Parser::Result GW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
         // 与南网 body_parseable 口径一致。
         for (const auto& st : r.mpdu.sof_stations) {
             if (st.msdu.isEmpty()) continue;
-            // CRC 失败块不解析(用户 2026-10-29 定,NW 同款多块补定):本站全好,
-            // 或本站 MSDU span 避开坏块,才解析合并;否则该站不解析不学习,坏块字节
-            // 不进 tei_mac_pairs/orig/topology。本站 MSDU 只用于学习,故无需摘要附注;
-            // 块 CRC 失败仍由 pb_crc_oks/红行可见。
-            // ⚠ 配对口径收在 station_msdu_parseable 里:st.pb_crc_oks 是**到达序**、
-            //   st.msdu 是**seq 序**,这里不能自己按下标配对(乱序时两向都会错)。
-            if (!gw_2026_sof::station_msdu_parseable(st)) continue;
-            merge_msdu_learn(r.msdu, GW_2026_MsduParser::parse(st.msdu));
+            // MSDU CRC32 是拓扑学习的最终判据:有效 MSDU CRC 可覆盖 PB CRC
+            // 失败;仅在 MSDU CRC 不可用时,才用按 seq 对齐的 PB span 作保守回退。
+            // ⚠ station_msdu_parseable 收敛了 st.pb_crc_oks(到达序) 与 st.msdu(seq 序)
+            // 的配对,不能在此直接按下标比较。
+            const MsduInfo candidate = GW_2026_MsduParser::parse(st.msdu);
+            const bool pb_fallback_ok = gw_2026_sof::station_msdu_parseable(st);
+            if (msdu_crc_allows_learning(candidate, pb_fallback_ok))
+                merge_msdu_learn(r.msdu, candidate);
         }
     } else if (ft == GW_2026_FrameType::BEACON) {
         // BEACON:FCH 摘要 + 载荷区解析(beacon 模块)

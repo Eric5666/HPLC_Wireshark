@@ -6,7 +6,7 @@
 //   ④ 重复 seq 内容冲突 → seq_conflict + 不重组
 //   ⑤ seq 越界(5 / pb_num 4) → seq_oob + 不重组
 //   ⑥ 跨帧污染回归:无 END 帧后紧跟完整帧,必须正常重组(旧实现整帧被废)
-//   ⑦ 聚合帧乱序重排后 cascade 拆分与坏块剔除仍正确
+//   ⑦ 聚合帧乱序重排后保留 cascade 候选,逐条 CRC 决策与学习阶段一致
 //   ⑧ 树层 rel→raw:乱序重排后落在正确块(用 blocks[i].raw_offset 校验)
 // 构帧坐标:南网 BPLC 表133 / SPLC 表47(4B 头,序列号 16bit LE);
 //           国网 PB 头 1B(低 6 位序列号,bit7=END / bit6=START)。
@@ -244,16 +244,20 @@ static void test_aggregate() {
               r.cascade.size() == 2 && r.cascade[1].mac.size() == blen - 2
               && r.cascade[1].mac.at(0) == 'B');
     }
-    {   // 翻转到达序第 0 块(seq=1,承载 'B')的 CRC → 只剔除与坏块相交的记录
+    {   // 翻转到达序第 0 块(seq=1,承载 'B')的 CRC:保留候选,回退门仅拒绝 B
         QByteArray bad = f;
         bad[16 + pbsz - 1] = char(quint8(bad.at(16 + pbsz - 1)) ^ 0xFF);
         const pb_asm::AssembleResult r =
             pb_asm::assemble_pb_blocks(bad, 2, pbsz, nw_layout(16));
         check("agg : !all_crc_ok", !r.all_crc_ok);
-        check("agg : cascade_crc_skipped==1", r.cascade_crc_skipped == 1);
-        check("agg : kept only 'A'",
-              r.cascade.size() == 1 && r.cascade[0].mac.size() == blen - 2
-              && r.cascade[0].mac.at(0) == 'A');
+        check("agg : cascade candidates retained", r.cascade.size() == 2
+              && r.cascade_crc_skipped == 0);
+        check("agg : valid-CRC fallback accepts 'A'",
+              r.cascade.size() == 2 && pb_asm::cascade_span_avoids_bad_blocks(
+                  r.cascade[0], r.blocks, blen));
+        check("agg : bad-PB fallback rejects 'B'",
+              r.cascade.size() == 2 && !pb_asm::cascade_span_avoids_bad_blocks(
+                  r.cascade[1], r.blocks, blen));
     }
 }
 

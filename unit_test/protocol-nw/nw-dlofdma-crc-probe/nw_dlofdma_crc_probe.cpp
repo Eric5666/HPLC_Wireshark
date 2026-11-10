@@ -52,6 +52,14 @@ static QByteArray build_nw_assoc(int dst_tei, quint64 dst_mac, int src_tei,
     p[44] = 0x00; p[45] = 0x81; p[46] = 0x00; p[47] = 0x00;  // VLAN 0x8100
     p[48] = 0xE1; p[49] = 0x88;                              // type 0x88E1
     memcpy(p + 50, mme.constData(), mme.size());
+    // MSDU 帧尾 4B CRC32:与 append_msdu_crc 同语义(crc32_le 遍历 len-4 字节,
+    // 存储在 payload_start(32, 长头)+payload_len 起的 4B,小端)。合成帧必须是"好载荷",
+    // 否则新口径(MSDU CRC 正确才采信)会正确判坏载荷并清空 learning。
+    const quint32 crc = crc32_le(p + 32, msdu_len + 4);
+    p[32 + msdu_len + 0] = quint8(crc & 0xFF);
+    p[32 + msdu_len + 1] = quint8((crc >> 8) & 0xFF);
+    p[32 + msdu_len + 2] = quint8((crc >> 16) & 0xFF);
+    p[32 + msdu_len + 3] = quint8((crc >> 24) & 0xFF);
     return f;
 }
 

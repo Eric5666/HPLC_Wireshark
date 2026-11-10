@@ -18,6 +18,7 @@ TopoController::TopoController(QObject* parent) : QObject(parent) {
     connect(m_worker, &TopoReplayWorker::live_state_changed, this, &TopoController::live_state_changed, Qt::QueuedConnection);
     connect(m_worker, &TopoReplayWorker::live_states_reset, this, &TopoController::live_states_reset, Qt::QueuedConnection);
     connect(m_worker, &TopoReplayWorker::history_ready, this, &TopoController::history_ready, Qt::QueuedConnection);
+    connect(m_worker, &TopoReplayWorker::history_failed, this, &TopoController::history_failed, Qt::QueuedConnection);
     connect(m_worker, &TopoReplayWorker::frame_page_ready, this, &TopoController::frame_page_ready, Qt::QueuedConnection);
     connect(m_worker, &TopoReplayWorker::anomaly_page_ready, this, &TopoController::anomaly_page_ready, Qt::QueuedConnection);
     connect(m_worker, &TopoReplayWorker::worker_error, this, &TopoController::worker_error, Qt::QueuedConnection);

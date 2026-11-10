@@ -507,9 +507,19 @@ void TopoReplayWorker::request_anomaly_page(quint64 request_id, quint32 nid, qin
 
 void TopoReplayWorker::request_history(quint64 request_id, qint64 target_frame,
                                        qint64 target_ms, bool active) {
-    if (!open_store()) return;
+    if (!open_store()) {
+        const QString message = m_store_error_message.isEmpty()
+            ? QStringLiteral("Topology replay store is unavailable") : m_store_error_message;
+        emit history_failed(request_id, target_frame, target_ms, active, message);
+        return;
+    }
     QHash<quint32, TopoState> states;
-    if (!state_at(target_frame, states)) return;
+    if (!state_at(target_frame, states)) {
+        const QString message = m_store_error_message.isEmpty()
+            ? QStringLiteral("Topology history could not be reconstructed") : m_store_error_message;
+        emit history_failed(request_id, target_frame, target_ms, active, message);
+        return;
+    }
     emit history_ready(request_id, target_frame, target_ms, active, states);
 }
 
@@ -550,6 +560,7 @@ void TopoReplayWorker::shutdown() {
 
 void TopoReplayWorker::report_store_error(const QString& message) {
     m_store_failed = true;
+    m_store_error_message = message;
     if (m_store_error_reported) return;
     m_store_error_reported = true;
     emit worker_error(message);

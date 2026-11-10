@@ -145,6 +145,44 @@ jobs:
             "$GITHUB_WORKSPACE/unit_test/protocol-gw/gw-topo-merge-probe/gw_topo_merge.bin"
           unit_test/filter/mac-filter-probe/build/mac_filter_probe
 
+      - name: NW DL/UL OFDMA + truncated PB CRC24 regression probes
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          # Qt symlink farm:上一步建过就复用(同一 runner 同一 workspace),
+          # 没建过(单独重跑本步)就按 qmake -query 重建一次。
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)"  "$QT_ROOT/plugins"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          for d in nw-dlofdma-crc-probe nw-trunc-pbcrc-probe nw-ul-crc-probe; do
+            (cd "unit_test/protocol-nw/$d" && bash build.sh)
+          done
+
+          # 产物路径随平台不同:Windows(Qt 默认 debug_and_release)在 release/ 子目录,
+          # Linux 单配置直接落在 build/<name>/ 下 ⇒ 逐个试,取第一个可执行的
+          run_probe() {
+            name="$1"; bin="$2"
+            B="unit_test/protocol-nw/$name/build/$bin/release/$bin"
+            [ -x "$B" ] || B="unit_test/protocol-nw/$name/build/$bin/$bin"
+            if [ ! -x "$B" ]; then
+              echo "::error::$name 未找到可执行文件(检查 build.sh 产物路径)"
+              find "unit_test/protocol-nw/$name/build" -maxdepth 3 -type f | head -20
+              exit 1
+            fi
+            "$B"
+          }
+          run_probe nw-dlofdma-crc-probe  nw_dlofdma_crc_probe
+          run_probe nw-trunc-pbcrc-probe  nw_trunc_pbcrc_probe
+          run_probe nw-ul-crc-probe       nw_ul_crc_probe
+
       - name: Topology anomaly / identity-conflict regression (MAC↔TEI, restart-count)
         env:
           QT_QPA_PLATFORM: offscreen

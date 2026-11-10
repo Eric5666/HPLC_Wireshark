@@ -76,6 +76,8 @@ signals:
     void live_states_reset(const TopoStateMap& states);
     void history_ready(quint64 request_id, qint64 target_frame, qint64 target_ms,
                        bool active, const TopoStateMap& states);
+    void history_failed(quint64 request_id, qint64 target_frame, qint64 target_ms,
+                        bool active, const QString& message);
     void worker_error(const QString& message);
     void frame_page_ready(const TopoFramePage& page);
     void anomaly_page_ready(const TopoAnomalyPage& page);
@@ -111,6 +113,7 @@ private:
     qint64 m_last_applied_frame = -1;
     bool m_store_failed = false;
     bool m_store_error_reported = false;
+    QString m_store_error_message;
 };
 
 #endif // TOPO_WORKER_H

@@ -356,6 +356,7 @@ struct MMeI18nReg {
         trl::register_en("未定义的VLAN/MSDU Type组合", "Undefined VLAN/MSDU Type combination");
         trl::register_en("不支持的MMe版本（仅支持1）", "Unsupported MMe version (only 1 supported)");
         trl::register_en("校验数据缺失（已有%1/4字节）", "CRC data missing (%1/4 bytes available)");
+        trl::register_en("校验数据缺失（载荷长度 0）", "CRC data missing (zero payload length)");
         // 拓扑事件变更说明(TOPO 路由变更表 desc)
         trl::register_en("关联请求: STA %1 正在入网", "Assoc request: STA %1 joining");
         trl::register_en("关联请求: STA %1 正在入网（%2）", "Assoc request: STA %1 joining (%2)");
@@ -459,6 +460,15 @@ static void append_msdu_crc(MsduInfo& out, const QByteArray& body, int payload_s
     crc.name = QStringLiteral("MSDU CRC32");
     crc.rel_start = available > 0 ? crc_off : -1;
     crc.rel_len   = available;
+    // payload_len<=0:CRC32 遍历 len-4 会 0 次迭代 ⇒ 恒得 0,与全零存储字段"相等"而误报 OK。
+    // 无有效载荷时按"校验数据缺失"处理(三态 N-A),不得判 OK(用户 2026-11 裁决:
+    // MSDU CRC 正确才解析,空载荷不存在"正确 CRC")。body_parseable 时此 N-A 不裁剪,
+    // 摘要按不可识别处理;body_parseable==false 时落到「PB 序号异常未解析」兜底。
+    if (payload_len <= 0) {
+        crc.value = trl::L("校验数据缺失（载荷长度 0）");
+        out.tree.append(crc);
+        return;
+    }
     if (available == 4) {
         const quint32 stored = (quint32)get_bits(body, crc_off, 0, 32);
 // crc32_le 内部遍历 len-4 字节;此处传 载荷+4(全长)即校验载荷区,

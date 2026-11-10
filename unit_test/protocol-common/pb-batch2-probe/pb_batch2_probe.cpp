@@ -435,9 +435,19 @@ static void test_nw_parse_gate() {
         {{0, 1, 2, 9}, 4, "oob-seq", false},
         {{0, 2, 3}, 4, "missing", false},
     };
+    // 让候选 MSDU 载荷非空(msdu_len=8)且 CRC32 必然 FAIL:填充载荷(0x00×8)之上的
+    // 存储 CRC 区也是 0x00,crc32_le 遍历 8B 得非零 ⇒ stored(0)!=calc(非零) ⇒ FAIL。
+    // (修了生产 payload_len<=0 假通过后,此处为真实校验,不再靠空载荷"碰巧"得结果。)
+    auto force_msdu_crc_fail = [](QByteArray& raw) {
+        // 块0 体起始 = 帧偏移 base16 + PB头4 = 20;msdu_len 在体[2..3] = 帧[22..23](16bit LE)
+        raw[16 + 4 + 2] = char(0x08);   // msdu_len = 8
+        raw[16 + 4 + 3] = char(0x00);
+    };
     for (const Case& c : cases) {
+        QByteArray raw = nw_sof_frame(c.seqs, c.declared);
+        if (!c.ok) force_msdu_crc_fail(raw);   // 序号异常帧:候选 MSDU CRC32 确实 FAIL
         NW_2021_Parser::Result r;
-        run(nw_sof_frame(c.seqs, c.declared), r);
+        run(raw, r);
         if (!r.accept || r.mpdu.pb_num != c.declared)
             std::printf("  [dbg %s] accept=%d reason=[%s] pb_num=%u pb_size=%u oks=%d\n",
                         c.tag, r.accept ? 1 : 0, qPrintable(r.reject_reason),
@@ -452,11 +462,45 @@ static void test_nw_parse_gate() {
             std::snprintf(buf, sizeof(buf), "nw-gate/%s: MSDU parsed (no 'not parsed' summary)", c.tag);
             check(buf, !r.msdu.summary.contains(QStringLiteral("未解析")));
         } else {
-            std::snprintf(buf, sizeof(buf), "nw-gate/%s: MSDU NOT parsed (seq error summary)", c.tag);
-            check(buf, r.msdu.summary == QStringLiteral("PB 序号异常未解析"));
-            std::snprintf(buf, sizeof(buf), "nw-gate/%s: no MSDU fields in tree", c.tag);
-            check(buf, r.msdu.tree.isEmpty());
+            // 用户 2026-11 裁决:MSDU CRC 正确才显示原摘要,否则为空并只留 CRC 证据节点。
+            // 序号异常(缺块/重复冲突/越界)时候选体仍产出 `MSDU CRC32 … FAIL` ⇒
+            // msdu_crc_gate() 清空摘要、树只留证据节点、present=true(内容不可采信)。
+            std::snprintf(buf, sizeof(buf), "nw-gate/%s: MSDU summary cleared (CRC FAIL)", c.tag);
+            check(buf, r.msdu.summary.isEmpty());
+            std::snprintf(buf, sizeof(buf), "nw-gate/%s: tree only CRC FAIL evidence", c.tag);
+            check(buf, r.msdu.tree.size() == 1
+                      && r.msdu.tree.first().name == QStringLiteral("MSDU CRC32")
+                      && r.msdu.tree.first().value.contains(QStringLiteral("FAIL")));
+            std::snprintf(buf, sizeof(buf), "nw-gate/%s: MSDU present (content untrusted)", c.tag);
+            check(buf, r.msdu.present);
         }
+    }
+
+    // 兜底 A:序号异常 + msdu_len=0(空载荷)⇒ 生产已修 payload_len<=0 → N/A(不产 OK/FAIL)
+    //   ⇒ crc_state==N/A && body_parseable==false ⇒ 仍走「PB 序号异常未解析」+ 树空(老路径)。
+    {
+        QByteArray raw = nw_sof_frame({0, 0, 2, 3}, 4);   // dup-seq:reassembly_ok=false,msdu_len 保持 0
+        NW_2021_Parser::Result r;
+        run(raw, r);
+        char buf[150];
+        std::snprintf(buf, sizeof(buf), "nw-gate/no-crc-zero: MSDU stays 'not parsed'");
+        check(buf, r.msdu.summary == QStringLiteral("PB 序号异常未解析"));
+        std::snprintf(buf, sizeof(buf), "nw-gate/no-crc-zero: tree empty");
+        check(buf, r.msdu.tree.isEmpty());
+    }
+    // 兜底 B:序号异常 + msdu_len=0xFFFF(越过体尾)⇒ append_msdu_crc 判「校验数据缺失」→ N/A ⇒ 同上。
+    {
+        QByteArray raw = nw_sof_frame({0, 0, 2, 3}, 4);   // dup-seq
+        // 块0 体起始 = 帧偏移 base16 + PB头4 = 20;msdu_len 在体[2..3] = 帧[22..23]
+        raw[16 + 4 + 2] = char(0xFF);
+        raw[16 + 4 + 3] = char(0xFF);
+        NW_2021_Parser::Result r;
+        run(raw, r);
+        char buf[150];
+        std::snprintf(buf, sizeof(buf), "nw-gate/no-crc-overflow: MSDU stays 'not parsed'");
+        check(buf, r.msdu.summary == QStringLiteral("PB 序号异常未解析"));
+        std::snprintf(buf, sizeof(buf), "nw-gate/no-crc-overflow: tree empty");
+        check(buf, r.msdu.tree.isEmpty());
     }
 }
 
