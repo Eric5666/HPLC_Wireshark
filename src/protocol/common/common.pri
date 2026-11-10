@@ -16,6 +16,7 @@ HEADERS += \
     $$PWD/bcd.h \
     $$PWD/fieldspec.h \
     $$PWD/pb_assembler.h \
-    $$PWD/nw_app_bid.h
+    $$PWD/nw_app_bid.h \
+    $$PWD/msdu_crc_state.h
 
 INCLUDEPATH += $$PWD

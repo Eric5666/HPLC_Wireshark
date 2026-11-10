@@ -18,6 +18,7 @@
 #include "pb_assembler.h"
 #include "bcd.h"
 #include "i18n.h"
+#include "common/msdu_crc_state.h"
 #include <QDateTime>
 
 
@@ -130,7 +131,8 @@ struct I18nReg {
         trl::register_en("训练帧（Bitloading训练帧）", "Training Frame (Bitloading)");
         trl::register_en("聚合帧(%1 个级联 MAC 帧)", "Aggregated Frame (%1 cascade MAC frames)");
         trl::register_en("（%1 段因块 CRC 失败未解析）", "(%1 segments skipped: block CRC failed)");
-        trl::register_en("块 CRC 失败未解析", "Block CRC failed, not parsed");
+        // 注:原「块 CRC 失败未解析」文案随用户 2026-11 裁决作废
+        // (PB 块 CRC 不再阻断 MSDU 解析,唯一 DROP 条件是 FC CRC),注册一并删除。
         trl::register_en("PB 序号异常未解析", "PB Sequence Error, Not Parsed");
         trl::register_en("聚合帧(%1 帧: %2)", "Aggregated Frame (%1 frames: %2)");
         trl::register_en("聚合帧(%1 帧: %2 ×%3)", "Aggregated Frame (%1 frames: %2 x%3)");
@@ -529,26 +531,24 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
                 // 表6:单跳帧协议(版本=2)仅无线信道支持;载波信道收到属异常(排查信道/串口错配)
                 if (!r.meta.is_rf && (((quint8)res.msdu_body[0] >> 1) & 0x03) == 2)
                     qWarning("NW_2026: single-hop MAC version=2 on PLC channel (isRF=0)");
-                // CRC 失败块不解析(用户 2026-10-29 定,多块补定:好块要解析):
-                // 首帧 MSDU 完整落在好块内即解析(坏块在 span 之外不影响);
-                // span 横跨坏块时仍整段不解析,仅留摘要说明(缺失字节会使
-                // 体流错位成错误数据);pb_crc_ok=false 已标 FAIL/红行。
-                // 先过统一判据 body_parseable(序号缺块/重复冲突/越界 → 不解析),
-                // 因为 msdu_span_avoids_bad_blocks 只看块 CRC、不看序号完整性。
-                if (pb_asm::body_parseable(res)
-                    && (res.all_crc_ok
-                        || pb_asm::msdu_span_avoids_bad_blocks(
-                               res.msdu_body, res.blocks,
-                               layout.body_len(r.mpdu.pb_size)))) {
-                    r.msdu = NW_2026_MsduParser::parse(res.msdu_body);
-                    // 高亮:单块连续 = 首块块体起点(块体在 raw_bytes 中的绝对偏移);
-                    // 多块重组时各块体被 PB 头/保留/CRC 隔断,不连续 → -1(沿用国网约定)
-                    r.msdu_raw_base = (r.mpdu.pb_num == 1 && !res.blocks.isEmpty())
-                                          ? res.blocks.first().body_raw_offset : -1;
-                } else {
-                    r.msdu.summary = res.reassembly_ok
-                        ? trl::L("块 CRC 失败未解析")
-                        : trl::L("PB 序号异常未解析");
+                // 用户 2026-11 裁决(原话):「DROP 只有在 fc crc 就失败时标记,否则应先解析,
+                // 存在 CRC 失败即标记红色」「MSDU CRC 正确即解析」「MSDU CRC32 FAIL 也标红」。
+                // ⇒ PB 块 CRC 不再作为 MSDU 解析的前置门控:先按候选解析,再由 MSDU CRC32 三态
+                //   决定是否采用(common/msdu_crc_state.h,与 packetlistmodel 标红判据共用);
+                //   FAIL ⇒ 摘要清空、字段树只留 `MSDU CRC32 … FAIL` 证据节点(msdu_crc_gate)。
+                // 序号完整性(body_parseable)只在 MSDU CRC 缺失(N-A)时兜底。
+                {
+                    const MsduInfo cand = NW_2026_MsduParser::parse(res.msdu_body);
+                    const MsduCrcState crc_state = msdu_crc_state(cand);
+                    if (crc_state != MsduCrcState::NotAvailable || pb_asm::body_parseable(res)) {
+                        r.msdu = msdu_crc_gate(cand);
+                        // 高亮:单块连续 = 首块块体起点(块体在 raw_bytes 中的绝对偏移);
+                        // 多块重组时各块体被 PB 头/保留/CRC 隔断,不连续 → -1(沿用国网约定)
+                        r.msdu_raw_base = (r.mpdu.pb_num == 1 && !res.blocks.isEmpty())
+                                              ? res.blocks.first().body_raw_offset : -1;
+                    } else {
+                        r.msdu.summary = trl::L("PB 序号异常未解析");
+                    }
                 }
             }
             // 截断提示(用户需求):声明块数 vs 实收块数,聚合/非聚合都标;FCH 声明 pb_num,
