@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "i18n.h"
 #include "miniz.h"
 #include "plugin_market.h"
 
@@ -189,7 +190,7 @@ static void test_zip_entry_names(const QString& root) {
         QString err;
         const bool ok = PluginMarket::unzip_to_dir(zip, dest, &err);
         check(qPrintable(QStringLiteral("unzip: entry '%1' rejected").arg(QString::fromLatin1(b))),
-              !ok && err.startsWith(QStringLiteral("unsafe entry")));
+              !ok && err.startsWith(QStringLiteral("Unsafe Zip Entry")));
         check(qPrintable(QStringLiteral("unzip: '%1' wrote nothing").arg(QString::fromLatin1(b))),
               !QFile::exists(root + QStringLiteral("/x/evil.txt")) &&
                   !QFile::exists(dest + QStringLiteral("/ok.txt")));
@@ -217,7 +218,7 @@ static void test_zip_limits(const QString& root) {
         make_zip(zip, many, MZ_BEST_SPEED);
         check("unzip: >4096 entries rejected",
               !PluginMarket::unzip_to_dir(zip, dest, &err) &&
-                  err.startsWith(QStringLiteral("too many")));
+                  err.startsWith(QStringLiteral("Too Many Zip Entries")));
     }
     {   // 单条目上限 64 MB
         const QString zip = root + QStringLiteral("/big.zip");
@@ -225,7 +226,7 @@ static void test_zip_limits(const QString& root) {
         QDir(dest).removeRecursively();
         check("unzip: entry > 64MB rejected",
               !PluginMarket::unzip_to_dir(zip, dest, &err) &&
-                  err.startsWith(QStringLiteral("zip entry too large")) &&
+                  err.startsWith(QStringLiteral("Zip Entry Too Large")) &&
                   !QFile::exists(dest + QStringLiteral("/big.bin")));
     }
     {   // 总量上限 256 MB(5 × 60 MB)
@@ -236,7 +237,7 @@ static void test_zip_limits(const QString& root) {
         QDir(dest).removeRecursively();
         check("unzip: total > 256MB rejected",
               !PluginMarket::unzip_to_dir(zip, dest, &err) &&
-                  err.startsWith(QStringLiteral("zip content too large")));
+                  err.startsWith(QStringLiteral("Zip Content Too Large")));
         QFile::remove(zip);
     }
 }
@@ -283,10 +284,14 @@ static void test_market_sha256(const QString& root) {
     };
     QString err;
     check("market: missing sha256 refused",
-          !run(QString(), &err) && err.contains(QStringLiteral("no valid sha256")));
+          !run(QString(), &err) && err.contains(QStringLiteral("Has No Valid SHA-256")));
     check("market: malformed sha256 refused", !run(QStringLiteral("deadbeef"), &err));
     check("market: wrong sha256 refused",
-          !run(QString(64, QLatin1Char('0')), &err) && err.contains(QStringLiteral("mismatch")));
+          !run(QString(64, QLatin1Char('0')), &err) && err.contains(QStringLiteral("SHA-256 Mismatch")));
+    trl::set_enabled(false);   // 中文界面:同一错误给中文文案(L3)
+    check("market: mismatch message localized (zh UI)",
+          !run(QString(64, QLatin1Char('0')), &err) && err.contains(QStringLiteral("SHA-256 不匹配")));
+    trl::set_enabled(true);
     const bool good = run(good_sha, &err);
     if (!good) std::printf("  err: %s\n", qPrintable(err));
     check("market: correct sha256 installs", good);
@@ -373,6 +378,8 @@ static void test_install_context(const QString& root) {
 
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
+    // 市场错误文案已本地化(L3):默认按英文界面断言英文文本;另有一条中文界面用例
+    trl::set_enabled(true);
     QCoreApplication::setApplicationName(QStringLiteral("BPLC_MarketSafetyProbe"));
     QCoreApplication::setApplicationVersion(QStringLiteral("2.0.1"));
     QTemporaryDir tmp;

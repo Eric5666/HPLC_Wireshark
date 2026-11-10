@@ -8,11 +8,12 @@ TEMPLATE = app
 
 REPO = $$PWD/../../..
 INCLUDEPATH += $$REPO/src/plugin/market $$REPO/src/plugin/plugin_api \
-               $$REPO/src/app $$REPO/3rdparty/miniz
+               $$REPO/src/app $$REPO/src/common $$REPO/3rdparty/miniz
 
 SOURCES += market_safety_probe.cpp \
     $$REPO/src/plugin/market/plugin_market.cpp \
     $$REPO/src/app/updatemirror.cpp \
+    $$REPO/src/common/i18n.cpp \
     $$REPO/3rdparty/miniz/miniz.c \
     $$REPO/3rdparty/miniz/miniz_tdef.c \
     $$REPO/3rdparty/miniz/miniz_tinfl.c \

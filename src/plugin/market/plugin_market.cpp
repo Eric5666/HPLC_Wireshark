@@ -20,9 +20,85 @@
 #include <QTemporaryDir>
 #include <QUrl>
 
+#include "i18n.h"
 #include "miniz.h"  // 3rdparty/miniz, public domain, zip 解包
 #include "net_size_cap.h"
 #include "updatemirror.h"
+
+namespace {
+// 中→英注册(文件级,L3:市场错误/进度文案随界面语言切换)
+struct I18nRegPluginMarket {
+    I18nRegPluginMarket() {
+        trl::register_en("无写权限：%1，且未找到 pkexec；请以 root 运行或安装到可写位置",
+                         "No Write Permission for %1, and pkexec Not Found; Run as Root or Install to a Writable Location");
+        trl::register_en("提权安装失败",
+                         "Privileged Install Failed");
+        trl::register_en("无写权限，且未找到 pkexec",
+                         "No Write Permission, and pkexec Not Found");
+        trl::register_en("提权卸载失败",
+                         "Privileged Uninstall Failed");
+        trl::register_en("提权写入失败：%1",
+                         "Privileged Write Failed: %1");
+        trl::register_en("无法创建目录：%1",
+                         "Cannot Create Directory: %1");
+        trl::register_en("复制失败：%1",
+                         "Copy Failed: %1");
+        trl::register_en("插件列表超出大小上限",
+                         "Plugin Feed Exceeds the Size Limit");
+        trl::register_en("文本超出大小上限",
+                         "Text Exceeds the Size Limit");
+        trl::register_en("插件列表解析错误：%1",
+                         "Plugin Feed Parse Error: %1");
+        trl::register_en("版本索引无效",
+                         "Invalid Version Index");
+        trl::register_en("版本 %1 不支持当前平台（%2）",
+                         "Version %1 Does Not Support This Platform (%2)");
+        trl::register_en("需要主程序版本 >= %1（当前 %2）",
+                         "Requires App Version >= %1 (Current %2)");
+        trl::register_en("插件列表中 %1 %2 没有有效的 SHA-256，拒绝安装未校验的安装包",
+                         "Feed Entry for %1 %2 Has No Valid SHA-256; Refusing to Install an Unverified Package");
+        trl::register_en("正在下载 %1",
+                         "Downloading %1");
+        trl::register_en("安装包超出大小上限",
+                         "Package Exceeds the Size Limit");
+        trl::register_en("无法创建临时目录",
+                         "Cannot Create a Temporary Directory");
+        trl::register_en("写入临时文件失败",
+                         "Writing the Temporary File Failed");
+        trl::register_en("SHA-256 不匹配，安装包已拒收",
+                         "SHA-256 Mismatch, Package Rejected");
+        trl::register_en("安装包名称不匹配：%1",
+                         "Package Name Mismatch: %1");
+        trl::register_en("已安装 %1 %2",
+                         "Installed %1 %2");
+        trl::register_en("插件名称不安全：%1",
+                         "Unsafe Plugin Name: %1");
+        trl::register_en("正在请求管理员权限...",
+                         "Requesting Administrator Privileges...");
+        trl::register_en("无写权限：%1；请以管理员身份运行或选择可写位置",
+                         "No Write Permission for %1; Run as Administrator or Choose a Writable Location");
+        trl::register_en("无法删除旧版本：%1",
+                         "Cannot Remove the Old Version: %1");
+        trl::register_en("无法写入 meta.json：%1",
+                         "Cannot Write meta.json: %1");
+        trl::register_en("压缩包条目过多：%1",
+                         "Too Many Zip Entries: %1");
+        trl::register_en("不安全的压缩包条目：%1",
+                         "Unsafe Zip Entry: %1");
+        trl::register_en("压缩包条目过大：%1",
+                         "Zip Entry Too Large: %1");
+        trl::register_en("压缩包内容过大",
+                         "Zip Content Too Large");
+        trl::register_en("解压失败：%1",
+                         "Extract Failed: %1");
+        trl::register_en("压缩包读取错误",
+                         "Zip Read Error");
+        trl::register_en("不是有效的 zip 文件：%1",
+                         "Not a Valid Zip File: %1");
+    }
+};
+const I18nRegPluginMarket g_i18n_reg_plugin_market;
+}  // namespace
 
 namespace {
 
@@ -54,9 +130,8 @@ bool pkexec_deploy(const QString& base_dir, const QString& dest_dir,
                    const QString& staged_dir, QString* err) {
     if (!pkexec_available()) {
         if (err)
-            *err = QStringLiteral("no write permission for ") + base_dir +
-                   QStringLiteral(", and pkexec not found;"
-                                  " run as root or install to a writable location");
+            *err = trl::L("无写权限：%1，且未找到 pkexec；请以 root 运行或安装到可写位置")
+                       .arg(base_dir);
         return false;
     }
     QProcess proc;
@@ -71,7 +146,7 @@ bool pkexec_deploy(const QString& base_dir, const QString& dest_dir,
         if (err) {
             const QString se =
                 QString::fromLocal8Bit(proc.readAllStandardError()).trimmed();
-            *err = QStringLiteral("privileged install failed") +
+            *err = trl::L("提权安装失败") +
                    (se.isEmpty() ? QString() : QStringLiteral(": ") + se);
         }
         return false;
@@ -83,7 +158,7 @@ bool pkexec_deploy(const QString& base_dir, const QString& dest_dir,
 bool pkexec_remove(const QString& target_dir, QString* err) {
     if (!pkexec_available()) {
         if (err)
-            *err = QStringLiteral("no write permission, and pkexec not found");
+            *err = trl::L("无写权限，且未找到 pkexec");
         return false;
     }
     QProcess proc;
@@ -92,7 +167,7 @@ bool pkexec_remove(const QString& target_dir, QString* err) {
                              << target_dir);
     proc.waitForFinished(180000);
     if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0) {
-        if (err) *err = QStringLiteral("privileged uninstall failed");
+        if (err) *err = trl::L("提权卸载失败");
         return false;
     }
     return true;
@@ -103,7 +178,7 @@ bool pkexec_write_file(const QString& path, const QByteArray& data,
                        QString* err) {
     if (!pkexec_available()) {
         if (err)
-            *err = QStringLiteral("no write permission, and pkexec not found");
+            *err = trl::L("无写权限，且未找到 pkexec");
         return false;
     }
     QProcess proc;
@@ -114,7 +189,7 @@ bool pkexec_write_file(const QString& path, const QByteArray& data,
     proc.closeWriteChannel();
     proc.waitForFinished(180000);
     if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0) {
-        if (err) *err = QStringLiteral("privileged write failed: ") + path;
+        if (err) *err = trl::L("提权写入失败：%1").arg(path);
         return false;
     }
     return true;
@@ -124,7 +199,7 @@ bool pkexec_write_file(const QString& path, const QByteArray& data,
 bool copy_dir_recursive(const QString& src, const QString& dst, QString* err) {
     QDir s(src);
     if (!QDir().mkpath(dst)) {
-        if (err) *err = QStringLiteral("cannot create dir: ") + dst;
+        if (err) *err = trl::L("无法创建目录：%1").arg(dst);
         return false;
     }
     for (const QString& e : s.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
@@ -137,7 +212,7 @@ bool copy_dir_recursive(const QString& src, const QString& dst, QString* err) {
         const QString to = QDir(dst).absoluteFilePath(e);
         QFile::remove(to);
         if (!QFile::copy(from, to)) {
-            if (err) *err = QStringLiteral("copy failed: ") + from;
+            if (err) *err = trl::L("复制失败：%1").arg(from);
             return false;
         }
     }
@@ -193,7 +268,7 @@ void PluginMarket::fetch_feed(const QString& url) {
                 [this, rep, url, mirror_prefix]() {
             rep->deleteLater();
             if (netcap::size_exceeded(rep)) {
-                emit feed_error(QStringLiteral("feed exceeds size limit"));
+                emit feed_error(trl::L("插件列表超出大小上限"));
                 return;
             }
             if (rep->error() != QNetworkReply::NoError) {
@@ -219,7 +294,7 @@ void PluginMarket::fetch_text(const QString& url,
     connect(rep, &QNetworkReply::finished, this, [this, rep, url]() {
         rep->deleteLater();
         if (netcap::size_exceeded(rep)) {
-            emit text_error(url, QStringLiteral("text exceeds size limit"));
+            emit text_error(url, trl::L("文本超出大小上限"));
             return;
         }
         if (rep->error() != QNetworkReply::NoError) {
@@ -238,7 +313,7 @@ QList<MarketPlugin> PluginMarket::parse_feed(const QByteArray& json,
     QJsonParseError pe;
     const QJsonDocument doc = QJsonDocument::fromJson(json, &pe);
     if (pe.error != QJsonParseError::NoError || !doc.isObject()) {
-        if (err) *err = QStringLiteral("feed parse error: ") + pe.errorString();
+        if (err) *err = trl::L("插件列表解析错误：%1").arg(pe.errorString());
         return out;
     }
     const QJsonObject root = doc.object();
@@ -290,7 +365,7 @@ QList<MarketPlugin> PluginMarket::parse_feed(const QByteArray& json,
 void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
                                          int version_index) {
     if (version_index < 0 || version_index >= plugin.versions.size()) {
-        emit install_finished(false, QStringLiteral("bad version index"),
+        emit install_finished(false, trl::L("版本索引无效"),
                               plugin.name);
         return;
     }
@@ -298,7 +373,7 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
     if (!version_platform_ok(v)) {
         emit install_finished(
             false,
-            QStringLiteral("version %1 does not support this platform (%2)")
+            trl::L("版本 %1 不支持当前平台（%2）")
                 .arg(v.version, current_platform()),
             plugin.name);
         return;
@@ -306,7 +381,7 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
     if (!app_version_ok(v.min_app_version)) {
         emit install_finished(
             false,
-            QStringLiteral("requires app >= %1 (current %2)")
+            trl::L("需要主程序版本 >= %1（当前 %2）")
                 .arg(v.min_app_version,
                      QCoreApplication::applicationVersion()),
             plugin.name);
@@ -325,8 +400,7 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
     if (!is_sha256_hex(v.sha256)) {
         emit install_finished(
             false,
-            QStringLiteral("feed entry for %1 %2 has no valid sha256; "
-                           "refusing to install an unverified package")
+            trl::L("插件列表中 %1 %2 没有有效的 SHA-256，拒绝安装未校验的安装包")
                 .arg(plugin.name, v.version),
             plugin.name);
         return;
@@ -337,7 +411,7 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
     ctx.source = plugin.source.isEmpty() ? default_feed_url() : plugin.source;
     ctx.updated_at = v.updated_at;
     const QString package_url = resolve_market_url(v.url, plugin.mirror_prefix);
-    emit install_progress(QStringLiteral("downloading ") + package_url);
+    emit install_progress(trl::L("正在下载 %1").arg(package_url));
     QNetworkReply* rep = m_nam->get(QNetworkRequest(QUrl(package_url)));
     netcap::cap_reply_size(rep, netcap::kMaxPluginPackageBytes);
     // 安装上下文按值捕获:另一个安装同时进行也不会改写本请求的名字/sha256
@@ -345,7 +419,7 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
         rep->deleteLater();
         if (netcap::size_exceeded(rep)) {
             emit install_finished(false,
-                                  QStringLiteral("package exceeds size limit"),
+                                  trl::L("安装包超出大小上限"),
                                   ctx.name);
             return;
         }
@@ -355,7 +429,7 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
         }
         QTemporaryDir tmp;
         if (!tmp.isValid()) {
-            emit install_finished(false, QStringLiteral("no temp dir"), ctx.name);
+            emit install_finished(false, trl::L("无法创建临时目录"), ctx.name);
             return;
         }
         const QString zip_path =
@@ -367,7 +441,7 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
         // 且 chunked 响应 size() 为 -1,都会导致误判 write temp failed。
         if (data.isEmpty() || !f.open(QIODevice::WriteOnly) ||
             f.write(data) != data.size()) {
-            emit install_finished(false, QStringLiteral("write temp failed"),
+            emit install_finished(false, trl::L("写入临时文件失败"),
                                   ctx.name);
             return;
         }
@@ -384,7 +458,7 @@ void PluginMarket::install_from_file(const QString& zip_path) {
     // 先解包读清单拿到插件名(离线包无 feed,不做 sha256 校验)
     QTemporaryDir tmp;
     if (!tmp.isValid()) {
-        emit install_finished(false, QStringLiteral("no temp dir"), QString());
+        emit install_finished(false, trl::L("无法创建临时目录"), QString());
         return;
     }
     const QString staged = tmp.path() + QStringLiteral("/staged");
@@ -411,14 +485,13 @@ void PluginMarket::finish_install_from_zip(const QString& zip_path,
     if (!expected_sha256.isEmpty() &&
         !verify_sha256(zip_path, expected_sha256)) {
         emit install_finished(false,
-                              QStringLiteral("sha256 mismatch, package "
-                                             "rejected"),
+                              trl::L("SHA-256 不匹配，安装包已拒收"),
                               name);
         return;
     }
     QTemporaryDir tmp;
     if (!tmp.isValid()) {
-        emit install_finished(false, QStringLiteral("no temp dir"), name);
+        emit install_finished(false, trl::L("无法创建临时目录"), name);
         return;
     }
     const QString staged = tmp.path() + QStringLiteral("/staged");
@@ -434,12 +507,11 @@ void PluginMarket::finish_install_from_zip(const QString& zip_path,
     }
     if (!name.isEmpty() && m.name != name) {
         emit install_finished(
-            false, QStringLiteral("package name mismatch: ") + m.name, name);
+            false, trl::L("安装包名称不匹配：%1").arg(m.name), name);
         return;
     }
     if (deploy_staged(staged, m.name, ctx, &err)) {
-        emit install_progress(QStringLiteral("installed ") + m.name + " " +
-                              m.version);
+        emit install_progress(trl::L("已安装 %1 %2").arg(m.name, m.version));
         emit install_finished(true, QString(), m.name);
     } else {
         emit install_finished(false, err, m.name);
@@ -476,7 +548,7 @@ bool PluginMarket::deploy_staged(const QString& staged_dir,
     // 路径穿越防护:目标必须是安装目录下的一级子目录
     const QString dest = plugin_dir_path(base, plugin_name);
     if (dest.isEmpty()) {
-        if (err) *err = QStringLiteral("unsafe plugin name: ") + plugin_name;
+        if (err) *err = trl::L("插件名称不安全：%1").arg(plugin_name);
         return false;
     }
     // meta.json 先写进 staged:提权路径只需一次文件移动,无需提权后二次写文件
@@ -492,14 +564,13 @@ bool PluginMarket::deploy_staged(const QString& staged_dir,
 #ifdef Q_OS_LINUX
         // Linux: 安装目录不可写时请求提权(pkexec 弹出图形鉴权框)
         emit install_progress(
-            QStringLiteral("requesting administrator privileges..."));
+            trl::L("正在请求管理员权限..."));
         if (unload_cb) unload_cb();
         if (!pkexec_deploy(base, dest, staged_dir, err)) return fail_and_reload();
         return true;
 #else
         if (err)
-            *err = QStringLiteral("no write permission for ") + base +
-                   QStringLiteral("; run as administrator or choose a writable location");
+            *err = trl::L("无写权限：%1；请以管理员身份运行或选择可写位置").arg(base);
         return false;
 #endif
     }
@@ -509,7 +580,7 @@ bool PluginMarket::deploy_staged(const QString& staged_dir,
     QDir d(dest);
     if (d.exists()) {
         if (!d.removeRecursively()) {
-            if (err) *err = QStringLiteral("cannot remove old version: ") + dest;
+            if (err) *err = trl::L("无法删除旧版本：%1").arg(dest);
             return fail_and_reload();
         }
     }
@@ -523,7 +594,7 @@ bool PluginMarket::write_meta_json(const QString& plugin_dir,
     QFile mf(meta_path(plugin_dir));
     if (!mf.open(QIODevice::WriteOnly)) {
         if (err)
-            *err = QStringLiteral("cannot write meta.json: ") + plugin_dir;
+            *err = trl::L("无法写入 meta.json：%1").arg(plugin_dir);
         return false;
     }
     mf.write(QJsonDocument(QJsonObject{
@@ -694,20 +765,19 @@ bool PluginMarket::unzip_to_dir(const QString& zip_path,
     const QByteArray zp = zip_path.toLocal8Bit();
     if (!mz_zip_reader_init_file(&zip, zp.constData(), 0)) {
         if (err)
-            *err = QStringLiteral("not a valid zip: ") +
-                   QFileInfo(zip_path).fileName();
+            *err = trl::L("不是有效的 zip 文件：%1").arg(QFileInfo(zip_path).fileName());
         return false;
     }
     const mz_uint n = mz_zip_reader_get_num_files(&zip);
     if (n > kZipMaxEntries) {
         mz_zip_reader_end(&zip);
-        if (err) *err = QStringLiteral("too many zip entries: %1").arg(n);
+        if (err) *err = trl::L("压缩包条目过多：%1").arg(n);
         return false;
     }
     QDir().mkpath(dest_dir);
     const QString root = QFileInfo(dest_dir).canonicalFilePath();
     bool ok = !root.isEmpty();
-    if (!ok && err) *err = QStringLiteral("cannot create ") + dest_dir;
+    if (!ok && err) *err = trl::L("无法创建目录：%1").arg(dest_dir);
     // 先按中央目录校验全部条目(路径 + 声明大小),全部通过才开始写盘
     mz_uint64 total = 0;
     for (mz_uint i = 0; i < n && ok; ++i) {
@@ -720,18 +790,18 @@ bool PluginMarket::unzip_to_dir(const QString& zip_path,
         // 防 zip-slip:绝对路径/盘符/UNC/反斜杠/".." 组件一律拒绝
         if (safe_extract_path(dest_dir, rel).isEmpty()) {
             ok = false;
-            if (err) *err = QStringLiteral("unsafe entry: ") + rel;
+            if (err) *err = trl::L("不安全的压缩包条目：%1").arg(rel);
             break;
         }
         if (st.m_uncomp_size > kZipMaxEntryBytes) {
             ok = false;
-            if (err) *err = QStringLiteral("zip entry too large: ") + rel;
+            if (err) *err = trl::L("压缩包条目过大：%1").arg(rel);
             break;
         }
         total += st.m_uncomp_size;
         if (total > kZipMaxTotalBytes) {
             ok = false;
-            if (err) *err = QStringLiteral("zip content too large");
+            if (err) *err = trl::L("压缩包内容过大");
             break;
         }
     }
@@ -749,26 +819,26 @@ bool PluginMarket::unzip_to_dir(const QString& zip_path,
         QDir().mkpath(out_dir);
         if (!real_dir_inside(out_dir, root)) {
             ok = false;
-            if (err) *err = QStringLiteral("unsafe entry: ") + rel;
+            if (err) *err = trl::L("不安全的压缩包条目：%1").arg(rel);
             break;
         }
         if (mz_zip_reader_is_file_a_directory(&zip, i)) continue;
         QFile out(out_path);
         if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             ok = false;
-            if (err) *err = QStringLiteral("extract failed: ") + rel;
+            if (err) *err = trl::L("解压失败：%1").arg(rel);
             break;
         }
         CappedFileWriter w{&out, st.m_uncomp_size, 0};
         if (!mz_zip_reader_extract_to_callback(&zip, i, capped_file_write, &w, 0) ||
             w.written != st.m_uncomp_size) {
             ok = false;
-            if (err) *err = QStringLiteral("extract failed: ") + rel;
+            if (err) *err = trl::L("解压失败：%1").arg(rel);
         }
     }
     mz_zip_reader_end(&zip);
     if (!ok && err && err->isEmpty())
-        *err = QStringLiteral("zip read error");
+        *err = trl::L("压缩包读取错误");
     return ok;
 }
 
