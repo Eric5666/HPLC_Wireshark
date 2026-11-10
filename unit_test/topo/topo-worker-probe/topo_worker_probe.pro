@@ -1,4 +1,4 @@
-QT += core
+QT += core sql
 QT -= gui
 CONFIG += console c++17
 CONFIG -= app_bundle
@@ -11,8 +11,6 @@ INCLUDEPATH += \
     $$REPO_ROOT/src/protocol/common \
     $$REPO_ROOT/src/topo \
     $$REPO_ROOT/3rdparty/qslog
-
-include($$REPO_ROOT/3rdparty/sqlite/sqlite.pri)
 
 SOURCES += \
     main.cpp \
