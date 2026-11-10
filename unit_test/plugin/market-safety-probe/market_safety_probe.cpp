@@ -7,6 +7,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QEventLoop>
+#include <QMap>
 #include <QTimer>
 #include <QUrl>
 #include <QDir>
@@ -291,6 +292,85 @@ static void test_market_sha256(const QString& root) {
     check("market: correct sha256 installs", good);
 }
 
+// ── L6:并发安装上下文隔离 + unload_cb 推迟到拷贝前、失败时 reload_cb ──
+static QString sha_of(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return QString();
+    return QString::fromLatin1(QCryptographicHash::hash(f.readAll(), QCryptographicHash::Sha256).toHex());
+}
+
+static MarketPlugin market_entry(const QString& name, const QString& zip, const QString& sha) {
+    MarketPlugin p;
+    p.name = name;
+    MarketVersion v;
+    v.version = QStringLiteral("1.0.0");
+    v.url = QUrl::fromLocalFile(zip).toString();
+    v.sha256 = sha;
+    p.versions.append(v);
+    return p;
+}
+
+static void test_install_context(const QString& root) {
+    const QString za = root + QStringLiteral("/ctx-a.zip");
+    const QString zb = root + QStringLiteral("/ctx-b.zip");
+    make_zip(za, {{"plugin.json", manifest_json("ctx-a")}, {"x.js", "1"}});
+    make_zip(zb, {{"plugin.json", manifest_json("ctx-b")}, {"x.js", "22"}});
+    PluginMarket mk;
+    int unloads = 0, reloads = 0;
+    mk.unload_cb = [&] { ++unloads; };
+    mk.reload_cb = [&] { ++reloads; };
+    QMap<QString, bool> result;
+    QEventLoop loop;
+    QObject::connect(&mk, &PluginMarket::install_finished,
+                     [&](bool ok, const QString& e, const QString& name) {
+                         result[name] = ok;
+                         if (!ok) std::printf("  err(%s): %s\n", qPrintable(name), qPrintable(e));
+                         if (result.size() == 2) loop.quit();
+                     });
+    // 两个安装同时在途:旧实现共享 m_pending_*,先完成的那个会拿后一个的名字/sha256
+    mk.install_market_plugin(market_entry(QStringLiteral("ctx-a"), za, sha_of(za)), 0);
+    mk.install_market_plugin(market_entry(QStringLiteral("ctx-b"), zb, sha_of(zb)), 0);
+    if (result.size() < 2) {
+        QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+    check("concurrent installs: both succeed with their own context",
+          result.value(QStringLiteral("ctx-a")) && result.value(QStringLiteral("ctx-b")));
+    const QString base = PluginMarket::default_install_dir();
+    QFile meta(base + QStringLiteral("/ctx-a/meta.json"));
+    check("concurrent installs: ctx-a meta.json written",
+          meta.open(QIODevice::ReadOnly) && meta.readAll().contains("\"source\""));
+
+    // 校验失败(sha256 不符)不得卸载插件
+    unloads = reloads = 0;
+    bool fin = true;
+    QObject::disconnect(&mk, &PluginMarket::install_finished, nullptr, nullptr);
+    QObject::connect(&mk, &PluginMarket::install_finished,
+                     [&](bool ok, const QString&, const QString&) { fin = ok; loop.quit(); });
+    mk.install_market_plugin(market_entry(QStringLiteral("ctx-a"), za, QString(64, QLatin1Char('0'))), 0);
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    loop.exec();
+    check("bad sha256: refused without unloading plugins", !fin && unloads == 0 && reloads == 0);
+
+#ifndef Q_OS_WIN
+    // 卸载后删旧版失败(目录不可写):必须 reload_cb 恢复加载
+    const QString locked = base + QStringLiteral("/ctx-a/locked");
+    QDir().mkpath(locked);
+    write_file(locked + QStringLiteral("/f.txt"), "x");
+    QFile::setPermissions(locked, QFileDevice::ReadOwner | QFileDevice::ExeOwner);
+    unloads = reloads = 0;
+    fin = true;
+    mk.install_market_plugin(market_entry(QStringLiteral("ctx-a"), za, sha_of(za)), 0);
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    loop.exec();
+    check("deploy failure after unload: reload_cb called",
+          !fin && unloads == 1 && reloads == 1);
+    QFile::setPermissions(locked, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+#endif
+    mk.uninstall(QStringLiteral("ctx-a"));
+    mk.uninstall(QStringLiteral("ctx-b"));
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("BPLC_MarketSafetyProbe"));
@@ -307,6 +387,7 @@ int main(int argc, char** argv) {
     test_zip_entry_names(tmp.path());
     test_zip_limits(tmp.path());
     test_market_sha256(tmp.path());
+    test_install_context(tmp.path());
     QDir(PluginMarket::default_install_dir()).removeRecursively();
     std::printf("\nRESULT: %s (%d failures)\n", g_fails ? "FAILURES" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;

@@ -35,6 +35,8 @@ public:
 
     /// @brief 注入「卸载插件」回调(删除旧目录前调用,同步释放 native DLL)
     void set_unload_cb(std::function<void()> cb);
+    /// @brief 注入「重新加载插件」回调(卸载后部署/删除失败时调用)
+    void set_reload_cb(std::function<void()> cb);
 
 private slots:
     void on_feed_ready(const QList<MarketPlugin>& plugins);

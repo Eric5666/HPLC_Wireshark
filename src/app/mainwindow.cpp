@@ -1488,11 +1488,16 @@ void MainWindow::on_open_plugin_market() {
         if (m_plugin_engine) m_plugin_engine->unload_all_sync();
         PluginManager::instance().stop_all();
     });
+    // 卸载后安装/删除失败:立即恢复加载(不必等关闭对话框)
+    auto reload_all = [this]() {
+        load_plugin_dirs(m_plugin_search_dirs);
+        PluginManager::instance().loadAll(
+            QCoreApplication::applicationDirPath() + QStringLiteral("/plugins"));
+    };
+    dlg.set_reload_cb(reload_all);
     dlg.exec();
     // 市场内安装/卸载后重新加载全部插件(两套路径),使变更即时生效
-    load_plugin_dirs(m_plugin_search_dirs);
-    PluginManager::instance().loadAll(
-        QCoreApplication::applicationDirPath() + QStringLiteral("/plugins"));
+    reload_all();
 }
 
 void MainWindow::on_plugin_loaded(const PluginLoadedInfo& info) {

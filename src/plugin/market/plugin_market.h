@@ -113,6 +113,8 @@ public:
     /// @brief 部署/卸载前卸载插件的回调(删除旧目录前调用,需同步等待
     ///        native DLL 释放文件锁;由主界面注入 unload_all_sync)
     std::function<void()> unload_cb;
+    /// @brief unload_cb 之后部署失败时调用:重新加载插件,避免用户插件停在卸载状态
+    std::function<void()> reload_cb;
 
     /// @brief 扫描安装目录,返回已安装插件
     QList<InstalledPlugin> installed_plugins() const;
@@ -163,18 +165,21 @@ signals:
     void install_finished(bool ok, const QString& error, const QString& name);
 
 private:
-    void finish_install_from_zip(const QString& zip_path,
-                                 const QString& expected_sha256);
+    /// @brief 一次安装的上下文(按值随请求传递;并发安装互不串扰)
+    struct InstallContext {
+        QString name;        ///< 期望的插件名(离线安装解包后才知道)
+        QString sha256;      ///< 期望的 sha256(离线安装为空)
+        QString source;      ///< 来源(feed URL / file)
+        QString updated_at;  ///< 版本更新时间(可空)
+    };
+    void finish_install_from_zip(const QString& zip_path, const InstallContext& ctx);
     bool deploy_staged(const QString& staged_dir, const QString& plugin_name,
-                       QString* err);
+                       const InstallContext& ctx, QString* err);
     /// 写插件目录下的 meta.json(默认启用,记录来源与版本更新时间)
-    bool write_meta_json(const QString& plugin_dir, QString* err);
+    static bool write_meta_json(const QString& plugin_dir, const InstallContext& ctx,
+                                QString* err);
 
     QNetworkAccessManager* m_nam = nullptr;
-    QString m_pending_name;       ///< 本次安装中的插件名
-    QString m_pending_sha256;     ///< 本次安装期望的 sha256(离线安装为空)
-    QString m_pending_source;     ///< 本次安装的来源(feed URL / offline / file)
-    QString m_pending_updated_at; ///< 本次安装版本的更新时间(可空)
 };
 
 #endif // BPLC_PLUGIN_MARKET_H

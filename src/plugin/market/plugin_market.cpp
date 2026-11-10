@@ -331,31 +331,31 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
             plugin.name);
         return;
     }
-    m_pending_name = plugin.name;
-    m_pending_sha256 = v.sha256;
-    m_pending_source =
-        plugin.source.isEmpty() ? default_feed_url() : plugin.source;
-    m_pending_updated_at = v.updated_at;
+    InstallContext ctx;
+    ctx.name = plugin.name;
+    ctx.sha256 = v.sha256;
+    ctx.source = plugin.source.isEmpty() ? default_feed_url() : plugin.source;
+    ctx.updated_at = v.updated_at;
     const QString package_url = resolve_market_url(v.url, plugin.mirror_prefix);
     emit install_progress(QStringLiteral("downloading ") + package_url);
     QNetworkReply* rep = m_nam->get(QNetworkRequest(QUrl(package_url)));
     netcap::cap_reply_size(rep, netcap::kMaxPluginPackageBytes);
-    connect(rep, &QNetworkReply::finished, this, [this, rep]() {
+    // 安装上下文按值捕获:另一个安装同时进行也不会改写本请求的名字/sha256
+    connect(rep, &QNetworkReply::finished, this, [this, rep, ctx]() {
         rep->deleteLater();
         if (netcap::size_exceeded(rep)) {
             emit install_finished(false,
                                   QStringLiteral("package exceeds size limit"),
-                                  m_pending_name);
+                                  ctx.name);
             return;
         }
         if (rep->error() != QNetworkReply::NoError) {
-            emit install_finished(false, rep->errorString(), m_pending_name);
+            emit install_finished(false, rep->errorString(), ctx.name);
             return;
         }
         QTemporaryDir tmp;
         if (!tmp.isValid()) {
-            emit install_finished(false, QStringLiteral("no temp dir"),
-                                  m_pending_name);
+            emit install_finished(false, QStringLiteral("no temp dir"), ctx.name);
             return;
         }
         const QString zip_path =
@@ -368,19 +368,18 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
         if (data.isEmpty() || !f.open(QIODevice::WriteOnly) ||
             f.write(data) != data.size()) {
             emit install_finished(false, QStringLiteral("write temp failed"),
-                                  m_pending_name);
+                                  ctx.name);
             return;
         }
         f.close();
-        finish_install_from_zip(zip_path, m_pending_sha256);
+        finish_install_from_zip(zip_path, ctx);
     });
 }
 
 void PluginMarket::install_from_file(const QString& zip_path) {
-    m_pending_name.clear();
-    m_pending_sha256.clear();
-    m_pending_source = QStringLiteral("file");
-    m_pending_updated_at =
+    InstallContext ctx;
+    ctx.source = QStringLiteral("file");
+    ctx.updated_at =
         QFileInfo(zip_path).lastModified().toUTC().toString(Qt::ISODate);
     // 先解包读清单拿到插件名(离线包无 feed,不做 sha256 校验)
     QTemporaryDir tmp;
@@ -399,13 +398,14 @@ void PluginMarket::install_from_file(const QString& zip_path) {
         emit install_finished(false, m.error, QString());
         return;
     }
-    m_pending_name = m.name;
-    finish_install_from_zip(zip_path, QString());
+    ctx.name = m.name;
+    finish_install_from_zip(zip_path, ctx);
 }
 
 void PluginMarket::finish_install_from_zip(const QString& zip_path,
-                                           const QString& expected_sha256) {
-    const QString name = m_pending_name;
+                                           const InstallContext& ctx) {
+    const QString& name = ctx.name;
+    const QString& expected_sha256 = ctx.sha256;
     // 市场安装已在 install_market_plugin 保证 expected_sha256 非空;
     // 仅离线安装(install_from_file,用户自选本地包)不带 sha256
     if (!expected_sha256.isEmpty() &&
@@ -437,7 +437,7 @@ void PluginMarket::finish_install_from_zip(const QString& zip_path,
             false, QStringLiteral("package name mismatch: ") + m.name, name);
         return;
     }
-    if (deploy_staged(staged, m.name, &err)) {
+    if (deploy_staged(staged, m.name, ctx, &err)) {
         emit install_progress(QStringLiteral("installed ") + m.name + " " +
                               m.version);
         emit install_finished(true, QString(), m.name);
@@ -470,7 +470,8 @@ QString PluginMarket::plugin_dir_path(const QString& base_dir,
 }
 
 bool PluginMarket::deploy_staged(const QString& staged_dir,
-                                 const QString& plugin_name, QString* err) {
+                                 const QString& plugin_name,
+                                 const InstallContext& ctx, QString* err) {
     const QString base = QDir::cleanPath(QDir(default_install_dir()).absolutePath());
     // 路径穿越防护:目标必须是安装目录下的一级子目录
     const QString dest = plugin_dir_path(base, plugin_name);
@@ -478,17 +479,23 @@ bool PluginMarket::deploy_staged(const QString& staged_dir,
         if (err) *err = QStringLiteral("unsafe plugin name: ") + plugin_name;
         return false;
     }
-    // 先卸载插件释放 native DLL 文件锁(Windows 删不掉被加载的 dll)
-    if (unload_cb) unload_cb();
     // meta.json 先写进 staged:提权路径只需一次文件移动,无需提权后二次写文件
-    if (!write_meta_json(staged_dir, err)) return false;
+    if (!write_meta_json(staged_dir, ctx, err)) return false;
 
+    // 卸载放到真正改动安装目录之前的最后一刻(释放 native DLL 文件锁,Windows
+    // 删不掉被加载的 dll);此后任何失败都重新加载,插件不停在卸载状态
+    auto fail_and_reload = [this]() {
+        if (reload_cb) reload_cb();
+        return false;
+    };
     if (!install_dir_writable()) {
 #ifdef Q_OS_LINUX
         // Linux: 安装目录不可写时请求提权(pkexec 弹出图形鉴权框)
         emit install_progress(
             QStringLiteral("requesting administrator privileges..."));
-        return pkexec_deploy(base, dest, staged_dir, err);
+        if (unload_cb) unload_cb();
+        if (!pkexec_deploy(base, dest, staged_dir, err)) return fail_and_reload();
+        return true;
 #else
         if (err)
             *err = QStringLiteral("no write permission for ") + base +
@@ -497,20 +504,22 @@ bool PluginMarket::deploy_staged(const QString& staged_dir,
 #endif
     }
 
+    if (unload_cb) unload_cb();
     // 备份旧版:先删目标再拷贝(同名覆盖=升级)
     QDir d(dest);
     if (d.exists()) {
         if (!d.removeRecursively()) {
             if (err) *err = QStringLiteral("cannot remove old version: ") + dest;
-            return false;
+            return fail_and_reload();
         }
     }
-    if (!copy_dir_recursive(staged_dir, dest, err)) return false;
+    if (!copy_dir_recursive(staged_dir, dest, err)) return fail_and_reload();
     return true;
 }
 
 /// 写 meta.json(默认启用,记录来源与版本更新时间)
-bool PluginMarket::write_meta_json(const QString& plugin_dir, QString* err) {
+bool PluginMarket::write_meta_json(const QString& plugin_dir,
+                                   const InstallContext& ctx, QString* err) {
     QFile mf(meta_path(plugin_dir));
     if (!mf.open(QIODevice::WriteOnly)) {
         if (err)
@@ -521,8 +530,8 @@ bool PluginMarket::write_meta_json(const QString& plugin_dir, QString* err) {
                                {QStringLiteral("enabled"), true},
                                {QStringLiteral("installed_at"),
                                 QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
-                               {QStringLiteral("source"), m_pending_source},
-                               {QStringLiteral("updated_at"), m_pending_updated_at},
+                               {QStringLiteral("source"), ctx.source},
+                               {QStringLiteral("updated_at"), ctx.updated_at},
                            })
                  .toJson());
     return true;
@@ -586,14 +595,17 @@ bool PluginMarket::uninstall(const QString& name) {
     if (!QDir(pdir).exists()) return false;
     // 先卸载插件释放 native DLL 文件锁(Windows 删不掉被加载的 dll)
     if (unload_cb) unload_cb();
+    bool ok = false;
 #ifdef Q_OS_LINUX
     // Linux: 安装目录不可写时请求提权删除
     if (!install_dir_writable()) {
         QString err;
-        return pkexec_remove(pdir, &err);
-    }
+        ok = pkexec_remove(pdir, &err);
+    } else
 #endif
-    return QDir(pdir).removeRecursively();
+    ok = QDir(pdir).removeRecursively();
+    if (!ok && reload_cb) reload_cb();   // 删除失败:恢复加载,插件不停在卸载状态
+    return ok;
 }
 
 const MarketVersion* PluginMarket::update_for(

@@ -160,7 +160,12 @@ PluginMarketDialog::PluginMarketDialog(QWidget* parent)
     rebuild_list();
 }
 
-void PluginMarketDialog::set_unload_cb(std::function<void()> cb) {    if (m_market) m_market->unload_cb = std::move(cb);
+void PluginMarketDialog::set_unload_cb(std::function<void()> cb) {
+    if (m_market) m_market->unload_cb = std::move(cb);
+}
+
+void PluginMarketDialog::set_reload_cb(std::function<void()> cb) {
+    if (m_market) m_market->reload_cb = std::move(cb);
 }
 
 void PluginMarketDialog::set_versions_text(const QString& t) {
