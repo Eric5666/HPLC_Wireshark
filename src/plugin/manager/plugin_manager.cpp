@@ -299,14 +299,12 @@ void PluginManager::on_host_ready_read(PluginRuntime* rt) {
     // 原子时间戳;其余消息排队到 GUI 线程的 handle_message。
     rt->rx_buf.append(rt->socket->readAll());
     QList<QByteArray> to_gui;
-    while (rt->rx_buf.size() >= 5) {
-        QDataStream hdr(rt->rx_buf);
-        hdr.setVersion(plugin_ipc::kStreamVersion);
-        quint32 len = 0;
-        hdr >> len;
-        if (rt->rx_buf.size() < 4 + (qint64)len) break;
-        const QByteArray frame = rt->rx_buf.mid(4, len);
-        rt->rx_buf.remove(0, 4 + len);
+    bool bad_frame = false;
+    for (;;) {
+        QByteArray frame;
+        const auto took = plugin_ipc::try_take_frame(rt->rx_buf, frame);
+        if (took == plugin_ipc::FrameTake::NeedMore) break;
+        if (took == plugin_ipc::FrameTake::Bad) { bad_frame = true; break; }
         QDataStream ds(frame);
         ds.setVersion(plugin_ipc::kStreamVersion);
         quint8 t = 0;
@@ -361,6 +359,17 @@ void PluginManager::on_host_ready_read(PluginRuntime* rt) {
             if (find_runtime(pid) != rt) return;   // 已退役/被同 id 新运行时替换
             for (const QByteArray& fr : to_gui) handle_message(pid, fr);
         }, Qt::QueuedConnection);
+    }
+    if (bad_frame) {
+        // 帧长非法(0 或超过 kMaxIpcFrame):流已失步,无法恢复。先排队停用
+        // (原因优先于随后的 "host disconnected"),再断开连接。
+        rt->rx_buf.clear();
+        const QString pid = rt->manifest.protocol_id;
+        QMetaObject::invokeMethod(this, [this, rt, pid]() {
+            if (find_runtime(pid) != rt) return;
+            disable_plugin(pid, QStringLiteral("ipc frame length invalid"));
+        }, Qt::QueuedConnection);
+        rt->socket->abort();
     }
 }
 

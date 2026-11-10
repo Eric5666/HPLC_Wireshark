@@ -5,6 +5,7 @@
 #ifndef BPLC_PLUGIN_IPC_H
 #define BPLC_PLUGIN_IPC_H
 
+#include <QByteArray>
 #include <QCoreApplication>
 #include <QDataStream>
 #include <QString>
@@ -50,6 +51,34 @@ enum class MsgType : quint8 {
     EventAck = 53,       ///< host→app: {seq:quint64, needs_redraw:bool}
     RequestRedraw = 54,  ///< host→app: {} 插件主动请求重绘(如动画/数据更新)
 };
+
+/// @brief 单帧上限(类型字节 + 载荷),超过视为协议错误
+/// @details 帧头长度来自对端进程,不可信。上限按最大图形帧(PNG 压缩 QImage)留足余量。
+constexpr qint64 kMaxIpcFrame = 16 * 1024 * 1024;
+
+/// @brief try_take_frame 的结果
+enum class FrameTake {
+    Ok,        ///< 取出一帧,out 为 [type][payload]
+    NeedMore,  ///< 数据不足,等待更多字节
+    Bad,       ///< 帧长为 0 或超过 kMaxIpcFrame:调用方必须断开连接
+};
+
+/// @brief 从接收缓冲取出一帧 [quint32 len][len 字节]
+/// @details 主程序与 host 共用。长度统一按 qint64 比较,避免 4 + len 回绕。
+/// @param buf 接收缓冲,成功时移除已取出的字节
+/// @param out 输出帧(不含长度头)
+/// @return 见 FrameTake
+inline FrameTake try_take_frame(QByteArray& buf, QByteArray& out) {
+    if (buf.size() < 4) return FrameTake::NeedMore;
+    const auto* p = reinterpret_cast<const uchar*>(buf.constData());
+    const qint64 len = (qint64(p[0]) << 24) | (qint64(p[1]) << 16) |
+                       (qint64(p[2]) << 8) | qint64(p[3]);   // QDataStream 大端
+    if (len < 1 || len > kMaxIpcFrame) return FrameTake::Bad;
+    if (qint64(buf.size()) < 4 + len) return FrameTake::NeedMore;
+    out = buf.mid(4, qsizetype(len));
+    buf.remove(0, qsizetype(4 + len));
+    return FrameTake::Ok;
+}
 
 /// @brief 本机 socket 名(主程序按插件 id 生成唯一名)
 /// @param plugin_id 插件 id
