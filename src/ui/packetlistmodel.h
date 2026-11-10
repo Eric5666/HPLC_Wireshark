@@ -18,9 +18,13 @@
 #include <QAbstractTableModel>
 #include <QVector>
 #include <QHash>
+#include <QSharedPointer>
 #include <QStringList>
 #include <QTemporaryDir>
 #include <functional>
+#include <memory>
+
+struct PacketBlockSink;   ///< 后台落盘完成回调的接收端(定义见 packetlistmodel.cpp)
 
 /// @brief 过滤条件词(表达式预处理产物,定义见 packetlistmodel.cpp)
 struct PacketFilterCond {
@@ -61,7 +65,11 @@ public:
     /// @brief 盘块 LRU 缓存上限(滚动预取窗口,可调;块数 × kBlockSize = 预取内存)
     static constexpr int kMaxCacheBlocks = 4;
 
+    /// @brief 一个盘块的内存副本(落盘未完成或失败时代替文件;只读共享)
+    using BlockMem = QSharedPointer<const QVector<PacketEntry>>;
+
     explicit PacketListModel(QObject* parent = nullptr);
+    ~PacketListModel() override;
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     int columnCount(const QModelIndex& parent = QModelIndex()) const override;
@@ -75,6 +83,9 @@ public:
     /// @brief 是否正在异步过滤(测试等待用)
     bool filtering() const { return m_filtering; }
 
+    /// @brief 尚未完成落盘(由内存副本提供)的盘块数(测试等待用)
+    int pending_block_count() const { return m_pending_blocks.size(); }
+
     /// @brief 滚动预取:按可见行定位全局行号,预加载其所在盘块及前后相邻块
     void ensure_loaded(int visible_row);
 
@@ -87,6 +98,9 @@ public:
     struct ExportSnapshot {
         QVector<PacketEntry> hot;         ///< 热区条目拷贝(≤ kBlockSize)
         QStringList          block_paths; ///< 盘块文件路径(升序,对应块 0..N-1)
+        /// 与 block_paths 一一对应:落盘未完成/失败的块带内存副本(非空时优先于文件)
+        QVector<BlockMem>    block_mem;
+        qint64               total = 0;   ///< 快照时的总条目数(= 块数 × kBlockSize + 热区)
         /// TEI→MAC 映射表快照(CSV 导出 Source/Dest 列显示 MAC 用;深拷贝)
         QHash<quint32, QHash<quint16, quint64>> tei_mac;
     };
@@ -119,6 +133,9 @@ private:
     void flush_hot_block();
     QString block_path(int idx) const;
     void touch_lru(int idx) const;
+    /// @brief 后台落盘完成(GUI 线程,经 PacketBlockSink 排队调用)
+    /// @param session 写入时的会话号;与当前不符(期间 clear 过)则删除文件
+    void on_block_written(int session, int idx, bool ok);
     /// @brief 更新 TEI→MAC 映射表(按 NID 分表;取自 MSDU 头 MACAddrFlag 扩展字段)
     /// @return 本条目是否新增或改写了映射
     bool update_tei_mac(const PacketEntry& e);
@@ -143,6 +160,10 @@ private:
     QHash<quint32, QHash<quint16, quint64>> m_tei_mac; ///< TEI→MAC 映射表(NID → TEI → MAC48)
     QHash<quint32, QHash<quint64, quint16>> m_mac_tei; ///< MAC→TEI 反向索引(NID → MAC48 → TEI;与 m_tei_mac 同步维护,供 lookup_tei_by_mac O(1) 反查)
     QTemporaryDir          m_paging_dir;  ///< 盘块临时目录(进程结束自动清理)
+    int                    m_session = 0; ///< 会话号(每次 clear_all 递增;进盘块文件名,旧会话迟到的写不会撞名)
+    /// 落盘未完成或失败的块:块号 → 内存副本。完成回调成功后移除,之后才从文件读
+    QHash<int, BlockMem>   m_pending_blocks;
+    std::shared_ptr<PacketBlockSink> m_sink; ///< 后台写任务持有,模型析构时置空
 
     mutable QHash<int, pser::BlockReader> m_block_cache; ///< 已打开盘块 LRU
     mutable QList<int>     m_lru;          ///< 盘块最近使用顺序(前=最旧)

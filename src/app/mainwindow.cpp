@@ -546,12 +546,23 @@ void MainWindow::on_clear() {
 }
 
 namespace {
-/// @brief 从盘块文件逐条反序列化并交给 writer(独立文件句柄,线程安全)
-template <typename Writer>
-void export_block_file(const QString& path, Writer& w) {
-    QVector<PacketEntry> block;
-    if (!pser::read_block_file(path, block)) return;
-    for (const PacketEntry& e : block) w.add(e);
+/// @brief 按全局顺序把快照的全部条目交给 fn:盘块(未就绪块用内存副本)+ 热区
+/// @return 实际交出的条目数(读不到的块不计,调用方与 snap.total 比对)
+template <typename Fn>
+qint64 for_each_snapshot_entry(const PacketListModel::ExportSnapshot& snap, Fn&& fn) {
+    qint64 n = 0;
+    for (int b = 0; b < snap.block_paths.size(); ++b) {
+        const PacketListModel::BlockMem mem = snap.block_mem.value(b);
+        if (mem) {
+            for (const PacketEntry& e : *mem) { fn(e); ++n; }
+            continue;
+        }
+        QVector<PacketEntry> block;   // 独立文件句柄,线程安全
+        if (!pser::read_block_file(snap.block_paths[b], block)) continue;
+        for (const PacketEntry& e : block) { fn(e); ++n; }
+    }
+    for (const PacketEntry& e : snap.hot) { fn(e); ++n; }
+    return n;
 }
 
 /// 导出格式
@@ -697,19 +708,24 @@ static QStringList csv_row(const PacketEntry& e, const TeiMacMap& macs) {
     return c;
 }
 
+/// @brief 导出结果:实际处理的帧数与写文件是否成功
+struct ExportResult {
+    qint64 frames = 0;     ///< 交给 writer 的帧数(与快照总数比对,不符即有块丢失)
+    bool   io_ok = false;  ///< 文件打开与写入均无错误
+};
+
 /// @brief 工作线程导出:遍历快照盘块 + 热区,流式写文件(不阻塞 GUI)
-void run_export(const PacketListModel::ExportSnapshot& snap,
-                const QString& path, ExportFormat fmt) {
+ExportResult run_export(const PacketListModel::ExportSnapshot& snap,
+                        const QString& path, ExportFormat fmt) {
+    ExportResult r;
     QFile out(path);
-    if (!out.open(QIODevice::WriteOnly)) return;
+    if (!out.open(QIODevice::WriteOnly)) return r;
     if (fmt == ExportFormat::Text) {
         playback::RawHexWriter w(&out);
-        for (const QString& bp : snap.block_paths) export_block_file(bp, w);
-        for (const PacketEntry& e : snap.hot) w.add(e);
+        r.frames = for_each_snapshot_entry(snap, [&w](const PacketEntry& e) { w.add(e); });
     } else if (fmt == ExportFormat::Bin) {
         playback::PlaybackBinWriter w(&out);
-        for (const QString& bp : snap.block_paths) export_block_file(bp, w);
-        for (const PacketEntry& e : snap.hot) w.add(e);
+        r.frames = for_each_snapshot_entry(snap, [&w](const PacketEntry& e) { w.add(e); });
     } else {   // ExportFormat::Csv
         QTextStream ts(&out);
         // 本地编码存储(Windows 中文系统=GBK/ANSI 代码页),Excel 直接打开不乱码
@@ -724,14 +740,12 @@ void run_export(const PacketListModel::ExportSnapshot& snap,
             }
             ts << '\n';
         };
-        for (const QString& bp : snap.block_paths) {
-            QVector<PacketEntry> block;
-            if (!pser::read_block_file(bp, block)) continue;
-            for (const PacketEntry& e : block) emit_row(e);
-        }
-        for (const PacketEntry& e : snap.hot) emit_row(e);
+        r.frames = for_each_snapshot_entry(snap, emit_row);
+        ts.flush();
     }
     out.close();
+    r.io_ok = out.error() == QFile::NoError;
+    return r;
 }
 }  // namespace
 
@@ -774,20 +788,27 @@ void MainWindow::on_export() {
     m_exporting = true;   // 暂停 flush 进模型,保证快照一致 + 线程安全
     m_status_left->setText(trl::L("正在导出 %1 帧...").arg(total));
 
-    auto* watcher = new QFutureWatcher<void>(this);
-    connect(watcher, &QFutureWatcher<void>::finished, this,
+    auto* watcher = new QFutureWatcher<ExportResult>(this);
+    connect(watcher, &QFutureWatcher<ExportResult>::finished, this,
             [this, watcher, f, total]() {
         m_exporting = false;
+        const ExportResult res = watcher->result();
         watcher->deleteLater();
         QFile out(f);
-        if (!out.exists() || out.size() == 0) {
+        if (!res.io_ok) {
+            m_status_left->setText(trl::L("导出失败:写入文件出错 → %1").arg(f));
+        } else if (res.frames != total) {
+            // 有盘块读不到:如实报告,不再声称导出了全部帧
+            m_status_left->setText(trl::L("导出不完整:仅写出 %1 / %2 帧 → %3")
+                                       .arg(res.frames).arg(total).arg(f));
+        } else if (!out.exists() || out.size() == 0) {
             m_status_left->setText(trl::L("没有可写入的帧数据"));
         } else {
             m_status_left->setText(trl::L("已导出 %1 帧 → %2").arg(total).arg(f));
         }
     });
     watcher->setFuture(QtConcurrent::run([snap, f, fmt]() {
-        run_export(snap, f, fmt);
+        return run_export(snap, f, fmt);
     }));
 }
 
@@ -1341,6 +1362,8 @@ struct I18nRegMainWindow {
         trl::register_en("无可导出的帧", "No frames to export");
         trl::register_en("没有可写入的帧数据", "No frame data to write");
         trl::register_en("已导出 %1 帧 → %2", "Exported %1 frames → %2");
+        trl::register_en("导出失败:写入文件出错 → %1", "Export failed: error writing file → %1");
+        trl::register_en("导出不完整:仅写出 %1 / %2 帧 → %3", "Export incomplete: only %1 / %2 frames written → %3");
         trl::register_en("配置已保存(Ctrl+E 开始捕获)", "Settings saved (Ctrl+E to start capture)");
         trl::register_en("导入", "Import");
         trl::register_en("正在捕获/回放中,请先点击停止后再拖入文件", "Capture/replay in progress, please stop it before dropping files");
