@@ -287,6 +287,28 @@ jobs:
           (cd unit_test/protocol-nw/msdu-crc-gate-probe && bash build.sh)
           ./unit_test/protocol-nw/msdu-crc-gate-probe/build/msdu_crc_gate_probe
 
+      - name: Plugin backend / script sandbox / block format regression
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          # 进程内 Lua/JS/native 后端 + 示例插件(src/plugin/tests)
+          mkdir -p build/backend-direct
+          (cd build/backend-direct \
+            && qmake ../../src/plugin/tests/backend_direct_test.pro CONFIG+=release CONFIG-=debug \
+            && make -j2 \
+            && ./backend_direct_test --examples "$GITHUB_WORKSPACE/src/plugin/examples")
+          # M10:Lua 指令预算 / JS 看门狗打断死循环
+          mkdir -p build/script-budget
+          (cd build/script-budget \
+            && qmake ../../unit_test/plugin/script-budget-probe/script_budget_probe.pro \
+            && make -j2 && ./script_budget_probe)
+          # L8:盘块反序列化计数/深度/截断边界
+          mkdir -p build/serialize-bounds
+          (cd build/serialize-bounds \
+            && qmake ../../unit_test/common/serialize-bounds-probe/serialize_bounds_probe.pro \
+            && make -j2 && ./serialize_bounds_probe)
+
   topology-worker-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

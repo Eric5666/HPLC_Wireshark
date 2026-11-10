@@ -1365,6 +1365,7 @@ struct I18nRegMainWindow {
         trl::register_en("没有可写入的帧数据", "No frame data to write");
         trl::register_en("已导出 %1 帧 → %2", "Exported %1 frames → %2");
         trl::register_en("导出失败:写入文件出错 → %1", "Export failed: error writing file → %1");
+        trl::register_en("历史拓扑回放失败: ", "Historical topology replay failed: ");
         trl::register_en("导出不完整:仅写出 %1 / %2 帧 → %3", "Export incomplete: only %1 / %2 frames written → %3");
         trl::register_en("配置已保存(Ctrl+E 开始捕获)", "Settings saved (Ctrl+E to start capture)");
         trl::register_en("导入", "Import");
