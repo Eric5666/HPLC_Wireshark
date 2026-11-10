@@ -135,6 +135,30 @@ int main(int argc, char** argv) {
         check(count_snapshot(snap, &order, 200001) == 3200 && order, "export after clear is the new session only");
     }
 
+    // ⑥ M4:异步过滤完成时补入过滤期间暂存的条目。观察方只凭信号维护行数,
+    //    rowsAboutToBeInserted 的 first 必须等于它已知的行数(追加),reset 后重取
+    {
+        PacketListModel m2;
+        int known = 0;
+        int violations = 0;
+        QObject::connect(&m2, &QAbstractItemModel::modelReset, [&] { known = m2.rowCount(); });
+        QObject::connect(&m2, &QAbstractItemModel::rowsAboutToBeInserted,
+                         [&](const QModelIndex&, int first, int) { if (first != known) ++violations; });
+        QObject::connect(&m2, &QAbstractItemModel::rowsInserted,
+                         [&](const QModelIndex&, int first, int last) {
+                             known += last - first + 1;
+                             if (known != m2.rowCount()) ++violations;
+                         });
+        m2.append_packets(make_entries(1, 1500));
+        m2.set_display_filter(QStringLiteral("coord"));   // 0 行
+        drain(app, m2);
+        m2.set_display_filter(QStringLiteral("beacon"));  // 异步:全部 1500 行
+        m2.append_packets(make_entries(1501, 300));        // 过滤中:暂存
+        drain(app, m2);
+        check(violations == 0 && m2.rowCount() == 1800 && known == 1800,
+              "filter completion resets before inserting deferred rows");
+    }
+
     std::printf("paging_race_probe: %s (%d failures)\n", g_fail ? "FAIL" : "OK", g_fail);
     return g_fail ? 1 : 0;
 }

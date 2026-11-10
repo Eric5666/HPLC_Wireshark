@@ -1179,15 +1179,18 @@ void PacketListModel::set_display_filter(const QString& expr) {
             const QVector<int> res = watcher->result();
             watcher->deleteLater();
             if (gen != m_filter_gen) return;  // 过期结果(期间又改了过滤),丢弃
+            // m_visible 只能在 begin/endResetModel 之间改:视图/代理在 reset 前
+            // 仍按旧行数理解模型,先赋值再发信号会让后续 beginInsertRows 的
+            // 行号与观察方不一致(QAbstractItemModel 约定)
+            beginResetModel();
             m_visible = res;
             m_filtering = false;
-            if (!m_deferred.isEmpty()) {      // 过滤期间暂存的 append 补进来
+            endResetModel();
+            if (!m_deferred.isEmpty()) {      // reset 完成后再补过滤期间暂存的 append
                 QVector<PacketEntry> def;
                 def.swap(m_deferred);
                 append_packets(std::move(def));
             }
-            beginResetModel();
-            endResetModel();
         });
     // 映射表快照按值进工作线程:只读 + COW,与 snap/expr 同款,无竞态
     const auto mac_tei = m_mac_tei;
