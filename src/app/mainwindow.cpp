@@ -60,7 +60,6 @@
 #include <QString>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QDesktopServices>
 #include <QUrl>
 #include <QFileInfo>
 #include <QMimeData>
@@ -408,11 +407,9 @@ void MainWindow::build_ui() {
     m_btn_update->setVisible(false);
     menuBar()->setCornerWidget(m_btn_update, Qt::TopRightCorner);
     connect(m_btn_update, &QToolButton::clicked, this, [this]() {
-        // 用本次检查实际的清单地址取下载地址(内置下载器/此处打开均已含代理前缀改写)
-        const QString u = m_last_check_url.isEmpty() ? appcfg::update_url() : m_last_check_url;
-        const QString dl = QSimpleUpdater::getInstance()->getDownloadUrl(u);
-        if (!dl.isEmpty())
-            QDesktopServices::openUrl(QUrl(dl));
+        // 不用浏览器直接打开下载链接(绕过 sha256 校验):重新检查一次更新,
+        // 由更新器弹窗,确认后走内置下载器(大小上限 + sha256 校验后才打开安装包)
+        check_for_updates(false);
     });
 }
 
