@@ -7,6 +7,7 @@
 #include "crc.h"
 #include "i18n.h"
 #include "parse_anomaly.h"
+#include "common/msdu_crc_state.h"
 #include <QtEndian>
 #include <cstdint>
 
@@ -2157,7 +2158,11 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
     // 合并时随 TopoEvent 对象整体拷贝,不混、不丢。
     if (out.topo_event.kind != TopoEventKind::Other && out.msdu_src_mac)
         out.topo_event.sender_mac = out.msdu_src_mac;
-    return out;
+    // 用户 2026-11 裁决:「MSDU CRC 正确就显示原摘要,否则为空」「MSDU CRC32 FAIL 也标红(与 PB 同等待遇)」
+    // ⇒ 仅当 MSDU 帧尾 4B CRC32(HDC2.0 表7 数据帧可变区域之后)校验失败时降级:摘要清空、
+    //   字段树只留 `MSDU CRC32 … FAIL` 证据节点;红行判据由 packetlistmodel 用同一份
+    //   common/msdu_crc_state.h 派生。CRC 缺失(不足 4B/无该字段)不算失败,维持现状。
+    return msdu_crc_gate(out);
 }
 
 // ===== i18n:文件级 中→英 显示词典(仅显示翻译;未命中回退中文) =====

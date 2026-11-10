@@ -4,6 +4,8 @@
 #include "topo_state.h"
 #include <QObject>
 #include <QMap>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QThread>
 #include <functional>
@@ -94,15 +96,16 @@ private:
     QByteArray encode_frame(const TopoFrameInput& frame) const;
     bool decode_frame(const QByteArray& bytes, TopoFrameInput& frame) const;
     void report_store_error(const QString& message);
-    void report_sqlite_error(const QString& operation);
+    void report_db_error(const QString& operation, const QString& detail);
 
     QString m_requested_db_path;
     QString m_database_path;
     QTemporaryDir* m_temp_dir = nullptr;
     int m_checkpoint_interval = 256;
     int m_max_checkpoints = 8;
-    void* m_db = nullptr; // sqlite3*, opaque here to keep the C API out of the public header
-    void* m_insert_stmt = nullptr;
+    QSqlDatabase m_db;
+    QSqlQuery m_insert_query;
+    QString m_connection_name;
     TopoStateMap m_live_states;
     QMap<qint64, TopoStateMap> m_checkpoints;
     qint64 m_last_applied_frame = -1;

@@ -3,6 +3,7 @@
 #include "packetlistmodel.h"
 #include "packetentry_serialize.h"
 #include "mac_format.h"  // 48-bit MAC 格式化唯一实现(src/common)
+#include "common/msdu_crc_state.h"   // MSDU CRC32 三态唯一实现(与 parser 共用)
 #include <algorithm>
 #include <cstdint>
 #include <QColor>
@@ -593,18 +594,14 @@ QVariant PacketListModel::data(const QModelIndex& idx, int role) const {
             }
         }
     } else if (role == Qt::ForegroundRole) {
-        // 整行着色优先级:CRC 失败红(FCH/PB 物理层校验,最高) > 管理消息(MMe 暖色系)
+        // 整行着色优先级:CRC 失败红(FCH/PB/MSDU 物理与帧尾校验,最高) > 管理消息(MMe 暖色系)
         // > APP 层(BID 冷色系) > 帧类型(DROP灰/ACK校验失败红不变)
-        // 仅 FCH CRC24 FAIL、任一 PB CRC24 FAIL 或已尝试组装而帧级未通过标红
-        // (与 ACK 失败同色);MSDU CRC32 FAIL 不改颜色(应用层校验,常因抓包截断/
-        // 设备异常,不掩盖业务着色)
-        if (e.mpdu.fch_crc_checked && !e.mpdu.fch_crc_ok)
-            return QColor(224, 64, 64);   // 仅"校验过且失败"才标红;未校验不标红
-        if (std::any_of(e.mpdu.pb_crc_oks.cbegin(), e.mpdu.pb_crc_oks.cend(),
-                        [](bool ok) { return !ok; }))
-            return QColor(224, 64, 64);   // 任一物理块 CRC24 校验失败
-        if (e.mpdu.pb_size > 8 && e.mpdu.pb_num > 0 && !e.mpdu.pb_crc_ok)
-            return QColor(224, 64, 64);   // 已尝试组装且帧级未通过:含截断(oks 为空时上条不触发);合法 0 块帧 pb_size=0 不进此条
+        // 判据唯一实现 = common/msdu_crc_state.h 的 frame_crc_red():
+        //   FCH CRC24 FAIL ∥ 任一 PB CRC24 FAIL ∥ 帧级组装未通过 ∥ MSDU CRC32 FAIL
+        // (最后一条属用户 2026-11 裁决:「MSDU CRC32 FAIL 也标红(与 PB 同等待遇)」;
+        //  三态从已序列化的字段树派生,不加 MsduInfo 字段、块格式不变)
+        if (frame_crc_red(e))
+            return QColor(224, 64, 64);
         if (e.msdu.present && e.msdu.mme_type != kMMeTypeNone)
             return mme_color(e.msdu.mme_type);
         if (e.msdu.present && e.msdu.business_id != 0xFF) {

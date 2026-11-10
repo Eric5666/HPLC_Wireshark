@@ -5,10 +5,12 @@
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QEventLoop>
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
 #include <QThread>
 #include <QTimer>
 #include <QTemporaryDir>
-#include <sqlite3.h>
 #include <atomic>
 #include <algorithm>
 #include <cstdio>
@@ -475,28 +477,36 @@ int main(int argc, char** argv) {
                     return;
                 }
 
-                sqlite3* db = nullptr;
-                if (sqlite3_open16(rebuild_db_path.utf16(), &db) != SQLITE_OK) {
-                    if (db) sqlite3_close(db);
+                // Open the worker store through a second QtSql connection and
+                // install the failure trigger there; the worker keeps its own
+                // connection open on the same WAL database.
+                QSqlDatabase trigger_db = QSqlDatabase::addDatabase(
+                    QStringLiteral("QSQLITE"), QStringLiteral("topo-probe-trigger"));
+                trigger_db.setDatabaseName(rebuild_db_path);
+                if (!trigger_db.open()) {
                     ++failures;
                     std::printf("FAIL open topology DB to install replay failure trigger\n");
                     rebuild_loop.quit();
                     return;
                 }
-                sqlite3_busy_timeout(db, 2000);
-                char* error = nullptr;
-                const int trigger_rc = sqlite3_exec(db,
-                    "CREATE TRIGGER fail_rebuild_tei6 BEFORE INSERT ON topo_anomalies "
-                    "WHEN NEW.tei=6 BEGIN SELECT RAISE(ABORT,'injected replay rebuild failure'); END;",
-                    nullptr, nullptr, &error);
-                sqlite3_free(error);
-                sqlite3_close(db);
-                if (trigger_rc != SQLITE_OK) {
+                QSqlQuery trigger_query(trigger_db);
+                trigger_query.exec(QStringLiteral("PRAGMA busy_timeout=2000"));
+                if (!trigger_query.exec(QStringLiteral(
+                        "CREATE TRIGGER fail_rebuild_tei6 BEFORE INSERT ON topo_anomalies "
+                        "WHEN NEW.tei=6 BEGIN SELECT RAISE(ABORT,'injected replay rebuild failure'); END;"))) {
+                    std::fprintf(stderr, "trigger install failed: %s\n",
+                                 qPrintable(trigger_query.lastError().text()));
+                    trigger_db.close();
+                    trigger_db = QSqlDatabase();
+                    QSqlDatabase::removeDatabase(QStringLiteral("topo-probe-trigger"));
                     ++failures;
                     std::printf("FAIL install topology replay failure trigger\n");
                     rebuild_loop.quit();
                     return;
                 }
+                trigger_db.close();
+                trigger_db = QSqlDatabase();
+                QSqlDatabase::removeDatabase(QStringLiteral("topo-probe-trigger"));
 
                 // A duplicate/out-of-order frame invokes full replay. TEI 5 is
                 // inserted first during rebuild; TEI 6 then fails, so rollback
@@ -514,22 +524,25 @@ int main(int argc, char** argv) {
                     rebuild_loop.quit();
                     return;
                 }
-                sqlite3* db = nullptr;
-                sqlite3_stmt* stmt = nullptr;
-                if (sqlite3_open16(rebuild_db_path.utf16(), &db) == SQLITE_OK
-                    && sqlite3_prepare_v2(db,
+                QSqlDatabase check_db = QSqlDatabase::addDatabase(
+                    QStringLiteral("QSQLITE"), QStringLiteral("topo-probe-check"));
+                check_db.setDatabaseName(rebuild_db_path);
+                if (check_db.open()) {
+                    QSqlQuery check_query(check_db);
+                    check_query.prepare(QStringLiteral(
                         "SELECT COUNT(*),COALESCE(SUM(trips),0),MIN(first_frame),MAX(last_frame) "
-                        "FROM topo_anomalies WHERE nid=?1", -1, &stmt, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_int64(stmt, 1, kNid);
-                    if (sqlite3_step(stmt) == SQLITE_ROW) {
-                        rebuild_rollback_preserved_old_index = sqlite3_column_int(stmt, 0) == 2
-                            && sqlite3_column_int(stmt, 1) == 2
-                            && sqlite3_column_int64(stmt, 2) == 2
-                            && sqlite3_column_int64(stmt, 3) == 4;
+                        "FROM topo_anomalies WHERE nid=?"));
+                    check_query.bindValue(0, kNid);
+                    if (check_query.exec() && check_query.next()) {
+                        rebuild_rollback_preserved_old_index = check_query.value(0).toInt() == 2
+                            && check_query.value(1).toInt() == 2
+                            && check_query.value(2).toLongLong() == 2
+                            && check_query.value(3).toLongLong() == 4;
                     }
                 }
-                if (stmt) sqlite3_finalize(stmt);
-                if (db) sqlite3_close(db);
+                check_db.close();
+                check_db = QSqlDatabase();
+                QSqlDatabase::removeDatabase(QStringLiteral("topo-probe-check"));
                 rebuild_loop.quit();
             }, Qt::QueuedConnection);
 

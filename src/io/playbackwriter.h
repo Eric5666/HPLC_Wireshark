@@ -65,35 +65,50 @@ inline QByteArray escape_frame_data(const QByteArray& data) {
     return esc;
 }
 
-/// @brief 严格反转义:0x3D 后只允许 0xC3/0xC2/0xC1,分别还原为 0x3C/0x3D/0x3E。
-/// @return 是否完整且合法;悬空或非法转义时清空输出并返回 false。
-inline bool unescape_frame_data(const QByteArray& esc, QByteArray& out) {
+/// @brief 宽松反转义(用户 2026-11 裁决,方案 A)。
+///   0x3D 后接 C1/C2/C3 ⇒ 正常还原为 3C/3D/3E;
+///   0x3D 后接其它字节 ⇒ 把 0x3D 当普通数据字节输出,记入 lenient_fixes,后继字节按普通字节继续处理;
+///   0x3D 悬空在流末尾 ⇒ 输出 0x3D 本身,记入 lenient_fixes。
+///   0x3E 定界维持严格(帧边界仍只由 0x3E 判定,本函数不涉及,亦绝不在此放宽)。
+/// @warning 禁止改回严格。放宽原因:现场模块(南网 STA)在帧尾附带 ASCII 调试日志时
+///          不对 '='(0x3D) 转义;严格实现会把整帧 DROP,连 FC 都无法解析。
+///          实证锚点:线上帧 766 字节(0x3C@0 … 0x3E@764),8 处非法 0x3D 全在日志区、
+///          PB/MSDU 区 0 处;fixture = unit_test/frames/frame-probe/nw_log_tail_wire_escaped.bin。
+///          改回严格的后果:这类现场帧全部丢失,FC/MSDU 全不解析。
+/// @param[out] lenient_fixes 可选(默认 nullptr):宽松处理的非法 0x3D 处数(上层据此只 warn 不 DROP)。
+/// @return 恒 true(保留 bool 签名与两个重载,既有 4 个调用点无需改)。
+inline bool unescape_frame_data(const QByteArray& esc, QByteArray& out, int* lenient_fixes = nullptr) {
     out.clear();
     out.reserve(esc.size());
+    int fixes = 0;
     for (int i = 0; i < esc.size(); ++i) {
         const quint8 b = static_cast<quint8>(esc[i]);
         if (b != 0x3D) {
             out.append(esc[i]);
             continue;
         }
-        if (i + 1 >= esc.size()) {
-            out.clear();
-            return false;
+        if (i + 1 >= esc.size()) {           // 悬空 0x3D:当普通数据
+            out.append(char(0x3D));
+            ++fixes;
+            continue;
         }
-        const quint8 escaped = static_cast<quint8>(esc[++i]);
-        if (escaped != 0xC3 && escaped != 0xC2 && escaped != 0xC1) {
-            out.clear();
-            return false;
+        const quint8 nxt = static_cast<quint8>(esc[i + 1]);
+        if (nxt == 0xC3 || nxt == 0xC2 || nxt == 0xC1) {
+            out.append(char(0xFF - nxt));    // 合法转义:还原,并消费后继字节
+            ++i;
+        } else {                             // 非法转义:0x3D 当普通数据,后继字节下一轮正常处理
+            out.append(char(0x3D));
+            ++fixes;
         }
-        out.append(char(0xFF - escaped));
     }
+    if (lenient_fixes) *lenient_fixes = fixes;
     return true;
 }
 
-/// @brief 便捷反转义;非法转义返回空数组(需要区分合法空载荷时用 bool 重载)。
+/// @brief 便捷反转义(方案 A 后恒成功;仍保留空结果语义供区分合法空载荷,勿依赖其判失败)。
 inline QByteArray unescape_frame_data(const QByteArray& esc) {
     QByteArray out;
-    if (!unescape_frame_data(esc, out)) out.clear();
+    unescape_frame_data(esc, out);
     return out;
 }
 

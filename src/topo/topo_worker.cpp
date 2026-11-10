@@ -1,16 +1,16 @@
 #include "topo_worker.h"
 #include "packetentry_serialize.h"
-#include "sqlite3.h"
+#include <QAtomicInt>
 #include <QDataStream>
 #include <QDir>
 #include <QFileInfo>
+#include <QSqlError>
 #include <QTemporaryDir>
 
 namespace {
 constexpr quint32 kFrameBlobVersion = 1;
 constexpr quint32 kMaxStoredVector = 100000;
-using SqliteDb = sqlite3;
-using SqliteStmt = sqlite3_stmt;
+QAtomicInt s_connection_counter;
 
 QByteArray encode_event(const TopoEvent& event) {
     QByteArray bytes;
@@ -53,7 +53,7 @@ void TopoReplayWorker::initialize() {
 }
 
 bool TopoReplayWorker::open_store() {
-    if (m_db) return true;
+    if (m_db.isOpen()) return true;
     if (m_store_failed) return false;
     if (m_requested_db_path.isEmpty()) {
         m_temp_dir = new QTemporaryDir(QDir::tempPath() + QStringLiteral("/hplc-topology-XXXXXX"));
@@ -67,50 +67,57 @@ bool TopoReplayWorker::open_store() {
         m_database_path = m_requested_db_path;
         QDir().mkpath(QFileInfo(m_database_path).absolutePath());
     }
-    SqliteDb* db = nullptr;
-    // sqlite3_open16 uses SQLite's default READWRITE|CREATE flags. All access is
-    // serialized on this worker thread, so a NOMUTEX connection is unnecessary.
-    const int rc = sqlite3_open16(m_database_path.utf16(), &db);
-    if (rc != SQLITE_OK) {
-        const QString reason = db ? QString::fromUtf8(sqlite3_errmsg(db)) : QStringLiteral("open failed");
-        if (db) sqlite3_close(db);
+    // One QSQLITE connection per worker instance, opened on this thread only.
+    // All access is serialized on this worker thread.
+    m_connection_name = QStringLiteral("topo-replay-%1").arg(s_connection_counter.fetchAndAddRelaxed(1));
+    QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connection_name);
+    db.setDatabaseName(m_database_path);
+    if (!db.open()) {
+        const QString reason = db.lastError().text();
+        db = QSqlDatabase();
+        QSqlDatabase::removeDatabase(m_connection_name);
+        m_connection_name.clear();
         report_store_error(QStringLiteral("Cannot open topology SQLite store: %1").arg(reason));
         return false;
     }
     m_db = db;
-    sqlite3_exec(db, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
-    sqlite3_exec(db, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
-    const char* schema = "CREATE TABLE IF NOT EXISTS topo_frames ("
-                         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                         "frame_index INTEGER NOT NULL, payload BLOB NOT NULL);"
-                         "CREATE INDEX IF NOT EXISTS topo_frames_order "
-                         "ON topo_frames(frame_index,id);"
-                         "CREATE TABLE IF NOT EXISTS topo_anomalies ("
-                         "nid INTEGER NOT NULL, merge_key TEXT NOT NULL, kind INTEGER NOT NULL,"
-                         "tei INTEGER NOT NULL, tei_old INTEGER NOT NULL, mac INTEGER NOT NULL,"
-                         "mac_old INTEGER NOT NULL, is_rf INTEGER NOT NULL, trips INTEGER NOT NULL,"
-                         "value_from INTEGER NOT NULL, value_to INTEGER NOT NULL,"
-                         "first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL,"
-                         "first_frame INTEGER NOT NULL, last_frame INTEGER NOT NULL,"
-                         "UNIQUE(nid,merge_key));"
-                         "CREATE INDEX IF NOT EXISTS topo_anomalies_order "
-                         "ON topo_anomalies(nid,last_frame DESC);";
-    char* error = nullptr;
-    if (sqlite3_exec(db, schema, nullptr, nullptr, &error) != SQLITE_OK) {
-        const QString reason = QString::fromUtf8(error ? error : sqlite3_errmsg(db));
-        sqlite3_free(error);
-        report_store_error(QStringLiteral("Cannot initialize topology SQLite schema: %1").arg(reason));
+    QSqlQuery pragma(m_db);
+    pragma.exec(QStringLiteral("PRAGMA journal_mode=WAL"));
+    pragma.exec(QStringLiteral("PRAGMA synchronous=NORMAL"));
+    // QSqlQuery executes one statement per exec(), so the schema is split into
+    // separate statements instead of a single multi-statement string.
+    static const char* const kSchemaStatements[] = {
+        "CREATE TABLE IF NOT EXISTS topo_frames ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "frame_index INTEGER NOT NULL, payload BLOB NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS topo_frames_order "
+        "ON topo_frames(frame_index,id)",
+        "CREATE TABLE IF NOT EXISTS topo_anomalies ("
+        "nid INTEGER NOT NULL, merge_key TEXT NOT NULL, kind INTEGER NOT NULL,"
+        "tei INTEGER NOT NULL, tei_old INTEGER NOT NULL, mac INTEGER NOT NULL,"
+        "mac_old INTEGER NOT NULL, is_rf INTEGER NOT NULL, trips INTEGER NOT NULL,"
+        "value_from INTEGER NOT NULL, value_to INTEGER NOT NULL,"
+        "first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL,"
+        "first_frame INTEGER NOT NULL, last_frame INTEGER NOT NULL,"
+        "UNIQUE(nid,merge_key))",
+        "CREATE INDEX IF NOT EXISTS topo_anomalies_order "
+        "ON topo_anomalies(nid,last_frame DESC)",
+    };
+    for (const char* statement : kSchemaStatements) {
+        QSqlQuery query(m_db);
+        if (!query.exec(QString::fromLatin1(statement))) {
+            report_store_error(QStringLiteral("Cannot initialize topology SQLite schema: %1")
+                                   .arg(query.lastError().text()));
+            shutdown();
+            return false;
+        }
+    }
+    m_insert_query = QSqlQuery(m_db);
+    if (!m_insert_query.prepare(QStringLiteral("INSERT INTO topo_frames(frame_index,payload) VALUES(?,?)"))) {
+        report_db_error(QStringLiteral("prepare frame insert"), m_insert_query.lastError().text());
         shutdown();
         return false;
     }
-    SqliteStmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, "INSERT INTO topo_frames(frame_index,payload) VALUES(?1,?2)",
-                           -1, &stmt, nullptr) != SQLITE_OK) {
-        report_sqlite_error(QStringLiteral("prepare frame insert"));
-        shutdown();
-        return false;
-    }
-    m_insert_stmt = stmt;
     return true;
 }
 
@@ -164,12 +171,10 @@ bool TopoReplayWorker::insert_frame(const TopoFrameInput& frame) {
         report_store_error(QStringLiteral("Could not encode topology frame %1").arg(frame.frame_index));
         return false;
     }
-    SqliteStmt* stmt = static_cast<SqliteStmt*>(m_insert_stmt);
-    sqlite3_reset(stmt); sqlite3_clear_bindings(stmt);
-    sqlite3_bind_int64(stmt, 1, frame.frame_index);
-    sqlite3_bind_blob(stmt, 2, blob.constData(), blob.size(), SQLITE_TRANSIENT);
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-        report_sqlite_error(QStringLiteral("insert topology frame"));
+    m_insert_query.bindValue(0, frame.frame_index);
+    m_insert_query.bindValue(1, blob);
+    if (!m_insert_query.exec()) {
+        report_db_error(QStringLiteral("insert topology frame"), m_insert_query.lastError().text());
         return false;
     }
     return true;
@@ -177,37 +182,33 @@ bool TopoReplayWorker::insert_frame(const TopoFrameInput& frame) {
 
 bool TopoReplayWorker::visit_frames(qint64 after_frame, qint64 through_frame,
                                     const std::function<bool(const TopoFrameInput&)>& visitor) {
-    SqliteDb* db = static_cast<SqliteDb*>(m_db);
-    if (!db || m_store_failed) return false;
-    SqliteStmt* stmt = nullptr;
-    const char* sql = through_frame < 0
-        ? "SELECT frame_index,payload FROM topo_frames WHERE frame_index>?1 ORDER BY frame_index,id"
-        : "SELECT frame_index,payload FROM topo_frames WHERE frame_index>?1 AND frame_index<=?2 ORDER BY frame_index,id";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        report_sqlite_error(QStringLiteral("prepare frame query"));
+    if (!m_db.isOpen() || m_store_failed) return false;
+    QSqlQuery query(m_db);
+    const QString sql = through_frame < 0
+        ? QStringLiteral("SELECT frame_index,payload FROM topo_frames WHERE frame_index>? ORDER BY frame_index,id")
+        : QStringLiteral("SELECT frame_index,payload FROM topo_frames WHERE frame_index>? AND frame_index<=? ORDER BY frame_index,id");
+    if (!query.prepare(sql)) {
+        report_db_error(QStringLiteral("prepare frame query"), query.lastError().text());
         return false;
     }
-    sqlite3_bind_int64(stmt, 1, after_frame);
-    if (through_frame >= 0) sqlite3_bind_int64(stmt, 2, through_frame);
-    int rc = SQLITE_ROW;
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    query.bindValue(0, after_frame);
+    if (through_frame >= 0) query.bindValue(1, through_frame);
+    if (!query.exec()) {
+        report_db_error(QStringLiteral("read topology frames"), query.lastError().text());
+        return false;
+    }
+    while (query.next()) {
         TopoFrameInput frame;
-        frame.frame_index = sqlite3_column_int64(stmt, 0);
-        const auto* data = static_cast<const char*>(sqlite3_column_blob(stmt, 1));
-        const int size = sqlite3_column_bytes(stmt, 1);
-        if (!data || size <= 0 || !decode_frame(QByteArray(data, size), frame)) {
-            sqlite3_finalize(stmt);
+        frame.frame_index = query.value(0).toLongLong();
+        const QByteArray data = query.value(1).toByteArray();
+        if (data.isEmpty() || !decode_frame(data, frame)) {
             report_store_error(QStringLiteral("Corrupt topology frame in replay store"));
             return false;
         }
-        if (!visitor(frame)) {
-            sqlite3_finalize(stmt);
-            return false;
-        }
+        if (!visitor(frame)) return false;
     }
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) {
-        report_sqlite_error(QStringLiteral("read topology frames"));
+    if (query.lastError().type() != QSqlError::NoError) {
+        report_db_error(QStringLiteral("read topology frames"), query.lastError().text());
         return false;
     }
     return true;
@@ -265,15 +266,14 @@ bool TopoReplayWorker::apply_frame(const TopoFrameInput& f, TopoStateMap& states
 }
 
 bool TopoReplayWorker::persist_anomalies(quint32 nid, TopoState& state, qint64 frame_index) {
-    SqliteDb* db = static_cast<SqliteDb*>(m_db);
-    if (!db || m_store_failed) return false;
-    SqliteStmt* stmt = nullptr;
+    if (!m_db.isOpen() || m_store_failed) return false;
     // The bounded in-memory projection may evict an aggregate. Persist only the
     // not-yet-written trip delta and let SQLite merge it into the durable row.
     // Replacing a row with the projection's local count would lose older history.
-    const char* sql = "INSERT INTO topo_anomalies"
+    const QString sql = QStringLiteral(
+        "INSERT INTO topo_anomalies"
         "(nid,merge_key,kind,tei,tei_old,mac,mac_old,is_rf,trips,value_from,value_to,first_ms,last_ms,first_frame,last_frame)"
-        " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         " ON CONFLICT(nid,merge_key) DO UPDATE SET"
         " kind=excluded.kind,tei=excluded.tei,tei_old=excluded.tei_old,"
         " mac=excluded.mac,mac_old=excluded.mac_old,is_rf=excluded.is_rf,"
@@ -281,9 +281,10 @@ bool TopoReplayWorker::persist_anomalies(quint32 nid, TopoState& state, qint64 f
         " value_from=excluded.value_from,value_to=excluded.value_to,"
         // First occurrence fields are immutable after insertion. Frame order is
         // authoritative; timestamps can move backwards when clocks are corrected.
-        " last_ms=excluded.last_ms,last_frame=excluded.last_frame";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        report_sqlite_error(QStringLiteral("prepare anomaly upsert"));
+        " last_ms=excluded.last_ms,last_frame=excluded.last_frame");
+    QSqlQuery query(m_db);
+    if (!query.prepare(sql)) {
+        report_db_error(QStringLiteral("prepare anomaly upsert"), query.lastError().text());
         return false;
     }
     bool ok = true;
@@ -293,28 +294,25 @@ bool TopoReplayWorker::persist_anomalies(quint32 nid, TopoState& state, qint64 f
         if (a.last_frame != frame_index) continue;
         const int trips_delta = a.trips - a.persisted_trips;
         if (trips_delta <= 0) continue;
-        sqlite3_reset(stmt); sqlite3_clear_bindings(stmt);
-        const QByteArray merge_key = topo_anomaly_merge_key(nid, a).toUtf8();
-        sqlite3_bind_int64(stmt, 1, nid);
-        sqlite3_bind_text(stmt, 2, merge_key.constData(), merge_key.size(), SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt, 3, int(a.kind));
-        sqlite3_bind_int(stmt, 4, a.tei);
-        sqlite3_bind_int(stmt, 5, a.tei_old);
-        sqlite3_bind_int64(stmt, 6, sqlite3_int64(a.mac));
-        sqlite3_bind_int64(stmt, 7, sqlite3_int64(a.mac_old));
-        sqlite3_bind_int(stmt, 8, a.is_rf ? 1 : 0);
-        sqlite3_bind_int(stmt, 9, trips_delta);
-        sqlite3_bind_int(stmt, 10, a.value_from);
-        sqlite3_bind_int(stmt, 11, a.value_to);
-        sqlite3_bind_int64(stmt, 12, a.first_ms);
-        sqlite3_bind_int64(stmt, 13, a.last_ms);
-        sqlite3_bind_int64(stmt, 14, a.first_frame);
-        sqlite3_bind_int64(stmt, 15, a.last_frame);
-        if (sqlite3_step(stmt) != SQLITE_DONE) { ok = false; break; }
+        query.bindValue(0, nid);
+        query.bindValue(1, topo_anomaly_merge_key(nid, a));
+        query.bindValue(2, int(a.kind));
+        query.bindValue(3, a.tei);
+        query.bindValue(4, a.tei_old);
+        query.bindValue(5, QVariant::fromValue<quint64>(a.mac));
+        query.bindValue(6, QVariant::fromValue<quint64>(a.mac_old));
+        query.bindValue(7, a.is_rf ? 1 : 0);
+        query.bindValue(8, trips_delta);
+        query.bindValue(9, a.value_from);
+        query.bindValue(10, a.value_to);
+        query.bindValue(11, a.first_ms);
+        query.bindValue(12, a.last_ms);
+        query.bindValue(13, a.first_frame);
+        query.bindValue(14, a.last_frame);
+        if (!query.exec()) { ok = false; break; }
         a.persisted_trips = a.trips;
     }
-    sqlite3_finalize(stmt);
-    if (!ok) report_sqlite_error(QStringLiteral("persist topology anomalies"));
+    if (!ok) report_db_error(QStringLiteral("persist topology anomalies"), query.lastError().text());
     return ok;
 }
 
@@ -356,18 +354,19 @@ void TopoReplayWorker::submit_frame(const TopoFrameInput& frame) {
 
 void TopoReplayWorker::rebuild_live_from(qint64 frame_index) {
     Q_UNUSED(frame_index);
-    SqliteDb* db = static_cast<SqliteDb*>(m_db);
-    if (!db || m_store_failed) return;
+    if (!m_db.isOpen() || m_store_failed) return;
 
     // The derived anomaly index is rebuilt from the authoritative ordered frame log.
     // Keep the previous complete index visible if reading or inserting any row fails.
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) {
-        report_sqlite_error(QStringLiteral("begin topology replay rebuild"));
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("BEGIN IMMEDIATE"))) {
+        report_db_error(QStringLiteral("begin topology replay rebuild"), query.lastError().text());
         return;
     }
-    if (sqlite3_exec(db, "DELETE FROM topo_anomalies", nullptr, nullptr, nullptr) != SQLITE_OK) {
-        const QString detail = QString::fromUtf8(sqlite3_errmsg(db));
-        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+    if (!query.exec(QStringLiteral("DELETE FROM topo_anomalies"))) {
+        const QString detail = query.lastError().text();
+        QSqlQuery rollback(m_db);
+        rollback.exec(QStringLiteral("ROLLBACK"));
         report_store_error(QStringLiteral("Topology SQLite reset anomaly index before replay failed: %1").arg(detail));
         return;
     }
@@ -386,17 +385,20 @@ void TopoReplayWorker::rebuild_live_from(qint64 frame_index) {
         return true;
     });
     if (!read_ok || m_store_failed) {
-        // SQLite error reporting may set m_store_failed, but rollback must still run
-        // directly on the open connection to preserve the old materialized index.
-        if (sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr) != SQLITE_OK) {
-            const QString detail = QString::fromUtf8(sqlite3_errmsg(db));
-            report_store_error(QStringLiteral("Topology SQLite rollback after replay failure failed: %1").arg(detail));
+        // The database error is reported by visit_frames/persist_anomalies, but
+        // rollback must still run directly on the open connection to preserve
+        // the old materialized index.
+        QSqlQuery rollback(m_db);
+        if (!rollback.exec(QStringLiteral("ROLLBACK"))) {
+            report_store_error(QStringLiteral("Topology SQLite rollback after replay failure failed: %1")
+                                   .arg(rollback.lastError().text()));
         }
         return;
     }
-    if (sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
-        const QString detail = QString::fromUtf8(sqlite3_errmsg(db));
-        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+    if (!query.exec(QStringLiteral("COMMIT"))) {
+        const QString detail = query.lastError().text();
+        QSqlQuery rollback(m_db);
+        rollback.exec(QStringLiteral("ROLLBACK"));
         report_store_error(QStringLiteral("Topology SQLite commit replay rebuild failed: %1").arg(detail));
         return;
     }
@@ -429,30 +431,33 @@ void TopoReplayWorker::request_frame_page(quint64 request_id, qint64 offset, int
     page.offset = qMax<qint64>(0, offset);
     limit = qBound(1, limit, 500);
     if (!open_store()) { emit frame_page_ready(page); return; }
-    SqliteDb* db = static_cast<SqliteDb*>(m_db);
-    SqliteStmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM topo_frames", -1, &stmt, nullptr) != SQLITE_OK) {
-        report_sqlite_error(QStringLiteral("count topology frames")); emit frame_page_ready(page); return;
+    QSqlQuery count_query(m_db);
+    if (!count_query.exec(QStringLiteral("SELECT COUNT(*) FROM topo_frames"))) {
+        report_db_error(QStringLiteral("count topology frames"), count_query.lastError().text());
+        emit frame_page_ready(page); return;
     }
-    if (sqlite3_step(stmt) == SQLITE_ROW) page.total = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-    if (sqlite3_prepare_v2(db, "SELECT payload FROM topo_frames ORDER BY frame_index,id LIMIT ?1 OFFSET ?2", -1, &stmt, nullptr) != SQLITE_OK) {
-        report_sqlite_error(QStringLiteral("prepare topology frame page")); emit frame_page_ready(page); return;
+    if (count_query.next()) page.total = count_query.value(0).toLongLong();
+    QSqlQuery query(m_db);
+    if (!query.prepare(QStringLiteral("SELECT payload FROM topo_frames ORDER BY frame_index,id LIMIT ? OFFSET ?"))) {
+        report_db_error(QStringLiteral("prepare topology frame page"), query.lastError().text());
+        emit frame_page_ready(page); return;
     }
-    sqlite3_bind_int(stmt, 1, limit); sqlite3_bind_int64(stmt, 2, page.offset);
-    int rc = SQLITE_ROW;
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        const auto* data = static_cast<const char*>(sqlite3_column_blob(stmt, 0));
-        const int size = sqlite3_column_bytes(stmt, 0);
+    query.bindValue(0, limit); query.bindValue(1, page.offset);
+    if (!query.exec()) {
+        report_db_error(QStringLiteral("prepare topology frame page"), query.lastError().text());
+        emit frame_page_ready(page); return;
+    }
+    while (query.next()) {
+        const QByteArray data = query.value(0).toByteArray();
         TopoFrameInput frame;
-        if (!data || size <= 0 || !decode_frame(QByteArray(data, size), frame)) {
-            sqlite3_finalize(stmt); report_store_error(QStringLiteral("Corrupt topology frame in page query"));
+        if (data.isEmpty() || !decode_frame(data, frame)) {
+            report_store_error(QStringLiteral("Corrupt topology frame in page query"));
             emit frame_page_ready(page); return;
         }
         page.items.append(std::move(frame));
     }
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) report_sqlite_error(QStringLiteral("read topology frame page"));
+    if (query.lastError().type() != QSqlError::NoError)
+        report_db_error(QStringLiteral("read topology frame page"), query.lastError().text());
     emit frame_page_ready(page);
 }
 
@@ -461,35 +466,42 @@ void TopoReplayWorker::request_anomaly_page(quint64 request_id, quint32 nid, qin
     page.request_id = request_id; page.nid = nid; page.offset = qMax<qint64>(0, offset);
     limit = qBound(1, limit, 500);
     if (!open_store()) { emit anomaly_page_ready(page); return; }
-    SqliteDb* db = static_cast<SqliteDb*>(m_db);
-    SqliteStmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM topo_anomalies WHERE nid=?1", -1, &stmt, nullptr) != SQLITE_OK) {
-        report_sqlite_error(QStringLiteral("count topology anomalies")); emit anomaly_page_ready(page); return;
+    QSqlQuery count_query(m_db);
+    if (!count_query.prepare(QStringLiteral("SELECT COUNT(*) FROM topo_anomalies WHERE nid=?"))) {
+        report_db_error(QStringLiteral("count topology anomalies"), count_query.lastError().text());
+        emit anomaly_page_ready(page); return;
     }
-    sqlite3_bind_int64(stmt, 1, nid);
-    if (sqlite3_step(stmt) == SQLITE_ROW) page.total = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-    const char* sql = "SELECT kind,tei,tei_old,mac,mac_old,is_rf,trips,value_from,value_to,first_ms,last_ms,first_frame,last_frame "
-                      "FROM topo_anomalies WHERE nid=?1 ORDER BY last_frame DESC LIMIT ?2 OFFSET ?3";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        report_sqlite_error(QStringLiteral("prepare topology anomaly page")); emit anomaly_page_ready(page); return;
+    count_query.bindValue(0, nid);
+    if (!count_query.exec()) {
+        report_db_error(QStringLiteral("count topology anomalies"), count_query.lastError().text());
+        emit anomaly_page_ready(page); return;
     }
-    sqlite3_bind_int64(stmt, 1, nid); sqlite3_bind_int(stmt, 2, limit); sqlite3_bind_int64(stmt, 3, page.offset);
-    int rc = SQLITE_ROW;
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    if (count_query.next()) page.total = count_query.value(0).toLongLong();
+    QSqlQuery query(m_db);
+    if (!query.prepare(QStringLiteral("SELECT kind,tei,tei_old,mac,mac_old,is_rf,trips,value_from,value_to,first_ms,last_ms,first_frame,last_frame "
+                                      "FROM topo_anomalies WHERE nid=? ORDER BY last_frame DESC LIMIT ? OFFSET ?"))) {
+        report_db_error(QStringLiteral("prepare topology anomaly page"), query.lastError().text());
+        emit anomaly_page_ready(page); return;
+    }
+    query.bindValue(0, nid); query.bindValue(1, limit); query.bindValue(2, page.offset);
+    if (!query.exec()) {
+        report_db_error(QStringLiteral("prepare topology anomaly page"), query.lastError().text());
+        emit anomaly_page_ready(page); return;
+    }
+    while (query.next()) {
         TopoAnomaly a;
-        a.kind = static_cast<TopoAnomalyKind>(sqlite3_column_int(stmt, 0));
-        a.tei = quint16(sqlite3_column_int(stmt, 1)); a.tei_old = quint16(sqlite3_column_int(stmt, 2));
-        a.mac = quint64(sqlite3_column_int64(stmt, 3)); a.mac_old = quint64(sqlite3_column_int64(stmt, 4));
-        a.is_rf = sqlite3_column_int(stmt, 5) != 0; a.trips = sqlite3_column_int(stmt, 6);
+        a.kind = static_cast<TopoAnomalyKind>(query.value(0).toInt());
+        a.tei = quint16(query.value(1).toInt()); a.tei_old = quint16(query.value(2).toInt());
+        a.mac = quint64(query.value(3).toLongLong()); a.mac_old = quint64(query.value(4).toLongLong());
+        a.is_rf = query.value(5).toInt() != 0; a.trips = query.value(6).toInt();
         a.persisted_trips = a.trips;
-        a.value_from = sqlite3_column_int(stmt, 7); a.value_to = sqlite3_column_int(stmt, 8);
-        a.first_ms = sqlite3_column_int64(stmt, 9); a.last_ms = sqlite3_column_int64(stmt, 10);
-        a.first_frame = sqlite3_column_int64(stmt, 11); a.last_frame = sqlite3_column_int64(stmt, 12);
+        a.value_from = query.value(7).toInt(); a.value_to = query.value(8).toInt();
+        a.first_ms = query.value(9).toLongLong(); a.last_ms = query.value(10).toLongLong();
+        a.first_frame = query.value(11).toLongLong(); a.last_frame = query.value(12).toLongLong();
         page.items.append(a);
     }
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) report_sqlite_error(QStringLiteral("read topology anomaly page"));
+    if (query.lastError().type() != QSqlError::NoError)
+        report_db_error(QStringLiteral("read topology anomaly page"), query.lastError().text());
     emit anomaly_page_ready(page);
 }
 
@@ -502,12 +514,21 @@ void TopoReplayWorker::request_history(quint64 request_id, qint64 target_frame,
 }
 
 bool TopoReplayWorker::clear_store() {
-    SqliteDb* db = static_cast<SqliteDb*>(m_db);
-    return !db || sqlite3_exec(db, "DELETE FROM topo_frames; DELETE FROM topo_anomalies;", nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (!m_db.isOpen()) return true;
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("DELETE FROM topo_frames"))) {
+        report_db_error(QStringLiteral("clear topology store"), query.lastError().text());
+        return false;
+    }
+    if (!query.exec(QStringLiteral("DELETE FROM topo_anomalies"))) {
+        report_db_error(QStringLiteral("clear topology store"), query.lastError().text());
+        return false;
+    }
+    return true;
 }
 
 void TopoReplayWorker::clear() {
-    if (!clear_store()) report_sqlite_error(QStringLiteral("clear topology store"));
+    clear_store();
     m_live_states.clear();
     m_checkpoints.clear();
     m_last_applied_frame = -1;
@@ -515,13 +536,13 @@ void TopoReplayWorker::clear() {
 }
 
 void TopoReplayWorker::shutdown() {
-    if (m_insert_stmt) {
-        sqlite3_finalize(static_cast<SqliteStmt*>(m_insert_stmt));
-        m_insert_stmt = nullptr;
-    }
-    if (m_db) {
-        sqlite3_close(static_cast<SqliteDb*>(m_db));
-        m_db = nullptr;
+    m_insert_query.finish();
+    m_insert_query = QSqlQuery();
+    if (m_db.isOpen()) m_db.close();
+    m_db = QSqlDatabase();
+    if (!m_connection_name.isEmpty()) {
+        QSqlDatabase::removeDatabase(m_connection_name);
+        m_connection_name.clear();
     }
     delete m_temp_dir;
     m_temp_dir = nullptr;
@@ -534,8 +555,6 @@ void TopoReplayWorker::report_store_error(const QString& message) {
     emit worker_error(message);
 }
 
-void TopoReplayWorker::report_sqlite_error(const QString& operation) {
-    auto* db = static_cast<SqliteDb*>(m_db);
-    const QString detail = db ? QString::fromUtf8(sqlite3_errmsg(db)) : QStringLiteral("database unavailable");
+void TopoReplayWorker::report_db_error(const QString& operation, const QString& detail) {
     report_store_error(QStringLiteral("Topology SQLite %1 failed: %2").arg(operation, detail));
 }

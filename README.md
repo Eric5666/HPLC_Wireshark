@@ -242,6 +242,11 @@ mingw32-make -j4
 | 0x3E   | `0x3D 0xC1` | 同上 |
 | 0x3D   | `0x3D 0xC2` | 同上 |
 
+> **反转义已放宽（用户 2026-11 裁决，方案 A）**：`0x3D` 后接 `C1/C2/C3` 仍正常还原；
+> 后接其它字节（现场模块帧尾未转义的 ASCII 调试日志里的 `=`）一律当普通数据、只记 warn 不 DROP；
+> `0x3E` 定界维持严格。原因与「禁止改回严格」的约束见
+> [`docs/unescape_lenient_rationale.md`](docs/unescape_lenient_rationale.md)。
+
 ### 帧内数据布局(实时串口帧)
 
 反转义后的数据(去掉 0x3C/0x3E)为:

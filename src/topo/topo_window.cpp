@@ -760,7 +760,7 @@ TopoWindow::TopoWindow(QWidget* parent) : QWidget(parent) {
     auto* routes_panel = new QWidget(this);
     auto* routes_lay = new QVBoxLayout(routes_panel);
     routes_lay->setContentsMargins(0, 0, 0, 0);
-    routes_lay->addWidget(new QLabel(trl::L("路由变更记录(关联确认/关联指示/关联汇总指示/代理变更请求/代理变更/发现列表/离线指示/CCO重启/STA重启)"), routes_panel));
+    routes_lay->addWidget(new QLabel(trl::L("路由变更记录(关联确认/关联指示/关联汇总指示/代理变更请求/代理变更/发现列表/离线指示/CCO重启/STA重启/断电事件/上电事件)"), routes_panel));
     routes_lay->addWidget(m_routes_filter);
     routes_lay->addWidget(m_routes_table, 1);
 
@@ -792,7 +792,7 @@ TopoWindow::TopoWindow(QWidget* parent) : QWidget(parent) {
     auto* anom_panel = new QWidget(this);
     auto* anom_lay = new QVBoxLayout(anom_panel);
     anom_lay->setContentsMargins(0, 0, 0, 0);
-    anom_lay->addWidget(new QLabel(trl::L("异常/冲突记录(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡)"), anom_panel));
+    anom_lay->addWidget(new QLabel(trl::L("异常/冲突记录(同一 MAC 多 TEI / 同一 TEI 多 MAC / 重启次数振荡 / NID 冲突)"), anom_panel));
     anom_lay->addWidget(m_anom_table, 1);
 
     auto* bottom_tabs = new QTabWidget(this);
