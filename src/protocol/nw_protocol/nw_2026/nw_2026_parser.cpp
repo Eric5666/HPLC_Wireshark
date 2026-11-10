@@ -130,9 +130,6 @@ struct I18nReg {
         trl::register_en(" (截断: PB 块不完整, 声明 %1 块仅收到 %2 块)", " (truncated: %1 PB declared, %2 received)");
         trl::register_en("训练帧（Bitloading训练帧）", "Training Frame (Bitloading)");
         trl::register_en("聚合帧(%1 个级联 MAC 帧)", "Aggregated Frame (%1 cascade MAC frames)");
-        trl::register_en("（%1 段因块 CRC 失败未解析）", "(%1 segments skipped: block CRC failed)");
-        // 注:原「块 CRC 失败未解析」文案随用户 2026-11 裁决作废
-        // (PB 块 CRC 不再阻断 MSDU 解析,唯一 DROP 条件是 FC CRC),注册一并删除。
         trl::register_en("PB 序号异常未解析", "PB Sequence Error, Not Parsed");
         trl::register_en("聚合帧(%1 帧: %2)", "Aggregated Frame (%1 frames: %2)");
         trl::register_en("聚合帧(%1 帧: %2 ×%3)", "Aggregated Frame (%1 frames: %2 x%3)");
@@ -162,6 +159,9 @@ static quint32 ofdma_full_snid(quint32 net_id_low4, const quint8* p);
 // - 头对(src/dst)以对形式并入(单槽位装不下 N 段;守卫同 update_tei_mac 的头对门:tei>0 && mac;头对字段见 SPLC 第4部分 表1/表7);
 // - topo 事件:首个非 Other 段事件进 topo_event,后续段事件进 topo_extra_events(消费时两者都读)。
 static void merge_msdu_learn(MsduInfo& dst, const MsduInfo& cm) {
+    // Defense in depth: a failed MSDU CRC must never leak scalar header fields,
+    // TEI/MAC pairs or topology events into the aggregate learning result.
+    if (msdu_crc_state(cm) == MsduCrcState::Fail) return;
     for (const TeiMacPair& p : cm.tei_mac_pairs)
         if (p.tei != 0 && p.mac) dst.tei_mac_pairs.append(p);
     if (cm.msdu_src_tei > 0 && cm.msdu_src_mac)
@@ -471,7 +471,10 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
                 // topo 事件:首段事件进 topo_event,后续段事件进 topo_extra_events(见 merge_msdu_learn)
                 for (const auto& c : res.cascade) {
                     const MsduInfo cm = NW_2026_MsduParser::parse(c.mac);
-                    merge_msdu_learn(r.msdu, cm);
+                    const bool pb_fallback_ok = pb_asm::cascade_span_avoids_bad_blocks(
+                        c, res.blocks, layout.body_len(r.mpdu.pb_size));
+                    if (msdu_crc_allows_learning(cm, pb_fallback_ok))
+                        merge_msdu_learn(r.msdu, cm);
                     MsduFieldNode grp;
                     grp.name = QStringLiteral("Cascade MAC Frame[%1]").arg(cas_cnt);
                     grp.value = QStringLiteral("%1 B%2%3")
@@ -511,11 +514,8 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
                                              .arg(cas_cnt).arg(list);
                     }
                 }
-                // CRC 失败块剔除的记录数(assembler 已过滤):摘要里说明,避免
-                // 段数悄悄变少;被剔记录不解析、不进树、不参与学习。
-                if (res.cascade_crc_skipped > 0)
-                    r.msdu.summary += trl::L("（%1 段因块 CRC 失败未解析）")
-                                          .arg(res.cascade_crc_skipped);
+                // 级联段不因 PB CRC 单独剔除;MSDU CRC32 FAIL 仍由上面的帧级 gate
+                // 保留 CRC 证据并阻断学习。
                 // msdu_body 保留为级联体流供树值/高亮映射,非重组 MSDU 语义(见 msdu.cascade);
                 // total_len = 级联体流总长(树层 Length 子节点/区间高亮依据)
                 r.msdu.cascade = true;
@@ -596,7 +596,10 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
                         if (learnable) {
                             for (const auto& c : ar.cascade) {
                                 const MsduInfo cm = NW_2026_MsduParser::parse(c.mac);
-                                merge_msdu_learn(r.msdu, cm);
+                                const bool pb_fallback_ok = pb_asm::cascade_span_avoids_bad_blocks(
+                                    c, ar.blocks, layout.body_len(psz));
+                                if (msdu_crc_allows_learning(cm, pb_fallback_ok))
+                                    merge_msdu_learn(r.msdu, cm);
                             }
                         }
                         // 记录聚合块的 CRC 状态
@@ -604,16 +607,15 @@ NW_2026_Parser::Result NW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
                             r.mpdu.pb_crc_oks.append(b.crc_ok);
                         }
                     } else {
-                        // CRC 失败块不解析(与主路同口径,用户 2026-10-29 定):
-                        // 本站 PB 全好或 MSDU 完整落在好块内才解析学习;坏块
-                        // 字节会使体流错位成错误数据,解析出的 MAC/TEI 对不可信。
-                        // (聚合分支已由组装器剔除与坏块相交的记录,无需再验。)
-                        if (learnable
-                            && (ar.all_crc_ok
-                                || pb_asm::msdu_span_avoids_bad_blocks(
-                                       ar.msdu_body, ar.blocks, layout.body_len(psz)))) {
+                        // 序号重组完整后先解析候选;MSDU CRC32 OK 可覆盖 PB CRC FAIL,
+                        // CRC 不可用时才回退到 PB 块 span 校验。
+                        if (learnable) {
                             const MsduInfo cm = NW_2026_MsduParser::parse(ar.msdu_body);
-                            merge_msdu_learn(r.msdu, cm);
+                            const bool pb_fallback_ok = ar.all_crc_ok
+                                || pb_asm::msdu_span_avoids_bad_blocks(
+                                       ar.msdu_body, ar.blocks, layout.body_len(psz));
+                            if (msdu_crc_allows_learning(cm, pb_fallback_ok))
+                                merge_msdu_learn(r.msdu, cm);
                         }
                         // 记录本站 CRC 状态，以支持"任意块 CRC 失败即标红"
                         for (const auto& b : ar.blocks) {
@@ -797,22 +799,23 @@ void NW_2026_Parser::parse_ofdma_type1(Result& r, const quint8* p, int raw_sz) {
                     if (!st.msdu.isEmpty()) {
                         const bool learnable = res.reassembly_ok;   // 序列号缺块/越界/冲突则不学习
                         if (res.any_aggregated) {
-                            // 级联记录已由 assembler 按 CRC 过滤,仅好块记录进合并
+                            // 逐条按 MSDU CRC 判定;CRC 不可用时才要求记录 span 避开坏块。
                             if (learnable) {
                                 for (const auto& c : res.cascade) {
                                     const MsduInfo cm = NW_2026_MsduParser::parse(c.mac);
-                                    merge_msdu_learn(r.msdu, cm);
+                                    const bool pb_fallback_ok = pb_asm::cascade_span_avoids_bad_blocks(
+                                        c, res.blocks, layout.body_len(ts.pb_size));
+                                    if (msdu_crc_allows_learning(cm, pb_fallback_ok))
+                                        merge_msdu_learn(r.msdu, cm);
                                 }
                             }
-                        } else if (learnable
-                                   && (res.all_crc_ok
-                                       || pb_asm::msdu_span_avoids_bad_blocks(
-                                              st.msdu, res.blocks,
-                                              layout.body_len(ts.pb_size)))) {
-                            // 非级联整段:span 完整落在好块内即解析学习,横跨坏块
-                            // 则不解析不学习(用户 2026-10-29 定 + 多块补定)
+                        } else if (learnable) {
                             const MsduInfo cm = NW_2026_MsduParser::parse(st.msdu);
-                            merge_msdu_learn(r.msdu, cm);
+                            const bool pb_fallback_ok = res.all_crc_ok
+                                || pb_asm::msdu_span_avoids_bad_blocks(
+                                       st.msdu, res.blocks, layout.body_len(ts.pb_size));
+                            if (msdu_crc_allows_learning(cm, pb_fallback_ok))
+                                merge_msdu_learn(r.msdu, cm);
                         }
                     }
                 }
