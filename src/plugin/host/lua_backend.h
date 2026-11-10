@@ -33,13 +33,17 @@
 ///   on_frame_selected(frameIndex, forceHistory)  -- 主帧列表选中变化;
 ///     forceHistory=true 时强制历史冻结(双击),否则插件按是否为最新帧
 ///     自行决定 live/历史;未定义时静默忽略
-/// @note 安全边界是进程隔离;Lua 标准库全开(含 io/os),插件崩溃不影响主程序。
+/// @note 安全边界是进程隔离 + 受限标准库(无 io/debug/os.execute,require 限插件目录,
+///       拒字节码);每次脚本调用有指令预算(默认 2 亿条,超限抛 Lua 错误)。
 #ifndef BPLC_LUA_BACKEND_H
 #define BPLC_LUA_BACKEND_H
 
 #include "plugin_backend.h"
 
+#include <memory>
+
 struct lua_State;
+struct LuaBudget;
 
 /// @brief Lua 插件后端
 class LuaBackend : public IPluginBackend {
@@ -75,6 +79,7 @@ private:
     quint64 table_uint(const char* key, quint64 d = 0);
 
     lua_State* m_lua = nullptr;
+    std::unique_ptr<LuaBudget> m_budget;  ///< 每次调用的指令预算(count hook 读写)
     bool m_has_graphics = false;
     QString m_plugin_dir;  ///< 插件目录(设置/环境变量用)
     QString m_protocol_id;

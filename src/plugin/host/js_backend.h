@@ -51,7 +51,10 @@
 #include <QJSValue>
 #include <QObject>
 
+#include <condition_variable>
 #include <functional>
+#include <mutex>
+#include <thread>
 
 #include "plugin_backend.h"
 
@@ -91,9 +94,39 @@ public slots:
 };
 
 /// @brief JS 插件后端
+/// @brief JS 调用看门狗(M10):每次脚本入口 arm(),超时由后台线程调用
+///        QJSEngine::setInterrupted(true) 打断死循环;disarm() 复位中断标志。
+/// @details 一个后台线程常驻(不按调用新建);超时默认 3000 ms,环境变量
+///          BPLC_JS_CALL_TIMEOUT_MS 可覆盖(测试用)。setInterrupted 线程安全。
+class JsWatchdog {
+public:
+    explicit JsWatchdog(QJSEngine* engine);
+    ~JsWatchdog();
+    JsWatchdog(const JsWatchdog&) = delete;
+    JsWatchdog& operator=(const JsWatchdog&) = delete;
+
+    void arm();
+    /// @return true=本次调用因超时被打断
+    bool disarm();
+    int timeout_ms() const { return m_timeout_ms; }
+
+private:
+    void run();
+
+    QJSEngine* m_engine;  ///< 不拥有
+    int m_timeout_ms = 3000;
+    std::mutex m_mu;
+    std::condition_variable m_cv;
+    bool m_armed = false;
+    bool m_fired = false;
+    bool m_quit = false;
+    quint64 m_gen = 0;  ///< 每次 arm 自增,区分不同调用
+    std::thread m_thread;
+};
+
 class JsBackend : public IPluginBackend {
 public:
-    JsBackend() = default;
+    JsBackend() = default;  // m_watchdog 由默认成员初始化绑定 m_engine
     ~JsBackend() override = default;
 
     bool initialize(const PluginManifest& m, QString* err) override;
@@ -120,10 +153,19 @@ public:
 private:
     bool convert_fields(const QJSValue& js_fields, QVector<MsduFieldNode>* out,
                         QString* err);
-    static bool check_error(const QJSValue& v, QString* err,
-                            const QString& ctx);
+    /// @brief 脚本异常 → err;被看门狗打断时给出超时说明
+    bool check_error(const QJSValue& v, QString* err,
+                     const QString& ctx) const;
+
+    /// @brief 一次脚本入口的看门狗作用域(构造 arm,析构 disarm)
+    struct CallGuard {
+        explicit CallGuard(JsWatchdog& w) : wd(w) { wd.arm(); }
+        ~CallGuard() { wd.disarm(); }
+        JsWatchdog& wd;
+    };
 
     QJSEngine m_engine;
+    JsWatchdog m_watchdog{&m_engine};  ///< 声明在 m_engine 之后:先于引擎析构
     QJSValue m_parse_fn;
     QJSValue m_render_fn;
     QJSValue m_on_event_fn;

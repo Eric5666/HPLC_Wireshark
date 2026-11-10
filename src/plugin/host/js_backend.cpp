@@ -95,7 +95,12 @@ void HostHelper::showTable(const QString& title, const QJSValue& columns,
 static QJSValue build_topo_event_object(QJSEngine& eng, const TopoEvent& e);
 
 bool JsBackend::check_error(const QJSValue& v, QString* err,
-                           const QString& ctx) {
+                            const QString& ctx) const {
+    if (m_engine.isInterrupted()) {
+        *err = QStringLiteral("%1: script exceeded %2 ms time limit, interrupted")
+                   .arg(ctx).arg(m_watchdog.timeout_ms());
+        return false;
+    }
     if (v.isError()) {
         *err = QStringLiteral("%1: %2").arg(ctx, v.toString());
         return false;
@@ -103,7 +108,65 @@ bool JsBackend::check_error(const QJSValue& v, QString* err,
     return true;
 }
 
+// ---- JsWatchdog(M10) ----
+JsWatchdog::JsWatchdog(QJSEngine* engine) : m_engine(engine) {
+    bool ok = false;
+    const int v = qEnvironmentVariableIntValue("BPLC_JS_CALL_TIMEOUT_MS", &ok);
+    if (ok && v > 0) m_timeout_ms = v;
+    m_thread = std::thread([this] { run(); });
+}
+
+JsWatchdog::~JsWatchdog() {
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        m_quit = true;
+    }
+    m_cv.notify_all();
+    m_thread.join();
+}
+
+void JsWatchdog::arm() {
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        m_armed = true;
+        m_fired = false;
+        ++m_gen;
+    }
+    m_cv.notify_all();
+}
+
+bool JsWatchdog::disarm() {
+    std::lock_guard<std::mutex> lk(m_mu);
+    m_armed = false;
+    const bool fired = m_fired;
+    if (fired) m_engine->setInterrupted(false);  // 复位,后续调用可正常执行
+    m_fired = false;
+    m_cv.notify_all();
+    return fired;
+}
+
+void JsWatchdog::run() {
+    std::unique_lock<std::mutex> lk(m_mu);
+    while (!m_quit) {
+        m_cv.wait(lk, [this] { return m_quit || m_armed; });
+        if (m_quit) break;
+        const quint64 gen = m_gen;
+        const auto deadline = std::chrono::steady_clock::now()
+                              + std::chrono::milliseconds(m_timeout_ms);
+        const bool ended = m_cv.wait_until(lk, deadline, [this, gen] {
+            return m_quit || !m_armed || m_gen != gen;
+        });
+        if (!ended && m_armed && m_gen == gen && !m_fired) {
+            m_fired = true;
+            m_engine->setInterrupted(true);
+        }
+        // 已打断:等本次调用 disarm(或下一次 arm)再继续
+        m_cv.wait(lk, [this, gen] { return m_quit || !m_armed || m_gen != gen; });
+    }
+}
+
 bool JsBackend::initialize(const PluginManifest& m, QString* err) {
+    CallGuard guard(m_watchdog);  // M10:超时打断死循环
     if (m.api_version != 1) {
         *err = QStringLiteral("api_version mismatch");
         return false;
@@ -215,6 +278,7 @@ QSize JsBackend::graphics_preferred_size() const {
 }
 
 QImage JsBackend::render_graphics(int w, int h, QString* err) {
+    CallGuard guard(m_watchdog);  // M10:超时打断死循环
     if (!m_has_graphics) {
         *err = QStringLiteral("no graphics");
         return QImage();
@@ -237,6 +301,7 @@ QImage JsBackend::render_graphics(int w, int h, QString* err) {
 }
 
 bool JsBackend::handle_graphics_event(const GraphicsEvent& e, QString* err) {
+    CallGuard guard(m_watchdog);  // M10:超时打断死循环
     if (!m_has_graphics || !m_on_event_fn.isCallable()) return false;
     const QJSValue r = m_on_event_fn.call(QJSValueList{
         QJSValue(static_cast<int>(e.type)), QJSValue(e.x), QJSValue(e.y),
@@ -274,6 +339,7 @@ ParseResult JsBackend::parse(const BplcFrame& frame, MsduState& msdu,
                              const ParseFilter& filter, QString* err) {
     Q_UNUSED(msdu);   // Phase2:JS 插件不支持跨帧重组
     Q_UNUSED(filter);
+    CallGuard guard(m_watchdog);  // M10:超时打断死循环
     ParseResult r;
     r.meta = frame.meta;
     r.raw_wire = frame.raw_wire;
@@ -433,6 +499,7 @@ static QJSValue build_topo_event_object(QJSEngine& eng, const TopoEvent& e) {
 }
 
 QString JsBackend::call_text_function(const char* name, QString* err) {
+    CallGuard guard(m_watchdog);  // M10:超时打断死循环
     const QJSValue fn =
         m_engine.globalObject().property(QString::fromLatin1(name));
     if (!fn.isCallable()) {
@@ -452,6 +519,7 @@ QString JsBackend::call_text_function(const char* name, QString* err) {
 }
 
 void JsBackend::notify_frame_selected(qint64 frameIndex, bool force_history) {
+    CallGuard guard(m_watchdog);  // M10:超时打断死循环
     const QJSValue fn =
         m_engine.globalObject().property(QStringLiteral("on_frame_selected"));
     if (!fn.isCallable()) return;  // 脚本不关心帧选中:静默忽略

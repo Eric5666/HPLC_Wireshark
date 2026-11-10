@@ -17,7 +17,51 @@ extern "C" {
 #include "lualib.h"
 }
 
+/// @brief 单次脚本调用的指令计数(lua_getextraspace 存其指针,协程继承)
+struct LuaBudget {
+    quint64 used = 0;
+    quint64 limit = 0;
+    lua_State* main = nullptr;  ///< 主线程(超限时一并切逐条触发)
+};
+
 namespace {
+// ---- 指令预算(M10):每个脚本入口一次 pcall 的指令数上限 ----
+// count hook 每 kLuaHookStep 条 VM 指令触发一次,累计超过预算即在脚本内
+// 抛 Lua 错误;死循环(含 pcall 包裹的死循环:超限后每次 hook 都再抛)
+// 在有限时间内结束,宿主进程不再被单个插件占满 CPU。
+constexpr int kLuaHookStep = 1000;
+constexpr quint64 kDefaultLuaInstrBudget = 200000000ull;  // ~1-3 s
+/// @brief 每次调用的指令预算;环境变量 BPLC_LUA_INSTR_BUDGET 可覆盖(测试用)
+quint64 lua_instr_budget() {
+    bool ok = false;
+    const quint64 v = qEnvironmentVariable("BPLC_LUA_INSTR_BUDGET").toULongLong(&ok);
+    return (ok && v >= quint64(kLuaHookStep)) ? v : kDefaultLuaInstrBudget;
+}
+LuaBudget* budget_of(lua_State* L) {
+    return *static_cast<LuaBudget**>(lua_getextraspace(L));
+}
+void budget_hook(lua_State* L, lua_Debug*) {
+    LuaBudget* b = budget_of(L);
+    if (!b) return;
+    const int step = lua_gethookcount(L);
+    b->used += quint64(step > 0 ? step : kLuaHookStep);
+    if (b->used > b->limit) {
+        // 超限后把主线程和当前协程都切到“每条指令都触发”:错误若被脚本内
+        // pcall/xpcall/协程接住,外层下一条指令立即再抛,最终逃出脚本入口
+        if (b->main) lua_sethook(b->main, budget_hook, LUA_MASKCOUNT, 1);
+        lua_sethook(L, budget_hook, LUA_MASKCOUNT, 1);
+        luaL_error(L, "instruction budget exceeded (%I instructions per call)",
+                   static_cast<lua_Integer>(b->limit));
+    }
+    if (step != kLuaHookStep)  // 上次超限遗留的逐条触发:新一次调用恢复步长
+        lua_sethook(L, budget_hook, LUA_MASKCOUNT, kLuaHookStep);
+}
+/// @brief 所有脚本入口统一走这里:清零本次预算再 lua_pcall
+int guarded_pcall(lua_State* L, int nargs, int nresults) {
+    if (LuaBudget* b = budget_of(L)) b->used = 0;
+    lua_sethook(L, budget_hook, LUA_MASKCOUNT, kLuaHookStep);
+    return lua_pcall(L, nargs, nresults, 0);
+}
 // QByteArray → Lua 数组表(1-based),留在栈顶
 void push_byte_table(lua_State* L, const QByteArray& b) {
     lua_newtable(L);
@@ -435,6 +479,11 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
         *err = QStringLiteral("luaL_newstate failed");
         return false;
     }
+    m_budget.reset(new LuaBudget);
+    m_budget->limit = lua_instr_budget();
+    m_budget->main = m_lua;
+    *static_cast<LuaBudget**>(lua_getextraspace(m_lua)) = m_budget.get();
+    lua_sethook(m_lua, budget_hook, LUA_MASKCOUNT, kLuaHookStep);
     m_plugin_dir = m.dir_path;
     open_sandboxed_libs(m_lua, m_plugin_dir);   // 受限标准库(不再 luaL_openlibs)
 
@@ -444,7 +493,7 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
         *err = QStringLiteral("load %1: %2").arg(m.entry, pop_lua_error(m_lua));
         return false;
     }
-    if (lua_pcall(m_lua, 0, 0, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 0, 0) != LUA_OK) {
         *err = QStringLiteral("run %1: %2").arg(m.entry, pop_lua_error(m_lua));
         return false;
     }
@@ -456,7 +505,7 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
         lua_pop(m_lua, 1);
         return false;
     }
-    if (lua_pcall(m_lua, 0, 1, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 0, 1) != LUA_OK) {
         *err = QStringLiteral("get_info: %1").arg(pop_lua_error(m_lua));
         return false;
     }
@@ -554,6 +603,7 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
 
 void LuaBackend::shutdown() {
     if (m_lua) { lua_close(m_lua); m_lua = nullptr; }
+    m_budget.reset();
     m_has_graphics = false;
 }
 
@@ -593,7 +643,7 @@ QImage LuaBackend::render_graphics(int w, int h, QString* err) {
     push_painter_table(m_lua, &bridge);
     lua_pushinteger(m_lua, w);
     lua_pushinteger(m_lua, h);
-    if (lua_pcall(m_lua, 3, 0, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 3, 0) != LUA_OK) {
         *err = QStringLiteral("render: %1").arg(pop_lua_error(m_lua));
         return QImage();
     }
@@ -614,7 +664,7 @@ bool LuaBackend::handle_graphics_event(const GraphicsEvent& e, QString* err) {
     lua_pushinteger(m_lua, e.button);
     lua_pushinteger(m_lua, e.modifiers);
     lua_pushinteger(m_lua, e.delta_y);
-    if (lua_pcall(m_lua, 6, 1, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 6, 1) != LUA_OK) {
         *err = QStringLiteral("on_event: %1").arg(pop_lua_error(m_lua));
         return false;
     }
@@ -744,7 +794,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
     lua_pushstring(m_lua, frame.msdu_summary.toUtf8().constData());
     lua_setfield(m_lua, -2, "msduSummary");
 
-    if (lua_pcall(m_lua, 1, 1, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 1, 1) != LUA_OK) {
         *err = QStringLiteral("parse: %1").arg(pop_lua_error(m_lua));
         r.accept = false; r.reject_reason = *err;
         return r;
@@ -799,7 +849,7 @@ QString LuaBackend::call_text_function(const char* name, QString* err) {
         *err = QStringLiteral("function %1 not found").arg(QLatin1String(name));
         return QString();
     }
-    if (lua_pcall(m_lua, 0, 1, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 0, 1) != LUA_OK) {
         *err = QStringLiteral("%1: %2")
                    .arg(QLatin1String(name), pop_lua_error(m_lua));
         return QString();
@@ -821,7 +871,7 @@ void LuaBackend::notify_frame_selected(qint64 frameIndex, bool force_history) {
     }
     lua_pushinteger(m_lua, static_cast<lua_Integer>(frameIndex));
     lua_pushboolean(m_lua, force_history);
-    if (lua_pcall(m_lua, 2, 0, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 2, 0) != LUA_OK) {
         qWarning() << "LuaBackend::notify_frame_selected:"
                    << pop_lua_error(m_lua);
     }

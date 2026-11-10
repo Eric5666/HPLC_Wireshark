@@ -210,7 +210,28 @@ in-process backend and `bplc-plugin-host`):
 - `load`/`loadfile`/`dofile`/`require` and the entry script accept **text
   chunks only** (precompiled bytecode is rejected).
 
-This is defence in depth, not a security boundary: there is no CPU/memory
+## Script time limits (Lua and JS)
+
+Every call into a script plugin (loading the entry script, `get_info`,
+`parse`, `render`, `on_event`, `on_frame_selected`, text functions) has a
+budget:
+
+- **Lua**: 200 million VM instructions per call (an instruction-count hook).
+  On overrun the call fails with the Lua error
+  `instruction budget exceeded (...)`; catching it with `pcall`/`xpcall` or
+  running the loop in a coroutine does not help, the error is raised again
+  at the next instruction until it leaves the entry point. The next call
+  starts with a fresh budget. Override for tests with
+  `BPLC_LUA_INSTR_BUDGET=<instructions>`.
+- **JS**: 3 s wall clock per call. A watchdog calls
+  `QJSEngine::setInterrupted(true)`; the call fails with
+  `<entry>: script exceeded 3000 ms time limit, interrupted` and the engine
+  is reset for the next call. Override with `BPLC_JS_CALL_TIMEOUT_MS=<ms>`.
+
+A plugin whose `parse()` hits the limit gets that frame rejected with the
+error as the reason; the plugin keeps running.
+
+This is defence in depth, not a security boundary: there is no memory
 limit, and JS/native plugins are not sandboxed (native plugins are fully
 trusted code).
 
