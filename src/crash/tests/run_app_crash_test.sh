@@ -19,8 +19,9 @@ cd "$(dirname "$0")/../../.."
 ROOT="$PWD"
 
 echo "=== 1/6 查找打包产物与符号包 ==="
-TARBALL=$(ls -t dist/BPLC_STA_Monitor_v*_linux_x86_64.tar.gz 2>/dev/null | grep -v symbols | head -1)
-SYMTARBALL=$(ls -t dist/BPLC_STA_Monitor_v*_linux_x86_64_symbols.tar.gz 2>/dev/null | head -1)
+ARCH="${ARCH:-$(uname -m)}"   # 与 scripts/package_linux.sh 的包名一致
+TARBALL=$(ls -t dist/BPLC_STA_Monitor_v*_linux_${ARCH}.tar.gz 2>/dev/null | grep -v symbols | head -1)
+SYMTARBALL=$(ls -t dist/BPLC_STA_Monitor_v*_linux_${ARCH}_symbols.tar.gz 2>/dev/null | head -1)
 [ -n "$TARBALL" ] || { echo "[FAIL] dist/ 下没有 Linux tarball,先跑 scripts/package_linux.sh"; exit 1; }
 [ -n "$SYMTARBALL" ] || { echo "[FAIL] dist/ 下没有符号包,先跑 scripts/package_linux.sh"; exit 1; }
 echo "tarball: $TARBALL"

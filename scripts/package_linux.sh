@@ -2,14 +2,15 @@
 # Linux 打包脚本:构建 → 收集 Qt 运行时 → tar.gz 安装包
 # 用法: bash scripts/package_linux.sh [版本号,默认 1.0.1]
 #
-# 产物: dist/BPLC_STA_Monitor_v<VER>_linux_x86_64.tar.gz
+# 产物: dist/BPLC_STA_Monitor_v<VER>_linux_<arch>.tar.gz(arch = uname -m,如 x86_64 / aarch64)
 # 解压即用,含 crashpad_handler(崩溃转储必需,放程序同目录)。
 #
 # 依赖: qmake(Qt6) / make(需联网构建 crashpad 依赖)
 set -e
 cd "$(dirname "$0")/.."
 VER="${1:-1.0.1}"
-ARCH="x86_64"
+# 架构取自构建机(uname -m:x86_64 / aarch64 原样用于包名),可用 ARCH= 覆盖
+ARCH="${ARCH:-$(uname -m)}"
 
 echo "== 0/4 检查 crashpad 依赖"
 if [ ! -f 3rdparty/install/crashpad/bin/crashpad_handler ]; then
@@ -98,7 +99,7 @@ chmod +x AppDir/usr/bin/run.sh
 echo "== 3.5/4 包级说明文档与用户手册"
 # 包根 README:用户解压后第一眼看到的使用说明
 cat > AppDir/README.md <<EOF
-# BPLC STA Monitor v${VER} (Linux x86_64)
+# BPLC STA Monitor v${VER} (Linux ${ARCH})
 
 BPLC/HPLC 协议 STA 报文监控上位机。
 
