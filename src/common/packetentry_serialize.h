@@ -58,6 +58,33 @@ inline void read_str(QDataStream& s, QString& v, const QVector<QString>& table) 
     }
 }
 
+/// @brief 读计数字段并按剩余字节校验(L8)
+/// @details 计数来自文件:每个元素至少占 min_elem_bytes 字节,剩余字节容不下
+///          n 个元素即为损坏——置 ReadCorruptData、n=0,调用方的循环/reserve
+///          随之为空,不再按损坏的计数做数 GB 的分配。流已出错时同样返回 0。
+inline quint32 remaining_bytes(QDataStream& s) {
+    QIODevice* d = s.device();
+    if (!d) return 0;
+    const qint64 left = d->size() - d->pos();
+    return left > 0 ? quint32(qMin<qint64>(left, 0xFFFFFFFFll)) : 0;
+}
+inline void read_count(QDataStream& s, quint32& n, quint32 min_elem_bytes) {
+    n = 0;
+    s >> n;
+    if (s.status() != QDataStream::Ok) { n = 0; return; }
+    if (min_elem_bytes == 0) min_elem_bytes = 1;
+    if (quint64(n) * min_elem_bytes > remaining_bytes(s)) {
+        n = 0;
+        s.setStatus(QDataStream::ReadCorruptData);
+    }
+}
+/// @brief 字段树最大嵌套深度(read_field_node 递归上限,防栈溢出)
+inline constexpr int kMaxFieldDepth = 64;
+/// @brief 循环条件:未读完且流仍正常(损坏后立即停,不空转到 n)
+inline bool more(QDataStream& s, quint32 i, quint32 n) {
+    return i < n && s.status() == QDataStream::Ok;
+}
+
 inline void write_meta(QDataStream& s, const PhysicalMeta& m) {
     write_u32(s, m.timestamp);
     write_u8(s, m.phr_mcs);
@@ -207,12 +234,12 @@ inline void read_mpdu(QDataStream& s, MpduInfo& m) {
     read_bool(s, m.fch_crc_ok);
     read_bool(s, m.pb_crc_ok);
     read_u8(s, m.pb_head);
-    quint32 n = 0; read_u32(s, n);
+    quint32 n = 0; read_count(s, n, 1);
     m.pb_heads.clear(); m.pb_heads.reserve(int(n));
-    for (quint32 i = 0; i < n; ++i) { quint8 v; read_u8(s, v); m.pb_heads.append(v); }
-    read_u32(s, n);
+    for (quint32 i = 0; more(s, i, n); ++i) { quint8 v; read_u8(s, v); m.pb_heads.append(v); }
+    read_count(s, n, 1);
     m.pb_crc_oks.clear(); m.pb_crc_oks.reserve(int(n));
-    for (quint32 i = 0; i < n; ++i) { bool v; read_bool(s, v); m.pb_crc_oks.append(v); }
+    for (quint32 i = 0; more(s, i, n); ++i) { bool v; read_bool(s, v); m.pb_crc_oks.append(v); }
     read_u32(s, m.beacon_timestamp);
     read_u8(s, m.beacon_line);
     read_u8(s, m.beacon_type);
@@ -265,21 +292,21 @@ inline void read_mpdu(QDataStream& s, MpduInfo& m) {
     read_u8(s, m.ack_remain_sta_num);
     read_bool(s, m.fch_crc_checked);   // v12 补: FCH CRC 三态(未校验/通过/失败)
     // v13 补: 多站点 PB 分组 + 待真实帧验证标志
-    quint32 n_st = 0; read_u32(s, n_st);
+    quint32 n_st = 0; read_count(s, n_st, 22);  // tei2+mode1+num1+size2+base4+3 个 u32 计数/长度
     m.sof_stations.clear(); m.sof_stations.reserve(int(n_st));
-    for (quint32 i = 0; i < n_st; ++i) {
+    for (quint32 i = 0; more(s, i, n_st); ++i) {
         SofStationPb st;
         read_u16(s, st.tei);
         read_u8 (s, st.copy_mode);
         read_u8 (s, st.pb_num);
         read_u16(s, st.pb_size);
         read_i32(s, st.block_base);
-        quint32 nh = 0; read_u32(s, nh);
+        quint32 nh = 0; read_count(s, nh, 1);
         st.pb_heads.reserve(int(nh));
-        for (quint32 j = 0; j < nh; ++j) { quint8 h; read_u8(s, h); st.pb_heads.append(h); }
-        quint32 nc = 0; read_u32(s, nc);
+        for (quint32 j = 0; more(s, j, nh); ++j) { quint8 h; read_u8(s, h); st.pb_heads.append(h); }
+        quint32 nc = 0; read_count(s, nc, 1);
         st.pb_crc_oks.reserve(int(nc));
-        for (quint32 j = 0; j < nc; ++j) { bool b; read_bool(s, b); st.pb_crc_oks.append(b); }
+        for (quint32 j = 0; more(s, j, nc); ++j) { bool b; read_bool(s, b); st.pb_crc_oks.append(b); }
         read_bytes(s, st.msdu);
         m.sof_stations.append(st);
     }
@@ -295,15 +322,19 @@ inline void write_field_node(QDataStream& s, const MsduFieldNode& n, StrPool& po
 }
 
 inline void read_field_node(QDataStream& s, MsduFieldNode& n,
-                            const QVector<QString>& table) {
+                            const QVector<QString>& table, int depth = 0) {
+    if (depth >= kMaxFieldDepth) {   // 嵌套过深 = 损坏,不再递归
+        s.setStatus(QDataStream::ReadCorruptData);
+        return;
+    }
     read_str(s, n.name, table);
     read_str(s, n.value, table);
     read_i32(s, n.rel_start);
     read_i32(s, n.rel_len);
-    quint32 cnt = 0; read_u32(s, cnt);
+    quint32 cnt = 0; read_count(s, cnt, 20);  // name4+value4+start4+len4+count4
     n.children.clear(); n.children.reserve(int(cnt));
-    for (quint32 i = 0; i < cnt; ++i) {
-        MsduFieldNode c; read_field_node(s, c, table); n.children.append(c);
+    for (quint32 i = 0; more(s, i, cnt); ++i) {
+        MsduFieldNode c; read_field_node(s, c, table, depth + 1); n.children.append(c);
     }
 }
 
@@ -360,43 +391,43 @@ inline void read_topo_event(QDataStream& s, TopoEvent& t,
     quint8 k = 0; read_u8(s, k); t.kind = static_cast<TopoEventKind>(k);
     read_u32(s, t.nid);
     s >> t.cco_mac;
-    quint32 nc = 0; read_u32(s, nc);
+    quint32 nc = 0; read_count(s, nc, 10);
     t.nodes.clear(); t.nodes.reserve(int(nc));
-    for (quint32 i = 0; i < nc; ++i) { TeiMacPair p; read_u16(s, p.tei); s >> p.mac; t.nodes.append(p); }
-    quint32 rc = 0; read_u32(s, rc);
+    for (quint32 i = 0; more(s, i, nc); ++i) { TeiMacPair p; read_u16(s, p.tei); s >> p.mac; t.nodes.append(p); }
+    quint32 rc = 0; read_count(s, rc, 4);
     t.routes.clear(); t.routes.reserve(int(rc));
-    for (quint32 i = 0; i < rc; ++i) { quint16 a = 0, b = 0; read_u16(s, a); read_u16(s, b); t.routes.append({a, b}); }
-    quint32 lc = 0; read_u32(s, lc);
+    for (quint32 i = 0; more(s, i, rc); ++i) { quint16 a = 0, b = 0; read_u16(s, a); read_u16(s, b); t.routes.append({a, b}); }
+    quint32 lc = 0; read_count(s, lc, 8);
     t.leaves.clear(); t.leaves.reserve(int(lc));
-    for (quint32 i = 0; i < lc; ++i) { quint64 mac = 0; s >> mac; t.leaves.append(mac); }
-    quint32 cc = 0; read_u32(s, cc);
+    for (quint32 i = 0; more(s, i, lc); ++i) { quint64 mac = 0; s >> mac; t.leaves.append(mac); }
+    quint32 cc = 0; read_count(s, cc, 4);
     t.comm_rates.clear(); t.comm_rates.reserve(int(cc));
-    for (quint32 i = 0; i < cc; ++i) {
+    for (quint32 i = 0; more(s, i, cc); ++i) {
         CommRateInfo c; read_u16(s, c.tei); read_u8(s, c.down); read_u8(s, c.up);
         t.comm_rates.append(c);
     }
     read_str(s, t.desc, table);
     read_i64(s, t.epoch_ms);
     // v11 补: 换页后不丢的 23 个拓扑字段(与 write_topo_event 逐行对应)
-    quint32 urc = 0; read_u32(s, urc);
+    quint32 urc = 0; read_count(s, urc, 4);
     t.up_routes.clear(); t.up_routes.reserve(int(urc));
-    for (quint32 i = 0; i < urc; ++i) { quint16 a = 0, b = 0; read_u16(s, a); read_u16(s, b); t.up_routes.append({a, b}); }
+    for (quint32 i = 0; more(s, i, urc); ++i) { quint16 a = 0, b = 0; read_u16(s, a); read_u16(s, b); t.up_routes.append({a, b}); }
     read_u16(s, t.discover_src_tei);
-    quint32 ntc = 0; read_u32(s, ntc);
+    quint32 ntc = 0; read_count(s, ntc, 2);
     t.neighbor_teis.clear(); t.neighbor_teis.reserve(int(ntc));
-    for (quint32 i = 0; i < ntc; ++i) { quint16 tei = 0; read_u16(s, tei); t.neighbor_teis.append(tei); }
+    for (quint32 i = 0; more(s, i, ntc); ++i) { quint16 tei = 0; read_u16(s, tei); t.neighbor_teis.append(tei); }
     read_bool(s, t.neighbor_teis_present);
     read_bool(s, t.is_rf);
     read_bool(s, t.is_rf_known);
-    quint32 rsc = 0; read_u32(s, rsc);
+    quint32 rsc = 0; read_count(s, rsc, 6);
     t.rssi_entries.clear(); t.rssi_entries.reserve(int(rsc));
-    for (quint32 i = 0; i < rsc; ++i) { quint16 a = 0; qint32 b = 0; read_u16(s, a); read_i32(s, b); t.rssi_entries.append({a, b}); }
-    quint32 nrc = 0; read_u32(s, nrc);
+    for (quint32 i = 0; more(s, i, rsc); ++i) { quint16 a = 0; qint32 b = 0; read_u16(s, a); read_i32(s, b); t.rssi_entries.append({a, b}); }
+    quint32 nrc = 0; read_count(s, nrc, 3);
     t.neighbor_rates.clear(); t.neighbor_rates.reserve(int(nrc));
-    for (quint32 i = 0; i < nrc; ++i) { quint16 a = 0; quint8 b = 0; read_u16(s, a); read_u8(s, b); t.neighbor_rates.append({a, b}); }
-    quint32 nsc = 0; read_u32(s, nsc);
+    for (quint32 i = 0; more(s, i, nrc); ++i) { quint16 a = 0; quint8 b = 0; read_u16(s, a); read_u8(s, b); t.neighbor_rates.append({a, b}); }
+    quint32 nsc = 0; read_count(s, nsc, 4);
     t.neighbor_snrs.clear(); t.neighbor_snrs.reserve(int(nsc));
-    for (quint32 i = 0; i < nsc; ++i) { quint16 a = 0; quint16 b = 0; read_u16(s, a); read_u16(s, b); t.neighbor_snrs.append({a, static_cast<qint16>(b)}); }
+    for (quint32 i = 0; more(s, i, nsc); ++i) { quint16 a = 0; quint16 b = 0; read_u16(s, a); read_u16(s, b); t.neighbor_snrs.append({a, static_cast<qint16>(b)}); }
     read_u16(s, t.proxy_tei);
     quint16 pur = 0; read_u16(s, pur); t.proxy_up_rate = static_cast<qint16>(pur);
     quint16 pdr = 0; read_u16(s, pdr); t.proxy_down_rate = static_cast<qint16>(pdr);
@@ -404,15 +435,15 @@ inline void read_topo_event(QDataStream& s, TopoEvent& t,
     read_u8(s, t.rf_hop);
     read_u8(s, t.rf_role);
     read_i32(s, t.link_type);
-    quint32 nltc = 0; read_u32(s, nltc);
+    quint32 nltc = 0; read_count(s, nltc, 3);
     t.node_link_types.clear(); t.node_link_types.reserve(int(nltc));
-    for (quint32 i = 0; i < nltc; ++i) { quint16 a = 0; quint8 b = 0; read_u16(s, a); read_u8(s, b); t.node_link_types.append({a, b}); }
+    for (quint32 i = 0; more(s, i, nltc); ++i) { quint16 a = 0; quint8 b = 0; read_u16(s, a); read_u8(s, b); t.node_link_types.append({a, b}); }
     read_i32(s, t.proxy_comm_rate);
     read_i32(s, t.proxy_down_comm_rate);
     quint16 mcr = 0; read_u16(s, mcr); t.min_comm_rate = static_cast<qint16>(mcr);
-    quint32 ctc = 0; read_u32(s, ctc);
+    quint32 ctc = 0; read_count(s, ctc, 2);
     t.child_teis.clear(); t.child_teis.reserve(int(ctc));
-    for (quint32 i = 0; i < ctc; ++i) { quint16 tei = 0; read_u16(s, tei); t.child_teis.append(tei); }
+    for (quint32 i = 0; more(s, i, ctc); ++i) { quint16 tei = 0; read_u16(s, tei); t.child_teis.append(tei); }
     read_i32(s, t.restart_count);
     read_i64(s, t.frame_index);
     s >> t.sender_mac;   // v15: 本跳发送方 MAC(STA 重启按发送方建基线)
@@ -476,23 +507,23 @@ inline void read_msdu_info(QDataStream& s, MsduInfo& m,
     read_u8(s, m.trans_direction_flag);
     read_i32(s, m.total_len);
     read_str(s, m.summary, table);
-    quint32 cnt = 0; read_u32(s, cnt);
+    quint32 cnt = 0; read_count(s, cnt, 20);
     m.tree.clear(); m.tree.reserve(int(cnt));
-    for (quint32 i = 0; i < cnt; ++i) {
+    for (quint32 i = 0; more(s, i, cnt); ++i) {
         MsduFieldNode n; read_field_node(s, n, table); m.tree.append(n);
     }
-    quint32 pc = 0; read_u32(s, pc);
+    quint32 pc = 0; read_count(s, pc, 10);
     m.tei_mac_pairs.clear(); m.tei_mac_pairs.reserve(int(pc));
-    for (quint32 i = 0; i < pc; ++i) {
+    for (quint32 i = 0; more(s, i, pc); ++i) {
         TeiMacPair p; read_u16(s, p.tei); s >> p.mac; m.tei_mac_pairs.append(p);
     }
     read_topo_event(s, m.topo_event, table);
-    { quint32 n = 0; read_u32(s, n); m.topo_extra_events.clear();
-      for (quint32 i = 0; i < n; ++i) { TopoEvent t; read_topo_event(s, t, table); m.topo_extra_events.append(t); } }
-    { quint32 n = 0; read_u32(s, n); m.orig_srcs.clear();
-      for (quint32 i = 0; i < n; ++i) { TeiMacPair p; read_u16(s, p.tei); s >> p.mac; m.orig_srcs.append(p); } }
-    { quint32 n = 0; read_u32(s, n); m.orig_dsts.clear();
-      for (quint32 i = 0; i < n; ++i) { TeiMacPair p; read_u16(s, p.tei); s >> p.mac; m.orig_dsts.append(p); } }
+    { quint32 n = 0; read_count(s, n, 32); m.topo_extra_events.clear();
+      for (quint32 i = 0; more(s, i, n); ++i) { TopoEvent t; read_topo_event(s, t, table); m.topo_extra_events.append(t); } }
+    { quint32 n = 0; read_count(s, n, 10); m.orig_srcs.clear();
+      for (quint32 i = 0; more(s, i, n); ++i) { TeiMacPair p; read_u16(s, p.tei); s >> p.mac; m.orig_srcs.append(p); } }
+    { quint32 n = 0; read_count(s, n, 10); m.orig_dsts.clear();
+      for (quint32 i = 0; more(s, i, n); ++i) { TeiMacPair p; read_u16(s, p.tei); s >> p.mac; m.orig_dsts.append(p); } }
 }
 
 /// @brief 序列化一个 PacketEntry 到字节流(不含长度前缀)
@@ -771,7 +802,9 @@ public:
             QDataStream ps(pool_raw);
             quint32 str_count = 0;
             ps >> str_count;
-            if (ps.status() != QDataStream::Ok || str_count > 1000000)
+            // 每个字符串至少 4 字节长度前缀:计数超出池字节数即损坏(L8)
+            if (ps.status() != QDataStream::Ok || str_count > 1000000
+                || quint64(str_count) * 4 > quint64(pool_raw.size()))
                 return false;
             m_table.reserve(int(str_count));
             for (quint32 i = 0; i < str_count; ++i) {
