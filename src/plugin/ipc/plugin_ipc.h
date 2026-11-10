@@ -53,8 +53,8 @@ enum class MsgType : quint8 {
 };
 
 /// @brief 单帧上限(类型字节 + 载荷),超过视为协议错误
-/// @details 帧头长度来自对端进程,不可信。上限按最大图形帧(PNG 压缩 QImage)留足余量。
-constexpr qint64 kMaxIpcFrame = 16 * 1024 * 1024;
+/// @details 帧头长度来自对端进程,不可信。上限 1 MB:覆盖解析结果与常规尺寸的图形帧(PNG 压缩 QImage)。
+constexpr qint64 kMaxIpcFrame = 1 * 1024 * 1024;
 
 /// @brief try_take_frame 的结果
 enum class FrameTake {
