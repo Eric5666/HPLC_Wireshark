@@ -13,24 +13,17 @@
 #include "updatemirror.h"
 #include "exportservice.h"
 #include "capturecontroller.h"
-#include "playbackwriter.h"
 #include "i18n.h"
-#include "packetentry_serialize.h"
-#include "fieldtools.h"
 #include "topo_window.h"
-#include "topo_input.h"
 #include "plugin_panels.h"
 #include "plugin_manager.h"
 #include "market_dialog.h"
 #include "plugin_market.h"
 #include "QsLog.h"
 
-#include <QtConcurrent>
 #include <QCoreApplication>
 #include <QDockWidget>
 #include <QTabWidget>
-#include <QDataStream>
-#include <QFutureWatcher>
 #include <QToolBar>
 #include <QToolButton>
 #include <QAction>
@@ -46,10 +39,8 @@
 #include <QMenuBar>
 #include <QSettings>
 #include <QFileDialog>
-#include <QFile>
-#include <QTextStream>
-#include <QStringConverter>
 #include <QMutexLocker>
+#include <QElapsedTimer>
 #include <QDateTime>
 #include <QKeySequence>
 #include <QVBoxLayout>
@@ -1174,113 +1165,9 @@ void MainWindow::on_choose_plugin_dir() {
                                    << PluginMarket::default_install_dir());
 }
 
-// ---- 自动化测试:回放结束后等插件线程排空,逐 tab 截图后退出 ----
-void MainWindow::run_plugin_autotest(const QString& plugins_dir,
-                                     const QString& bin,
-                                     const QString& shot_dir) {
-    qInfo() << "[autotest] start, bin=" << bin << "shots=" << shot_dir;
-    m_autotest_shots = shot_dir;
-    QDir().mkpath(m_autotest_shots);
-    // 等插件加载完成再开始回放
-    connect(m_plugin_engine, &LocalPluginEngine::load_finished, this,
-            [this, bin]() {
-                qInfo() << "[autotest] load_finished, starting import";
-                disconnect(m_plugin_engine, &LocalPluginEngine::load_finished,
-                           this, nullptr);
-                start_file_import(bin);
-                qInfo() << "[autotest] import started";
-                // 回放结束 → 轮询插件线程排空(只处理一次,finished 可能发多次)
-                QMetaObject::Connection* fconn = new QMetaObject::Connection();
-                *fconn = connect(m_capture->reader(), &SerialReader::finished, this,
-                                 [this, fconn]() {
-                    qInfo() << "[autotest] reader finished";
-                    disconnect(*fconn);
-                    delete fconn;
-                    QTimer* poll = new QTimer(this);
-                    poll->setInterval(500);
-                    int* waits = new int(0);
-                    connect(poll, &QTimer::timeout, this,
-                            [this, poll, waits]() {
-                                ++(*waits);
-                                // 首个 finished 可能来自 start_file_import 里 stop() 的旧会话;
-                                // 背压下回放不再瞬间读完,须等 reader 结束且在途帧全部交给 GUI
-                                const bool idle = m_plugin_engine->is_idle()
-                                    && !m_capture->is_running()
-                                    && m_capture->reader()->flow_credit()->in_flight() == 0;
-                                if (idle || *waits > 1200) {  // 排空或 10min 超时
-                                    poll->stop();
-                                    poll->deleteLater();
-                                    const int w = *waits;
-                                    delete waits;
-                                    qInfo() << "[autotest] idle, waits=" << w
-                                            << "tabs=" << m_plugin_tabs->count();
-                                    autotest_shoot_tabs();
-                                }
-                            });
-                    poll->start();
-                });
-            });
-    load_plugin_dirs(QStringList() << plugins_dir
-                                   << PluginMarket::default_install_dir());
-}
-
-/// @brief 自动化测试:逐 tab 截图(每个 tab 显示 1.5s 等面板刷新后再抓)
-void MainWindow::autotest_shoot_tabs() {
-    if (m_autotest_shooting) return;  // 只跑一次
-    m_autotest_shooting = true;
-    qInfo() << "[autotest] shoot start";
-    const int n = m_plugin_tabs->count();
-    QTimer* t = new QTimer(this);
-    t->setInterval(1500);
-    int* i = new int(-1);
-    bool* field_shot_done = new bool(false);  // 字段树截图是否已完成
-    connect(t, &QTimer::timeout, this, [this, i, n, t, field_shot_done]() {
-        qInfo() << "[autotest] shoot tick i=" << *i << "n=" << n;
-        // 先抓上一个 tab(已显示 1.5s,面板刷新完成)
-        if (*i >= 0 && *i < m_plugin_tabs->count()) {
-            QWidget* tab = m_plugin_tabs->widget(*i);
-            QString pid;
-            for (auto it = m_plugin_panels.begin();
-                 it != m_plugin_panels.end(); ++it) {
-                if (it.value() == tab) { pid = it.key(); break; }
-            }
-            tab->grab().save(QStringLiteral("%1/plugin_%2.png")
-                                 .arg(m_autotest_shots, pid));
-        }
-        ++(*i);
-        if (*i >= n) {
-            // 先选中一帧带 MSDU 的报文,让底部字段树/hex 有内容,下一拍再截 main.png
-            if (!*field_shot_done) {
-                *field_shot_done = true;
-                qint64 target = 0;
-                const qint64 total = m_model ? m_model->total_count() : 0;
-                for (qint64 f = 1; f <= total; ++f) {
-                    PacketEntry e;
-                    if (m_model->entry_at(int(f - 1), e)
-                        && e.msdu.present && !e.msdu.summary.isEmpty()) {
-                        target = f;
-                        break;
-                    }
-                }
-                if (target < 1) target = total;  // 兜底:最后一帧
-                jump_packet_to_frame(target);
-                qInfo() << "[autotest] select frame for field view:" << target;
-                return;
-            }
-            t->stop();
-            t->deleteLater();
-            delete i;
-            delete field_shot_done;
-            this->grab().save(QStringLiteral("%1/main.png").arg(m_autotest_shots));
-            qApp->quit();
-            return;
-        }
-        // 显示下一个 tab 并触发一次刷新
-        m_plugin_tabs->setCurrentIndex(*i);
-        QWidget* tab = m_plugin_tabs->widget(*i);
-        if (auto* tp = qobject_cast<TopoPluginPanel*>(tab)) tp->refresh_now();
-        else if (auto* rp = qobject_cast<ReplayPluginPanel*>(tab)) rp->refresh_now();
-        else if (auto* rep = qobject_cast<ReportPluginPanel*>(tab)) rep->generate_now();
-    });
-    t->start();
+QString MainWindow::plugin_id_of(const QWidget* panel) const {
+    for (auto it = m_plugin_panels.cbegin(); it != m_plugin_panels.cend(); ++it) {
+        if (it.value() == panel) return it.key();
+    }
+    return QString();
 }

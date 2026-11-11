@@ -10,8 +10,12 @@
 #include "crash_handler.h"
 #include "plugin_manager.h"
 #include "plugin_market.h"
+#ifdef BPLC_PLUGIN_AUTOTEST
+#include "plugin_autotest.h"   // 测试侧(CONFIG+=plugin_autotest)
+#endif
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDebug>
 #include <QDir>
 #include <QLoggingCategory>
 #include <QLocale>
@@ -182,7 +186,9 @@ int main(int argc, char* argv[]) {
     //   --plugins-dir <dir>  主界面内置插件目录(进程内 JS/Lua 后端,展示功能界面)
     //   --replay <bin>       启动后自动回放抓包文件
     //   --plugin-autotest <shot_dir>  (需配合 --replay)回放结束后给各插件面板
-    //                                及主窗口截图,保存到 shot_dir 后退出(自动化测试)
+    //                                及主窗口截图,保存到 shot_dir 后退出(自动化测试;
+    //                                仅 qmake CONFIG+=plugin_autotest 构建可用,
+    //                                实现见 unit_test/app/plugin-autotest)
     QString plugins_dir;
     QString replay_bin;
     QString autotest_dir;
@@ -195,6 +201,13 @@ int main(int argc, char* argv[]) {
         else if (a == QLatin1String("--plugin-autotest") && i + 1 < argc)
             autotest_dir = QString::fromLocal8Bit(argv[++i]);
     }
+#ifndef BPLC_PLUGIN_AUTOTEST
+    // 产品构建不含自动化截图测试:忽略该参数(按普通回放/加载插件处理)
+    if (!autotest_dir.isEmpty()) {
+        qWarning() << "--plugin-autotest ignored: build with qmake CONFIG+=plugin_autotest";
+        autotest_dir.clear();
+    }
+#endif
     const QString default_plugins =
         QCoreApplication::applicationDirPath() + QStringLiteral("/plugins");
     if (plugins_dir.isEmpty() && QDir(default_plugins).exists())
@@ -209,8 +222,10 @@ int main(int argc, char* argv[]) {
         w.load_plugin_dirs(plugin_dirs);  // 无回放:仅加载插件展示空面板
     if (!replay_bin.isEmpty() && autotest_dir.isEmpty())
         w.start_file_import(replay_bin);
+#ifdef BPLC_PLUGIN_AUTOTEST
     if (!replay_bin.isEmpty() && !autotest_dir.isEmpty())
-        w.run_plugin_autotest(plugins_dir, replay_bin, autotest_dir);
+        (new PluginAutotest(&w, autotest_dir))->start(plugins_dir, replay_bin);
+#endif
 
     const int rc = app.exec();
     CrashHandler::shutdown();

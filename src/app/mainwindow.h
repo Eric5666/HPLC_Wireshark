@@ -59,9 +59,21 @@ public:
     void load_plugin_dirs(const QStringList& dirs);
     /// @brief 拖放文件导入(按扩展名判定回放/裸hex)
     void start_file_import(const QString& path);
-    /// @brief 自动化测试:加载插件→回放 bin→各插件面板截图到 shot_dir→退出
-    void run_plugin_autotest(const QString& plugins_dir, const QString& bin,
-                             const QString& shot_dir);
+
+    // ---- 测试接口(自动化截图测试 unit_test/app/plugin-autotest 驱动用) ----
+    /// @brief 采集控制(Reader 结束信号/背压额度)
+    CaptureController* capture() const { return m_capture; }
+    /// @brief 内置插件引擎
+    LocalPluginEngine* plugin_engine() const { return m_plugin_engine; }
+    /// @brief 插件功能面板 tab 容器
+    QTabWidget* plugin_tabs() const { return m_plugin_tabs; }
+    /// @brief 帧列表模型
+    PacketListModel* packet_model() const { return m_model; }
+    /// @brief 面板 → 插件 id(未找到返回空)
+    QString plugin_id_of(const QWidget* panel) const;
+
+public slots:
+    void jump_packet_to_frame(qint64 frame_index); ///< TOPO 双击/插件/goto → 主帧列表定位到该帧(选中+居中,清过滤)
 
 private slots:
     void on_start();
@@ -80,7 +92,6 @@ private slots:
     void update_topo_history(qint64 frame_index, qint64 frame_ms); ///< 帧点击 → TOPO 回放/实时切换
     void enter_topo_history(qint64 frame_index, qint64 frame_ms);  ///< 帧双击 → 强制历史追溯(冻结,不跟随实时)
     void on_topo_request_history(qint64 frame_index, qint64 frame_ms); ///< TOPO 路由表双击 → 追溯到该帧
-    void jump_packet_to_frame(qint64 frame_index); ///< TOPO 双击 → 主帧列表定位到该帧(选中+居中,清过滤)
     void show_plugin_table(const QString& title, const QStringList& columns,
                            const QList<QStringList>& rows); ///< 插件 host.showTable → 弹独立表格窗口
     void replay_topo_history();        ///< 请求拓扑工作线程生成冻结快照
@@ -113,7 +124,6 @@ private:
     void open_topo_window();        // 打开/聚焦拓扑独立窗口(多 NID 下拉切换)
     void setup_plugin_ui();         // 插件 dock/菜单/引擎(主界面调用插件展示功能界面)
     void connect_plugin_feed();     // 插件引擎 → 主界面(跳帧/弹表格)
-    void autotest_shoot_tabs();     // 自动化测试:逐 tab 截图后退出
 
 signals:
 
@@ -158,8 +168,6 @@ private:
     QTabWidget*   m_plugin_tabs = nullptr;        ///< 每个插件一个 tab
     QMap<QString, QWidget*> m_plugin_panels;      ///< pid → 功能面板
     QStringList   m_plugin_search_dirs;           ///< 插件搜索目录(市场安装目录+命令行目录)
-    QString       m_autotest_shots;               ///< 非空:自动化测试截图目录
-    bool          m_autotest_shooting = false;      ///< 截图序列是否已启动(防重入)
     TopoWindow*    m_topo_window = nullptr;       ///< 拓扑独立窗口(懒创建)
     TopoController* m_topo_controller = nullptr;
     quint64        m_topo_request_id = 0;
