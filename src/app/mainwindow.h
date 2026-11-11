@@ -13,6 +13,7 @@
 #include <atomic>
 #include "serialreader.h"
 #include "framedispatcher.h"
+#include "entrybuilder.h"
 #include "local_plugin_engine.h"
 
 class QDockWidget;
@@ -69,7 +70,7 @@ private slots:
     void on_settings();
     void on_apply_filter();
     void on_goto();   ///< 跳转到指定序号帧(goto 输入框)
-    void on_parsed(const ParseResult& r);
+    void on_parsed(const PreparedEntryPtr& p);
     void on_status_message(const QString& s);
     void on_error(const QString& e);
     void on_row_activated(const PacketEntry& e);
@@ -101,7 +102,6 @@ protected:
 private:
     void build_ui();
     void wire_signals();
-    PacketEntry make_entry(const ParseResult& r, qint64 now);
     void enqueue_entry(PacketEntry&& e);
     void check_for_updates(bool silent);   // 检查更新(silent=true:启动静默检查)
     void rebuild_dispatcher();             // 协议切换立即生效:停止+清空+重建解析器
@@ -173,9 +173,7 @@ private:
     bool             m_exporting;      ///< 导出中(on_flush_buffer 暂停 append 进模型)
     bool             m_follow_bottom;  ///< 是否自动滚动到最新帧(用户滚离底部则暂停)
 
-    quint32          m_last_ntb;     ///< 上一帧帧内 NTB(tick),Delta 统一用 NTB 差
-    bool             m_have_last_ntb;
-    int              m_index_counter;
+    EntryBuilder     m_entry_builder;  ///< 条目构建(序号/Delta 链,GUI 侧补齐预构建条目)
     std::atomic<int> m_pending_count{0};  ///< pending 帧数(原子,阈值触发同步 flush 用)
 };
 

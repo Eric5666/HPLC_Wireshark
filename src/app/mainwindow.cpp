@@ -89,10 +89,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_reader(nullptr), m_dispatch(nullptr), m_model(nullptr),
       m_flush_timer(nullptr), m_status_timer(nullptr),
       m_paused(false), m_exporting(false),
-      m_follow_bottom(true),
-      m_last_ntb(0),
-      m_have_last_ntb(false),
-      m_index_counter(0) {
+      m_follow_bottom(true) {
     qRegisterMetaType<ParseResult>("ParseResult");
     qRegisterMetaType<BplcFrame>("BplcFrame");
     qRegisterMetaType<ReaderConfig>("ReaderConfig");
@@ -133,6 +130,9 @@ MainWindow::MainWindow(QWidget* parent)
             this,       &MainWindow::on_parsed,
             Qt::QueuedConnection);
     setup_plugin_ui();       // 插件引擎 + 功能面板 dock + 插件菜单
+    // 条目构建(GUI 侧):每帧提交拓扑输入 + 喂插件
+    m_entry_builder.set_topo_controller(m_topo_controller);
+    m_entry_builder.set_plugin_engine(m_plugin_engine);
     connect_plugin_feed();   // m_reader frame_ready → 插件引擎(喂帧)
     connect(m_reader, &SerialReader::status_message,
             this,      &MainWindow::on_status_message);
@@ -502,7 +502,7 @@ void MainWindow::on_start() {
     if (appcfg::protocol() != old_proto && confirm_protocol_rebuild())
         rebuild_dispatcher();
 
-    m_have_last_ntb = false;
+    m_entry_builder.restart_delta_chain();
     m_reader->start(cfg);
     m_status_left->setText(QString("Running: %1")
         .arg(cfg.mode == ReaderMode::SerialPort
@@ -528,9 +528,7 @@ void MainWindow::on_pause() {
 
 void MainWindow::on_clear() {
     m_model->clear_all();
-    m_index_counter = 0;
-    m_last_ntb = 0;
-    m_have_last_ntb = false;
+    m_entry_builder.reset();
     {
         QMutexLocker lock(&m_pending_mutex);
         m_pending.clear();
@@ -941,71 +939,16 @@ void MainWindow::on_goto() {
     jump_packet_to_frame(idx);
 }
 
-PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
-    PacketEntry e;
-    e.index     = ++m_index_counter;
-    // 带时间标签(回放导出的 bin)时用帧内绝对时刻,保证 Time/Delta/再导出
-    // 均以原始捕获时间为基准;否则退化为本地接收时刻
-    qint64 t = (r.meta.frame_time.isValid())
-                   ? r.meta.epoch_ms : now;   // 用 parse 时缓存的 epoch_ms,避免时区转换
-    e.epoch_ms  = t;
-    e.accepted  = r.accept;     // 拒收行 Info 列显示 reason,着色走灰/红判定
-    e.reason    = r.reject_reason;
-    // Delta:内置解析器已在解析时算好显示 Delta(好帧锚点链,见 DisplayTimeAnchor),
-    // 直接取用;插件解析器不算(-1)时沿用旧 NTB 差算法(m_last_ntb 链)。
-    // 本地接收时间(0x3C 打点 arrival_us)只作 serialreader 断段(seg_start)
-    // 判断参考,不参与 Delta 计算。
-    e.delta_us = (r.display_delta_us >= 0)
-        ? r.display_delta_us
-        : playback::next_delta_us(r.meta, m_last_ntb, m_have_last_ntb);
-    e.meta      = r.meta;
-    e.mpdu      = r.mpdu;
-    // 协议身份来自解析器,非全局配置。
-    // 映射统一走 entry_protocol_id():它保留插件位(0x80),否则插件帧会被当内置帧渲染。
-    e.protocol = entry_protocol_id(r.protocol);
-    e.msdu_body = r.msdu_body;
-    e.raw_wire  = r.raw_wire;
-    e.msdu      = r.msdu;    // MSDU/MAC 层字段树(SOF 重组完成时非空)
-    e.beacon    = r.beacon;  // BEACON 载荷区字段树(BEACON 帧时非空)
-    e.msdu_raw_base = r.msdu_raw_base;
-    e.raw_bytes = r.payload_for_log;
-    e.dissect_fields = r.dissect_fields;  // 插件解析器通用字段树(内置解析恒空)
-    // Topology input normalization is owned by its module; MainWindow only forwards it.
-    const TopoFrameInput topo_frame = make_topo_frame_input(e);
-    if (topo_frame.net_id != 0 && m_topo_controller) m_topo_controller->submit_frame(topo_frame);
-    e.search_text = make_search_text(e);   // 缓存可搜索全文,过滤匹配复用
-    // 插件:喂"解析好的帧"(单入口 parse)——帧序号/时间戳/topoEvent 均已就绪,
-    // 插件 topo 与原版共享同一份解码数据,不再走独立事件侧信道
-    if (m_plugin_engine) {
-        BplcFrame pf;
-        pf.meta = r.meta;
-        pf.raw_wire = r.raw_wire;
-        pf.data = r.raw_wire.isEmpty() ? r.payload_for_log : r.raw_wire;
-        pf.arrival_us = r.arrival_us;
-        pf.decoded_index = e.index;
-        pf.decoded_epoch_ms = e.epoch_ms;
-        if (e.msdu.topo_event.kind != TopoEventKind::Other)
-            pf.topo_event = e.msdu.topo_event;
-        // 标量透传:主程序已解析好的单值直接给插件
-        pf.accepted = r.accept;
-        pf.error_reason = r.reject_reason;
-        pf.mpdu = r.mpdu;
-        pf.msdu_present = e.msdu.present;
-        pf.msdu_summary = e.msdu.summary;
-        m_plugin_engine->feed_frame(pf);
-    }
-    return e;
-}
-
 void MainWindow::enqueue_entry(PacketEntry&& e) {
     QMutexLocker lock(&m_pending_mutex);
     m_pending.append(std::move(e));
     m_pending_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-void MainWindow::on_parsed(const ParseResult& r) {
-    if (m_paused) return;
-    enqueue_entry(make_entry(r, QDateTime::currentMSecsSinceEpoch()));
+void MainWindow::on_parsed(const PreparedEntryPtr& p) {
+    if (m_paused || !p) return;
+    // 条目已在解析线程预构建:这里只补序号/时间/Delta 并分发拓扑/插件
+    enqueue_entry(m_entry_builder.build(*p, QDateTime::currentMSecsSinceEpoch()));
     // 高速灌帧(错协议解析跳过重活、极快)时,parsed 事件会把 100ms 的
     // flush timer 挤出事件队列,导致 pending 堆积到数万帧、一次性 flush 卡顿。
     // 达到阈值即同步 flush,把巨批摊平为小批,与国网正常解析的节奏一致。
@@ -1422,7 +1365,7 @@ void MainWindow::setup_plugin_ui() {
 void MainWindow::connect_plugin_feed() {
     if (!m_reader || !m_plugin_engine) return;
     // 插件帧流:不再直连 SerialReader::frame_ready(原始帧,早于解析);
-    // 改由 make_entry 在协议解析完成后喂"解析好的帧"(带帧序号/时间戳/topoEvent)
+    // 改由 EntryBuilder::build 在协议解析完成后喂"解析好的帧"(带帧序号/时间戳/topoEvent)
     // 插件请求的主界面跳帧:host.jumpToFrame(idx) → 定位帧列表对应行
     connect(m_plugin_engine, &LocalPluginEngine::host_jump_to_frame,
             this, &MainWindow::jump_packet_to_frame,
