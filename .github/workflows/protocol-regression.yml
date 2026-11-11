@@ -360,6 +360,28 @@ jobs:
             && qmake ../../unit_test/common/serialize-bounds-probe/serialize_bounds_probe.pro \
             && make -j2 && ./serialize_bounds_probe)
 
+      - name: Plugin market / plugin IPC (host process) regression
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          # 插件市场后端:feed 解析/版本/sha256/解包/安装/启停/卸载(夹具自生成,不依赖外部仓库)
+          mkdir -p build/market-test
+          (cd build/market-test \
+            && qmake ../../src/plugin/tests/market_test.pro CONFIG+=release CONFIG-=debug \
+            && make -j2 \
+            && timeout 120 ./market_test)
+          # 插件宿主进程 + IPC 帧协议:js_topo / lua_diag / lua_report 握手、解析、渲染、事件
+          mkdir -p build/plugin-host build/plugin-ipc-test
+          (cd build/plugin-host \
+            && qmake ../../src/plugin/host/bplc-plugin-host.pro CONFIG+=release CONFIG-=debug \
+            && make -j2)
+          (cd build/plugin-ipc-test \
+            && qmake ../../src/plugin/tests/plugin_ipc_test.pro CONFIG+=release CONFIG-=debug \
+            && make -j2 \
+            && timeout 150 ./plugin_ipc_test --host "$GITHUB_WORKSPACE/build/plugin-host/bplc-plugin-host" \
+                 --examples "$GITHUB_WORKSPACE/src/plugin/examples")
+
   topology-worker-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
