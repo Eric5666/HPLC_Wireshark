@@ -13,6 +13,7 @@
 #include "nw_2026_parser.h"
 #include "fieldtools.h"
 #include "crc.h"
+#include "msdu_crc_state.h"   // msdu_crc_state():学习门控依据
 
 static quint64 mac6(quint8 a, quint8 b, quint8 c, quint8 d, quint8 e, quint8 f) {
     return (quint64)a | ((quint64)b << 8) | ((quint64)c << 16)
@@ -186,10 +187,17 @@ int main(int argc, char** argv) {
         // 站点 0 的对走帧级字段 (通用路径直接赋值 r.msdu,不进 tei_mac_pairs)。
         check(flip ? "flipped: sta0 pair kept" : "control: sta0 pair",
               r.msdu.msdu_src_tei == 27 && r.msdu.msdu_src_mac == sta27);
-        check(flip ? "flipped: sta1 pair ABSENT" : "control: sta1 pair",
-              flip ? !has_pair(r, 42, sta42) : has_pair(r, 42, sta42));
-        if (flip)
-            check("flipped: no learned pairs at all", r.msdu.tei_mac_pairs.isEmpty());
+        // 用户 2026-11 裁决 + 018fdc5:MSDU CRC32 压过 PB 块 CRC ——
+        // MSDU CRC 有效即可学习,即使某个 PB 块 CRC24 失败;MSDU CRC 失败才禁止。
+        // 故翻转站点 1 的 PB 块 CRC 后,站点 1 的对**仍应学到**(与旧断言相反)。
+        // ("坏载荷禁止学习"由 msdu-crc-gate-probe C9 / orig-src 覆盖)
+        check(flip ? "flipped(PB CRC 坏/MSDU CRC 好): sta1 pair kept" : "control: sta1 pair",
+              has_pair(r, 42, sta42));
+        if (flip) {
+            check("flipped: MSDU CRC32 仍为 Ok(学习放行的依据)",
+                  msdu_crc_state(r.msdu) == MsduCrcState::Ok);
+            check("flipped: learned pairs kept", !r.msdu.tei_mac_pairs.isEmpty());
+        }
         // 新增: CRC 状态检查
         bool has_crc_fail = std::any_of(r.mpdu.pb_crc_oks.begin(), r.mpdu.pb_crc_oks.end(),
                                         [](bool ok) { return !ok; });
@@ -209,7 +217,9 @@ int main(int argc, char** argv) {
         check("agg-flipped: accept", r.accept);
         check("agg-flipped: sta0 pair kept",
               r.msdu.msdu_src_tei == 27 && r.msdu.msdu_src_mac == sta27);
-        check("agg-flipped: sta1 pair ABSENT", !has_pair(r, 42, sta42));
+        // 同前:MSDU CRC32 压过 PB 块 CRC —— 聚合站点块 CRC 坏但 MSDU CRC 好时仍学习
+        check("agg-flipped(PB CRC 坏/MSDU CRC 好): sta1 pair kept", has_pair(r, 42, sta42));
+        check("agg-flipped: MSDU CRC32 仍为 Ok", msdu_crc_state(r.msdu) == MsduCrcState::Ok);
         // 新增:CRC 状态检查
         bool has_crc_fail = std::any_of(r.mpdu.pb_crc_oks.begin(), r.mpdu.pb_crc_oks.end(),
                                         [](bool ok) { return !ok; });
