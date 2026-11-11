@@ -16,9 +16,20 @@
 namespace {
 constexpr int kRegionTimeoutMs  = 3500;   // 出口区域识别(每源)
 constexpr int kProbeTimeoutMs   = 4500;   // 清单探活(原生/每个镜像)
-const char* kTraceUrl     = "https://www.cloudflare.com/cdn-cgi/trace";
-const char* kCountryIsUrl = "https://api.country.is/";
-const char* kIpwhoUrl     = "https://ipwho.is/";
+// 区域识别源地址可在编译期覆盖(仅供 unit_test/app/mirror-probe 的 fb 变体
+// 把前两个源指向不可达地址,验证回退到 ipwho.is 的链路;正式构建不定义)
+#ifndef BPLC_MIRROR_TRACE_URL
+#define BPLC_MIRROR_TRACE_URL "https://www.cloudflare.com/cdn-cgi/trace"
+#endif
+#ifndef BPLC_MIRROR_COUNTRY_IS_URL
+#define BPLC_MIRROR_COUNTRY_IS_URL "https://api.country.is/"
+#endif
+#ifndef BPLC_MIRROR_IPWHO_URL
+#define BPLC_MIRROR_IPWHO_URL "https://ipwho.is/"
+#endif
+const char* kTraceUrl     = BPLC_MIRROR_TRACE_URL;
+const char* kCountryIsUrl = BPLC_MIRROR_COUNTRY_IS_URL;
+const char* kIpwhoUrl     = BPLC_MIRROR_IPWHO_URL;
 } // namespace
 
 UpdateMirrorResolver::UpdateMirrorResolver(QObject* parent)
