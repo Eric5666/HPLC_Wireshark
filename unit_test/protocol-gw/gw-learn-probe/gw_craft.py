@@ -15,6 +15,8 @@ Frames (all carrier, isRF=0):
  6 G2-tda   TDA 2 stations (TEI 2, 3), station MSDUs with long headers.
 Output: crafted.bin ([u32 len][isRF][MPDU] records) + manifest on stdout.
 """
+import os
+import zlib
 import struct
 
 CCO_MAC = 0xAABBCCDDEE01
@@ -76,7 +78,10 @@ def msdu_base(src_tei, dst_tei, src_mac, dst_mac, msdu_type, payload, long_head=
     if long_head:
         h[16:22] = mac_bytes(src_mac)
         h[22:28] = mac_bytes(dst_mac)
-    return bytes(h) + payload
+    # MSDU 帧尾 4B CRC32(与 crc.h::crc32_le 同语义 = zlib.crc32,末 4B 小端)
+    # 用户 2026-11 裁决「MSDU CRC 正确才采信」后,msdu_crc_allows_learning() 以 MSDU
+    # CRC32 门控拓扑学习;fixture 不写 CRC32 会被判坏载荷 ⇒ 摘要清空、TEI↔MAC 学不到。
+    return bytes(h) + payload + struct.pack("<I", zlib.crc32(payload) & 0xFFFFFFFF)
 
 
 def fch_base(dst_tei, sof_dt, src_tei=1):
