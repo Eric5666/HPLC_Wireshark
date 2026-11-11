@@ -12,6 +12,7 @@
 #include "appconfig.h"
 #include "updatemirror.h"
 #include "exportservice.h"
+#include "capturecontroller.h"
 #include "playbackwriter.h"
 #include "i18n.h"
 #include "packetentry_serialize.h"
@@ -87,7 +88,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_splitter_bottom(nullptr), m_tree_protocol(nullptr),
       m_hex_view(nullptr), m_lbl_hex_title(nullptr),
       m_status_left(nullptr), m_status_mid(nullptr), m_status_right(nullptr),
-      m_reader(nullptr), m_dispatch(nullptr), m_model(nullptr),
+      m_capture(nullptr), m_model(nullptr),
       m_flush_timer(nullptr), m_status_timer(nullptr),
       m_paused(false),
       m_follow_bottom(true) {
@@ -103,10 +104,8 @@ MainWindow::MainWindow(QWidget* parent)
     build_ui();
     wire_signals();
 
-    m_reader   = new SerialReader(this);
-    m_dispatch = new FrameDispatcher(this);
-    m_dispatch->connect_source(m_reader);
-    m_dispatch->set_flow_credit(m_reader->flow_credit());   // 背压:在途帧上限
+    // 采集控制:Reader + 解析 dispatcher(背压额度、协议切换重建)
+    m_capture = new CaptureController(this);
 
     // TopoController owns domain processing, persistence and worker lifecycle.
     m_topo_controller = new TopoController(this);
@@ -127,19 +126,19 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_status_left) m_status_left->setToolTip(message);
     }, Qt::QueuedConnection);
 
-    connect(m_dispatch, &FrameDispatcher::parsed,
-            this,       &MainWindow::on_parsed,
-            Qt::QueuedConnection);
+    // 解析结果已由 CaptureController 排队投递到 GUI 线程(重建 dispatcher 无需重连)
+    connect(m_capture, &CaptureController::parsed,
+            this,      &MainWindow::on_parsed);
     setup_plugin_ui();       // 插件引擎 + 功能面板 dock + 插件菜单
     // 条目构建(GUI 侧):每帧提交拓扑输入 + 喂插件
     m_entry_builder.set_topo_controller(m_topo_controller);
     m_entry_builder.set_plugin_engine(m_plugin_engine);
-    connect_plugin_feed();   // m_reader frame_ready → 插件引擎(喂帧)
-    connect(m_reader, &SerialReader::status_message,
+    connect_plugin_feed();   // 插件引擎 → 主界面(跳帧/弹表格)
+    connect(m_capture, &CaptureController::status_message,
             this,      &MainWindow::on_status_message);
-    connect(m_reader, &SerialReader::error_occurred,
+    connect(m_capture, &CaptureController::error_occurred,
             this,      &MainWindow::on_error);
-    connect(m_reader, &SerialReader::progress_percent,
+    connect(m_capture, &CaptureController::progress_percent,
             this,      [this](int p) {
                 m_status_left->setText(trl::L("回放进度: %1%").arg(p));
             });
@@ -475,24 +474,8 @@ void MainWindow::wire_signals() {
             });
 }
 
-static ReaderConfig load_config_from_settings() {
-    ReaderConfig c;                       // 来源:config.ini [reader]
-    int mode = appcfg::reader_mode();
-    c.mode = ReaderMode(mode);
-    c.serial_name = appcfg::reader_com();
-    c.baud_rate   = appcfg::reader_baud();
-    c.file_path   = appcfg::reader_file();
-    return c;
-}
-
-static void save_config_to_settings(const ReaderConfig& c) {
-    appcfg::set_reader(int(c.mode), c.serial_name, c.baud_rate,
-                       c.file_path);
-}
-
 void MainWindow::on_start() {
-    if (!m_reader) return;
-    ReaderConfig init = load_config_from_settings();
+    ReaderConfig init = CaptureController::load_config();
     const QString old_proto = appcfg::protocol();
     CommConfigDialog dlg(this, init);
     if (m_plugin_engine)
@@ -501,7 +484,7 @@ void MainWindow::on_start() {
     if (dlg.exec() != QDialog::Accepted) return;
 
     ReaderConfig cfg = dlg.config();
-    save_config_to_settings(cfg);
+    CaptureController::save_config(cfg);
 
     // 协议下拉框变更确定后:提示「重启后生效,若点击开始则立即生效」;
     // 点「开始」→ 停止 + 清空 + 重建 dispatcher(用新协议立即生效)。
@@ -509,7 +492,7 @@ void MainWindow::on_start() {
         rebuild_dispatcher();
 
     m_entry_builder.restart_delta_chain();
-    m_reader->start(cfg);
+    m_capture->start(cfg);
     m_status_left->setText(QString("Running: %1")
         .arg(cfg.mode == ReaderMode::SerialPort
                 ? QString("%1 @ %2,%3,%4,%5,%6")
@@ -522,7 +505,7 @@ void MainWindow::on_start() {
 }
 
 void MainWindow::on_stop() {
-    if (m_reader) m_reader->stop();
+    m_capture->stop();
     m_status_left->setText(QStringLiteral("Stopped"));
 }
 
@@ -539,7 +522,7 @@ void MainWindow::on_clear() {
         QMutexLocker lock(&m_pending_mutex);
         m_pending.clear();
     }
-    if (m_dispatch) m_dispatch->statistics()->reset();
+    if (FrameStatistics* stats = m_capture->statistics()) stats->reset();
     // 拓扑状态随报文清空(此前漏清会导致旧拓扑残留);回放日志/快照/回放水位同步清零
     if (m_topo_controller) m_topo_controller->clear();
     ++m_topo_request_id;
@@ -556,14 +539,14 @@ void MainWindow::on_export() {
 }
 
 void MainWindow::on_settings() {
-    ReaderConfig init = load_config_from_settings();
+    ReaderConfig init = CaptureController::load_config();
     const QString old_proto = appcfg::protocol();
     CommConfigDialog dlg(this, init);
     if (m_plugin_engine)
         connect(&dlg, &CommConfigDialog::theme_changed,
                 m_plugin_engine, &LocalPluginEngine::notify_theme_changed);
     if (dlg.exec() != QDialog::Accepted) return;
-    save_config_to_settings(dlg.config());
+    CaptureController::save_config(dlg.config());
     if (appcfg::protocol() != old_proto && confirm_protocol_rebuild())
         rebuild_dispatcher();
     m_status_left->setText(trl::L("配置已保存(Ctrl+E 开始捕获)"));
@@ -584,29 +567,13 @@ bool MainWindow::confirm_protocol_rebuild() {
 /// @brief 停止旧解析线程并重建 dispatcher(拖放导入/协议切换共用):
 ///        丢弃积压帧、重置 MSDU 重组与统计,按 config.ini 协议实例化新解析器
 void MainWindow::reset_dispatcher() {
-    // 回放忙碌时不能同步 delete(析构里 wait 会卡 GUI 直至崩溃):
-    // shutdown 立即断开 worker 信号 + 退出解析线程(停止处理积压帧、
-    // 停止向 GUI 投递 parsed),再断外部连接并 deleteLater 异步销毁。
-    if (m_dispatch) {
-        m_dispatch->shutdown();
-        m_dispatch->disconnect_source(m_reader);
-        m_dispatch->disconnect(this);
-        m_dispatch->deleteLater();
-        m_dispatch = nullptr;
-    }
-    m_dispatch = new FrameDispatcher(this);   // 按 config.ini 新协议实例化解析器
-    m_dispatch->connect_source(m_reader);
-    m_dispatch->set_flow_credit(m_reader->flow_credit());   // 背压:在途帧上限
-
-    connect(m_dispatch, &FrameDispatcher::parsed,
-            this,       &MainWindow::on_parsed,
-            Qt::QueuedConnection);
+    m_capture->reset_dispatcher();   // 丢弃积压帧 + 按 config.ini 新协议重建解析器
     if (m_plugin_engine) m_plugin_engine->reset_all();  // 新采集/回放:插件状态清零
 }
 
 /// @brief 协议切换立即生效:停止当前采集/回放 → 清空 → 用新协议重建解析器
 void MainWindow::rebuild_dispatcher() {
-    if (m_reader) m_reader->stop();
+    m_capture->stop();
     on_clear();                       // 清空列表/协议树/hex/统计(旧 dispatcher 仍在)
     reset_dispatcher();
     m_status_left->setText(trl::L("协议已立即生效(Ctrl+E 开始捕获)"));
@@ -639,13 +606,13 @@ void MainWindow::dropEvent(QDropEvent* event) {
 
 void MainWindow::start_file_import(const QString& path) {
     // 仅允许在停止状态导入;采集/回放运行中拒绝(避免打断正在进行的捕获)
-    if (m_reader && m_reader->is_running()) {
+    if (m_capture->is_running()) {
         QMessageBox::warning(this, trl::L("导入"),
                              trl::L("正在捕获/回放中,请先点击停止后再拖入文件"));
         return;
     }
     const QString ext = QFileInfo(path).suffix().toLower();
-    ReaderConfig cfg = load_config_from_settings();
+    ReaderConfig cfg = CaptureController::load_config();
     if (ext == QStringLiteral("bin")) {
         cfg.mode = ReaderMode::FilePlayback;
     } else if (ext == QStringLiteral("txt") || ext == QStringLiteral("hex")) {
@@ -656,13 +623,12 @@ void MainWindow::start_file_import(const QString& path) {
         return;
     }
     cfg.file_path = path;
-    save_config_to_settings(cfg);
+    CaptureController::save_config(cfg);
 
-    if (!m_reader) return;
-    m_reader->stop();      // 停止旧采集/回放(abort 打断同步回放循环)
+    m_capture->stop();     // 停止旧采集/回放(abort 打断同步回放循环)
     on_clear();            // 清空列表/协议树/hex/统计
     reset_dispatcher();    // 重建解析器:丢弃旧回放积压帧 + 重置 MSDU 重组/统计
-    m_reader->start(cfg);
+    m_capture->start(cfg);
     m_status_left->setText(QStringLiteral("Running: %1").arg(path));
 }
 
@@ -931,8 +897,8 @@ void MainWindow::on_error(const QString& e) {
 }
 
 void MainWindow::refresh_status_bar() {
-    if (!m_dispatch) return;
-    auto* stats = m_dispatch->statistics();
+    auto* stats = m_capture->statistics();
+    if (!stats) return;
     auto snap = stats->snapshot();
     using Key = FrameStatistics::Key;
     auto v = [&](Key k) { return snap.value(int(k), 0); };
@@ -1097,7 +1063,7 @@ void MainWindow::setup_plugin_ui() {
 }
 
 void MainWindow::connect_plugin_feed() {
-    if (!m_reader || !m_plugin_engine) return;
+    if (!m_plugin_engine) return;
     // 插件帧流:不再直连 SerialReader::frame_ready(原始帧,早于解析);
     // 改由 EntryBuilder::build 在协议解析完成后喂"解析好的帧"(带帧序号/时间戳/topoEvent)
     // 插件请求的主界面跳帧:host.jumpToFrame(idx) → 定位帧列表对应行
@@ -1225,7 +1191,7 @@ void MainWindow::run_plugin_autotest(const QString& plugins_dir,
                 qInfo() << "[autotest] import started";
                 // 回放结束 → 轮询插件线程排空(只处理一次,finished 可能发多次)
                 QMetaObject::Connection* fconn = new QMetaObject::Connection();
-                *fconn = connect(m_reader, &SerialReader::finished, this,
+                *fconn = connect(m_capture->reader(), &SerialReader::finished, this,
                                  [this, fconn]() {
                     qInfo() << "[autotest] reader finished";
                     disconnect(*fconn);
@@ -1239,8 +1205,8 @@ void MainWindow::run_plugin_autotest(const QString& plugins_dir,
                                 // 首个 finished 可能来自 start_file_import 里 stop() 的旧会话;
                                 // 背压下回放不再瞬间读完,须等 reader 结束且在途帧全部交给 GUI
                                 const bool idle = m_plugin_engine->is_idle()
-                                    && !m_reader->is_running()
-                                    && m_reader->flow_credit()->in_flight() == 0;
+                                    && !m_capture->is_running()
+                                    && m_capture->reader()->flow_credit()->in_flight() == 0;
                                 if (idle || *waits > 1200) {  // 排空或 10min 超时
                                     poll->stop();
                                     poll->deleteLater();

@@ -41,6 +41,7 @@ class QDropEvent;
 
 class PacketListModel;
 class ExportService;
+class CaptureController;
 class HexView;
 class ProtocolTree;
 class TopoWindow;
@@ -111,7 +112,7 @@ private:
     void update_selection_delta();  // 选中两行算时间差(NTB 优先,与本地差>3s 时降级本地时间)
     void open_topo_window();        // 打开/聚焦拓扑独立窗口(多 NID 下拉切换)
     void setup_plugin_ui();         // 插件 dock/菜单/引擎(主界面调用插件展示功能界面)
-    void connect_plugin_feed();     // m_reader frame_ready → 插件引擎(重建 reader 时重连)
+    void connect_plugin_feed();     // 插件引擎 → 主界面(跳帧/弹表格)
     void autotest_shoot_tabs();     // 自动化测试:逐 tab 截图后退出
 
 signals:
@@ -148,8 +149,7 @@ private:
     QLabel*        m_status_mid;    ///< 状态栏中间:选中两行时间差显示
     QLabel*        m_status_right;
 
-    SerialReader*    m_reader;
-    FrameDispatcher* m_dispatch;
+    CaptureController* m_capture;   ///< 采集控制(Reader + 解析 dispatcher)
     PacketListModel* m_model;
     ExportService*   m_export = nullptr;   ///< 导出服务(导出中 on_flush_buffer 暂停 append 进模型)
     LocalPluginEngine* m_plugin_engine = nullptr; ///< 主界面内置插件引擎(进程内后端)
