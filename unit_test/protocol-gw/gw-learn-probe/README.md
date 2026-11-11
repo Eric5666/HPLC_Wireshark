@@ -23,3 +23,16 @@ OFDMA/TDA 全站、载波发现发送方对。
 构造输入：exit 0，
 `total=6 accepted=6 msdu_pairs=13`，
 `ofdma=1 tda=1 stations=4 gather=1 assoc_cnf=2 discover=1`。
+
+**这组数值已进 CI 门禁**（`protocol-regression.yml` 步骤
+`GW TEI-MAC learning regression (CRC32-gated learning, gw-learn-probe)`），
+断言的是报告文件而不是 stdout：
+
+- `AGG total=6 accepted=6 msdu_pairs=13`
+- `AGG ofdma_frames=1 tda_frames=1 ofdma_tda_stations=4 gather=1 assoc_cnf=2 discover=1`
+- `FRAME 2 … pairs=[5:aa:bb:cc:dd:ee:05]`（短 MSDU 头 AssocCnf 的"洞"）
+
+改 `gw_craft.py` 造帧逻辑或改解析器语义后，这三条会直接红。历史坑：
+fixture 曾经不写 MSDU 帧尾 CRC32，`msdu_crc_allows_learning()` 把三个
+AssocCnf/GatherInd 帧判成坏载荷 ⇒ 摘要清空、`msdu_pairs=1 gather=0
+assoc_cnf=0`，探针**违背自己上面的预期值却没人发现**（当时它不在 CI 里）。

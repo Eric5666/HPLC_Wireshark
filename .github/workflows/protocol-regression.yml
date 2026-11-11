@@ -183,6 +183,57 @@ jobs:
           run_probe nw-trunc-pbcrc-probe  nw_trunc_pbcrc_probe
           run_probe nw-ul-crc-probe       nw_ul_crc_probe
 
+      - name: GW TEI-MAC learning regression (CRC32-gated learning, gw-learn-probe)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          # 与 OFDMA 那步共用 Qt symlink farm(单独重跑本步时按 qmake -query 重建)
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)"  "$QT_ROOT/plugins"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          cd unit_test/protocol-gw/gw-learn-probe
+          bash build_probe.sh
+          B=build/gw_learn_probe
+          [ -x "$B" ] || B=build/gw_learn_probe.exe
+          if [ ! -x "$B" ]; then
+            echo "::error::gw-learn-probe 未找到可执行文件(检查 build_probe.sh 产物路径)"
+            find build -maxdepth 2 -type f | head -20
+            exit 1
+          fi
+          "$B" crafted.bin build/learn_report.txt
+          cat build/learn_report.txt
+
+          # 期望值取 README 写死的数(不反推)。核心回归:fixture 必须写 MSDU 帧尾 CRC32,
+          # 否则 msdu_crc_allows_learning() 判坏载荷 ⇒ 摘要清空、TEI<->MAC 全学不到。
+          # 修复前实测 total=6 accepted=6 msdu_pairs=1 ... gather=0 assoc_cnf=0。
+          fail=0
+          expect() {
+            if grep -qF "$1" build/learn_report.txt; then
+              echo "  ok: $1"
+            else
+              echo "::error::缺少期望输出: $1"
+              fail=1
+            fi
+          }
+          expect "total=6 accepted=6 msdu_pairs=13"
+          expect "ofdma_tda_stations=4 gather=1 assoc_cnf=2 discover=1"
+          # README 里说的"洞":短 MSDU 头的 AssocCnf 也必须学到站点 5
+          if grep -F "FRAME 2 " build/learn_report.txt | grep -qF "pairs=[5:aa:bb:cc:dd:ee:05]"; then
+            echo "  ok: FRAME 2 pairs=[5:..05] 短头 AssocCnf 的洞已补"
+          else
+            echo "::error::FRAME 2 未学到 5:aa:bb:cc:dd:ee:05(短头 AssocCnf 学习回退)"
+            fail=1
+          fi
+          [ "$fail" = "0" ] || exit 1
+
       - name: Topology anomaly / identity-conflict regression (MAC↔TEI, restart-count)
         env:
           QT_QPA_PLATFORM: offscreen
