@@ -93,9 +93,9 @@ def msdu_base(src_tei, dst_tei, src_mac, dst_mac, msdu_type, payload, long_head=
     if long_head:
         h[16:22] = mac_bytes(src_mac)
         h[22:28] = mac_bytes(dst_mac)
-    # MSDU 帧尾 4B CRC32:与 src/protocol/common/crc.h::crc32_le 同语义
-    # (poly 0xEDB88320 / init 0xFFFFFFFF / 末取反 == zlib.crc32),末 4B 小端
-    return bytes(h) + payload + struct.pack('<I', zlib.crc32(payload) & 0xFFFFFFFF)
+    # MSDU CRC32 covers the data area (payload), not the MAC header; it matches
+    # crc32_le (poly 0xEDB88320, init 0xFFFFFFFF, final XOR) and is stored LE.
+    return bytes(h) + payload + struct.pack("<I", zlib.crc32(payload) & 0xFFFFFFFF)
 
 
 def fch_base(dst_tei, sof_dt, src_tei=1):
