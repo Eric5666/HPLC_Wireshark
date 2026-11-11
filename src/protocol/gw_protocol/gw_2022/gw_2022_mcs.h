@@ -4,8 +4,8 @@
 ///          避免两处各自复制释义数组导致静默发散。
 /// @note 与南网第2部分表129 逐值相同;但按协议独立维护(同南网 NW_2021 的
 ///       nw_mcs_text 一样各自持表,不跨协议共享)。
-#ifndef GW_2022_MCS_H
-#define GW_2022_MCS_H
+#ifndef BPLC_GW_2022_MCS_H
+#define BPLC_GW_2022_MCS_H
 
 #include <QtGlobal>
 
@@ -21,4 +21,4 @@ inline const char* gw_2022_mcs_desc(quint8 mcs) {
     return (mcs <= 6) ? kDesc[mcs] : nullptr;
 }
 
-#endif // GW_2022_MCS_H
+#endif  // BPLC_GW_2022_MCS_H

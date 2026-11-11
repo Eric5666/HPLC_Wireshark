@@ -9,8 +9,8 @@
 ///          若引入 .cpp 就必须逐个改这些构建文件,漏一个即 undefined reference。
 ///
 ///          入参用**纯数值**,不依赖任一协议自己的枚举,调用方 static_cast<quint8> 传入。
-#ifndef NW_APP_BID_H
-#define NW_APP_BID_H
+#ifndef BPLC_NW_APP_BID_H
+#define BPLC_NW_APP_BID_H
 
 #include "i18n.h"
 
@@ -149,4 +149,4 @@ inline QString nw_app_bid_name(quint8 port_num, quint8 packet_type, quint8 busin
     }
 }
 
-#endif // NW_APP_BID_H
+#endif  // BPLC_NW_APP_BID_H

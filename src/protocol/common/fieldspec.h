@@ -3,8 +3,8 @@
 /// @details 字段说明表(FieldSpec)/字段节点树(add_fields/group)/单位注释。
 ///          位域取值/格式化见 fieldtools.h,CRC 见 crc.h(已抽取,勿在本文件重复定义)。
 /// @note 头文件常驻 inline,无 .cpp;改动本文件后依赖模块需重编。
-#ifndef FIELDSPEC_H
-#define FIELDSPEC_H
+#ifndef BPLC_FIELDSPEC_H
+#define BPLC_FIELDSPEC_H
 
 #include "bplcframe.h"
 #include "fieldtools.h"
@@ -79,4 +79,4 @@ inline void annotate_unit(QVector<MsduFieldNode>& nodes, const char* field,
     }
 }
 
-#endif // FIELDSPEC_H
+#endif  // BPLC_FIELDSPEC_H

@@ -1,7 +1,7 @@
 /// @file commconfigdialog.h
 /// @brief 通讯口/数据源设置对话框
-#ifndef COMMCONFIGDIALOG_H
-#define COMMCONFIGDIALOG_H
+#ifndef BPLC_COMMCONFIGDIALOG_H
+#define BPLC_COMMCONFIGDIALOG_H
 
 #include <QDialog>
 #include "serialreader.h"
@@ -46,4 +46,4 @@ private:
     ReaderConfig  m_cfg;
 };
 
-#endif // COMMCONFIGDIALOG_H
+#endif  // BPLC_COMMCONFIGDIALOG_H

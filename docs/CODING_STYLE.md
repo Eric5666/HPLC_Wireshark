@@ -20,7 +20,7 @@
 | **常量（编译期/文件级）** | `k` + `PascalCase` | `kAppVersion` `kApiVersion` `kLiteStaSlotSpec` `kAppBaseSpecN` `kAssocCnfSpec` | 309 个唯一 |
 | **结构体字段 / 局部变量 / 参数** | `snake_case` | `pb_num` `pb_size` `fch_crc_ok` `received_count` `neighbor_teis_present` | 174/174 合规 |
 | **Qt 类成员变量** | `m_` + `snake_case` | `m_abort` `m_btn_apply_filter` `m_block_cache` `m_pending` | 322 个 |
-| **include guard 宏** | 全大写 + `_` + `_H` | `BPLCFRAME_H` `APPCONFIG_H` `AUTHENTICATEDIALOG_H` | — |
+| **include guard 宏** | `BPLC_` + 全大写文件名 + `_H`（`#pragma once` 不用） | `BPLC_BPLCFRAME_H` `BPLC_APPCONFIG_H` `BPLC_GW_2026_SOF_PARSER_H` | 全部项目头文件（3rdparty/ 与 src/updater/ 上游代码除外） |
 | **其他宏（IID 等）** | 全大写 + `_` | `BPLC_PLUGIN_IID` `BPLC_PARSER_PLUGIN_IID` `BPLC_IPLUGIN_H` | 483 含下划线 / 70 纯 snake |
 | **枚举项（值表/列号）** | 全大写 + `_` | `COL_INFO` `COL_LENGTH` `COL_FRAME_TYPE` `COL_DEST` | 34 |
 | **枚举项（业务类型）** | `PascalCase` | `AssocReq` `AssocCnf` `AssocInd` `AssocGatherInd` | 18 |
@@ -146,10 +146,10 @@ enum Column { colIndex, col_index, ColumnIndex };   // 三种混用
 
 ```cpp
 // ✅ include guard
-#ifndef BPLCFRAME_H
-#define BPLCFRAME_H
+#ifndef BPLC_BPLCFRAME_H
+#define BPLC_BPLCFRAME_H
 ...
-#endif // BPLCFRAME_H
+#endif  // BPLC_BPLCFRAME_H
 
 // ✅ 宏常量（必要时）
 #define BPLC_PLUGIN_IID "com.bplc.plugin/1.0"
@@ -215,10 +215,10 @@ packet-gw_2022.lua
 ```cpp
 // ✓ 对：把「目录路径」压进 guard，天然不会撞
 // src/protocol/gw_protocol/gw_2026/sof/gw_2026_sof_parser.h
-#ifndef GW_2026_SOFPARSER_H
-#define GW_2026_SOFPARSER_H
+#ifndef BPLC_GW_2026_SOF_PARSER_H
+#define BPLC_GW_2026_SOF_PARSER_H
 ...
-#endif  // GW_2026_SOFPARSER_H
+#endif  // BPLC_GW_2026_SOF_PARSER_H
 
 // ✗ 错：只用文件名去重 —— 两个同名的 sof_parser.h 会拿到同一个 guard
 // gw_2022_sof_parser.h 与 gw_2026_sof_parser.h 都写 SOFPARSER_H

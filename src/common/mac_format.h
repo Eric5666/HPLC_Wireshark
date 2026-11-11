@@ -8,8 +8,8 @@
 ///          u64 约定:低字节为帧内首字节(见 AGENTS.md MAC u64 约定)。
 ///          插件侧另有同式拷贝(js/lua 后端)与大写式拷贝(coverage 示例),
 ///          属插件组件、构建独立,不在此统一之列。
-#ifndef MAC_FORMAT_H
-#define MAC_FORMAT_H
+#ifndef BPLC_MAC_FORMAT_H
+#define BPLC_MAC_FORMAT_H
 
 #include <QString>
 
@@ -22,4 +22,4 @@ inline QString format_mac_u64(quint64 v) {
     return s;
 }
 
-#endif // MAC_FORMAT_H
+#endif  // BPLC_MAC_FORMAT_H

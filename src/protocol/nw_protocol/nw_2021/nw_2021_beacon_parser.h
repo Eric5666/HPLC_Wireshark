@@ -4,8 +4,8 @@
 ///          固定头(信标类型/标志位/组网序列号/短网络标识) + 信标管理信息 +
 ///          帧载荷校验序列(BPCS,32-bit CRC32) + 保留字节 + 物理块检查序列(24-bit)。
 ///          字段坐标对照数据链路层报批稿表24/表29 及 Python 参考 MPDU_BEACON_LOAD。
-#ifndef NW_2021_BEACON_PARSER_H
-#define NW_2021_BEACON_PARSER_H
+#ifndef BPLC_NW_2021_BEACON_PARSER_H
+#define BPLC_NW_2021_BEACON_PARSER_H
 
 #include "bplcframe.h"
 
@@ -58,4 +58,4 @@ MsduInfo parse_beacon(const QByteArray& payload, int pbsize, bool is_rf);
 
 }  // namespace NW_2021_BeaconParser
 
-#endif // NW_2021_BEACON_PARSER_H
+#endif  // BPLC_NW_2021_BEACON_PARSER_H

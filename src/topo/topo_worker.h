@@ -1,5 +1,5 @@
-#ifndef TOPO_WORKER_H
-#define TOPO_WORKER_H
+#ifndef BPLC_TOPO_WORKER_H
+#define BPLC_TOPO_WORKER_H
 
 #include "topo_state.h"
 #include <QObject>
@@ -116,4 +116,4 @@ private:
     QString m_store_error_message;
 };
 
-#endif // TOPO_WORKER_H
+#endif  // BPLC_TOPO_WORKER_H

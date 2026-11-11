@@ -12,8 +12,8 @@
 ///            其前缀同时用于后续安装包下载地址改写。
 ///          任何一步失败都回退原生地址,加速只会更好、不会比原行为更差。
 ///          诊断日志统一英文([update-mirror] 前缀)。
-#ifndef UPDATEMIRROR_H
-#define UPDATEMIRROR_H
+#ifndef BPLC_UPDATEMIRROR_H
+#define BPLC_UPDATEMIRROR_H
 
 #include <QObject>
 #include <QString>
@@ -55,4 +55,4 @@ private:
     bool        m_done = false;
 };
 
-#endif // UPDATEMIRROR_H
+#endif  // BPLC_UPDATEMIRROR_H

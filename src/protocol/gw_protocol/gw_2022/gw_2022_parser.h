@@ -2,8 +2,8 @@
 /// @brief 国网 GW_2022 双模协议解析器头文件
 /// @details 提供 GW_2022_Parser 类(IProtocolParser 实现),把一帧 BplcFrame
 ///          解码为 MPDU/MAC 字段,并支持 SOF 多 PB 块的 MSDU 重组。
-#ifndef GW_2022_PARSER_H
-#define GW_2022_PARSER_H
+#ifndef BPLC_GW_2022_PARSER_H
+#define BPLC_GW_2022_PARSER_H
 
 #include "bplcframe.h"
 #include "iprotocolparser.h"
@@ -36,4 +36,4 @@ private:
     DisplayContext m_display_ctx;     ///< 分发器给的行序号 + 本地时间
 };
 
-#endif // GW_2022_PARSER_H
+#endif  // BPLC_GW_2022_PARSER_H

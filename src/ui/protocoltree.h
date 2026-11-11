@@ -6,8 +6,8 @@
 ///          构建器按帧协议(PacketEntry::protocol)分派,与会话配置无关:
 ///          解析器会把帧委托给旧版解析器(GW_2026→GW_2022、NW_2026→NW_2021),
 ///          此时 PacketEntry::protocol 已同步为被委托方,字段树据此选布局。
-#ifndef PROTOCOLTREE_H
-#define PROTOCOLTREE_H
+#ifndef BPLC_PROTOCOLTREE_H
+#define BPLC_PROTOCOLTREE_H
 
 #include "bplcframe.h"
 #include "protocol_tree_builder.h"
@@ -40,4 +40,4 @@ private:
     IProtocolTreeBuilder* builder_for(const PacketEntry& e);
 };
 
-#endif // PROTOCOLTREE_H
+#endif  // BPLC_PROTOCOLTREE_H

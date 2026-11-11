@@ -5,8 +5,8 @@
 ///          - en:命中内置/注册表返回英文,未命中回退中文(便于漏翻发现)。
 ///          语言由 main() 在启动时按系统语言 + QSettings("lang") 决定,
 ///          亦可运行中切换(动态文本立即生效,窗口 chrome 下一启动生效)。
-#ifndef I18N_H
-#define I18N_H
+#ifndef BPLC_I18N_H
+#define BPLC_I18N_H
 
 #include <QString>
 #include <QHash>
@@ -28,4 +28,4 @@ inline QString L(const QString& zh) { return L(zh.toUtf8().constData()); }
 
 }  // namespace trl
 
-#endif // I18N_H
+#endif  // BPLC_I18N_H

@@ -8,8 +8,8 @@
 ///       故三态一律从**已序列化**的字段树派生。
 /// @note header-only:全仓 30+ 探针构建文件直接编译各 parser,引入 .cpp 会 undefined reference
 ///       (与 nw_app_bid.h 同一约定)。
-#ifndef MSDU_CRC_STATE_H
-#define MSDU_CRC_STATE_H
+#ifndef BPLC_MSDU_CRC_STATE_H
+#define BPLC_MSDU_CRC_STATE_H
 
 #include "bplcframe.h"
 
@@ -136,4 +136,4 @@ inline bool frame_crc_red(const PacketEntry& e) {
     return false;
 }
 
-#endif // MSDU_CRC_STATE_H
+#endif  // BPLC_MSDU_CRC_STATE_H

@@ -4,8 +4,8 @@
 ///          载荷固定头(BeaconType/标志位/NetSN/CCO MAC/周期计数/RF 参数)
 ///          + BeaconMgrInfo 管理条目(STA Cap / Route Param / TSA 等)。
 ///          字段树复用 MsduFieldNode/MsduInfo(定义在 bplcframe.h)。
-#ifndef GW_2026_BEACONPARSER_H
-#define GW_2026_BEACONPARSER_H
+#ifndef BPLC_GW_2026_BEACON_PARSER_H
+#define BPLC_GW_2026_BEACON_PARSER_H
 
 #include "bplcframe.h"
 
@@ -62,4 +62,4 @@ public:
     static MsduInfo parse_beacon(const QByteArray& payload_for_log, bool is_rf);
 };
 
-#endif // GW_2026_BEACONPARSER_H
+#endif  // BPLC_GW_2026_BEACON_PARSER_H

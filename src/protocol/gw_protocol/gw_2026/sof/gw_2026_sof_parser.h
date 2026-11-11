@@ -4,8 +4,8 @@
 ///          TF/调制方式…、无线表19 载荷PB大小/MCS…)与多 PB 块的 MSDU 跨帧
 ///          重组(与 Python MPDU_Class 重组逻辑一致)。
 ///          重组状态 MsduState 定义于 bplcframe.h(由调用方持有,跨帧保活)。
-#ifndef GW_2026_SOFPARSER_H
-#define GW_2026_SOFPARSER_H
+#ifndef BPLC_GW_2026_SOF_PARSER_H
+#define BPLC_GW_2026_SOF_PARSER_H
 
 #include "bplcframe.h"
 #include "pb_assembler.h"   // pb_asm::SpanLayout / msdu_span_avoids_bad_blocks
@@ -95,4 +95,4 @@ inline bool station_msdu_parseable(const SofStationPb& st, quint8 seq_mask = 0x3
 
 }  // namespace gw_2026_sof
 
-#endif // GW_2026_SOFPARSER_H
+#endif  // BPLC_GW_2026_SOF_PARSER_H
