@@ -6,6 +6,10 @@ semantics (pairs fully merged, topo event first-non-Other wins, rest dropped).
 
 Bit order: LSB-first continuous bitstream (matches get_bits()).
 CRC: crc24_lsb poly=0xC60001, init=0, LSB-first, over len-3 bytes, LE store.
+MSDU 帧尾 CRC32: 必须写(zlib.crc32 == crc.h::crc32_le,末 4B 小端)。
+  用户 2026-11 裁决「MSDU CRC 正确才采信」后,msdu_crc_allows_learning() 以
+  MSDU CRC32 门控拓扑学习;fixture 若不写 CRC32 会被判坏载荷 ⇒ 学不到
+  orig_srcs/orig_dsts(orig-src-probe 因此红过)。
 FCH FCS: over bytes 0..12, stored 13..15. OFDMA eFC FCS: over eFC 0..12,
 stored eFC 13..15. PB CRC: over head+body, last 3B. PB head 0xC0 = single block.
 MAC u64: low byte = first frame byte.
@@ -28,6 +32,7 @@ Helpers copied from ~/workspace/gw_learn_probe/gw_craft.py (proven builders).
 """
 import os
 import struct
+import zlib
 
 CCO_MAC = 0xAABBCCDDEE01
 
@@ -88,7 +93,9 @@ def msdu_base(src_tei, dst_tei, src_mac, dst_mac, msdu_type, payload, long_head=
     if long_head:
         h[16:22] = mac_bytes(src_mac)
         h[22:28] = mac_bytes(dst_mac)
-    return bytes(h) + payload
+    # MSDU CRC32 covers the data area (payload), not the MAC header; it matches
+    # crc32_le (poly 0xEDB88320, init 0xFFFFFFFF, final XOR) and is stored LE.
+    return bytes(h) + payload + struct.pack("<I", zlib.crc32(payload) & 0xFFFFFFFF)
 
 
 def fch_base(dst_tei, sof_dt, src_tei=1):

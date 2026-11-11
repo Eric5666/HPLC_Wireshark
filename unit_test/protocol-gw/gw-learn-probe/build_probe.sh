@@ -9,10 +9,33 @@ set -e
 cd "$(dirname "$0")"
 REPO_ROOT="$(cd "../../.." && pwd)"
 OUT="${1:-./build/gw_learn_probe}"
-R="${2:-$REPO_ROOT}"
-QT="$HOME/qt/6.11.2/gcc_64"
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+R="$(native_path "${2:-$REPO_ROOT}")"
+QT="${QT_ROOT:-${QT:-}}"
+if [ -z "$QT" ]; then
+    for cand in $(ls -d /c/Qt/6.*/mingw_64 2>/dev/null | sort -Vr); do
+        [ -d "$cand/include/QtCore" ] && { QT="$cand"; break; }
+    done
+fi
+if [ -z "$QT" ]; then
+    for cand in "$HOME/qt/6.11.2/gcc_64" /usr/lib/qt6 /usr; do
+        [ -d "$cand/include/QtCore" ] && { QT="$cand"; break; }
+    done
+fi
+[ -n "$QT" ] || { echo "未找到 Qt,请用 QT_ROOT= 指定" >&2; exit 1; }
+if [ -x "$QT/libexec/moc" ]; then MOC="$QT/libexec/moc"
+elif [ -x "$QT/bin/moc.exe" ]; then MOC="$QT/bin/moc.exe"
+elif [ -x "$QT/bin/moc" ]; then MOC="$QT/bin/moc"
+else echo "未找到 moc(检查 $QT)" >&2; exit 1; fi
 mkdir -p build
-"$QT/libexec/moc" "$R/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp
+"$MOC" "$R/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp
+EGL_LIBS=""
+for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /usr/local/lib; do
+    [ -e "$d/libEGL.so" ] && { EGL_LIBS="-lEGL -lGL"; break; }
+done
+
 g++ -std=c++17 -fPIC \
   -I$R/src -I$R/src/protocol -I$R/src/protocol/common \
   -I$R/src/protocol/gw_protocol/gw_2026 -I$R/src/protocol/gw_protocol/gw_2026/beacon \
@@ -44,6 +67,6 @@ g++ -std=c++17 -fPIC \
   $R/src/protocol/gw_protocol/gw_2022/coord/gw_2022_coord_parser.cpp \
   $R/src/protocol/gw_protocol/gw_2022/gw_2022_tree.cpp \
   -L$QT/lib -L$HOME/workspace/build_deps/libfix \
-  -lQt6Widgets -lQt6Gui -lQt6Core -lEGL -lGL -o "$OUT"
+  -lQt6Widgets -lQt6Gui -lQt6Core $EGL_LIBS -o "$OUT"
 chmod +x "$OUT"
 echo "built $OUT"
