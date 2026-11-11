@@ -28,6 +28,7 @@ Helpers copied from ~/workspace/gw_learn_probe/gw_craft.py (proven builders).
 """
 import os
 import struct
+import zlib
 
 CCO_MAC = 0xAABBCCDDEE01
 
@@ -88,7 +89,9 @@ def msdu_base(src_tei, dst_tei, src_mac, dst_mac, msdu_type, payload, long_head=
     if long_head:
         h[16:22] = mac_bytes(src_mac)
         h[22:28] = mac_bytes(dst_mac)
-    return bytes(h) + payload
+    # The MSDU CRC32 covers the MSDU data area (payload), not the MAC header.
+    # Keep generated station records valid so CRC32-gated topology learning is exercised.
+    return bytes(h) + payload + struct.pack("<I", zlib.crc32(payload) & 0xFFFFFFFF)
 
 
 def fch_base(dst_tei, sof_dt, src_tei=1):

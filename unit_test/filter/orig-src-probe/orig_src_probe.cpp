@@ -137,17 +137,11 @@ int main(int argc, char** argv) {
     // argv[2] = gw_topo_merge_multi.bin (1 frame, two distinct sources 41/42)
     {
         const quint64 cco_mac = 0xAABBCCDDEE01ULL;
-        const quint64 sta29 = 0xAABBCCDDEE29ULL;
-        const quint64 sta2a = 0xAABBCCDDEE2AULL;
-        // 逐 bin 的逐帧期望 orig_srcs/orig_dsts(写死,不反推;验证"该收集却没收集"的场景)
-        // - 老 bin:3 帧,CCO→站下行,单 src [1:CCO];各站 MSDU 头目的=各站自己 → dst 逐站去重
-        //   F1: AssocCnf(11)/AssocCnf(12) → dst [11,12]
-        //   F2: AssocCnf(21)/Gather(24)   → dst [21,24]
-        //   F3: app(31)/AssocCnf(32)      → dst [31,32]
-        // - 多源 bin:1 帧,两站上行,源 41/42 不同;目的均为 CCO → 单 dst [1:CCO](去重)
+        // These OFDMA station-only frames have no single frame-level MSDU source/destination;
+        // expect the parsed per-station origins, deduplicated in station order.
         const QVector<QVector<TeiMacPair>> want_by_bin[] = {
             { { {1, cco_mac} }, { {1, cco_mac} }, { {1, cco_mac} } },
-            { { {41, sta29}, {42, sta2a} } },
+            { { {41, 0xAABBCCDDEE29ULL}, {42, 0xAABBCCDDEE2AULL} } },
         };
         const QVector<QVector<TeiMacPair>> want_dst_by_bin[] = {
             { { {11, 0xAABBCCDDEE0BULL}, {12, 0xAABBCCDDEE0CULL} },
@@ -184,7 +178,8 @@ int main(int argc, char** argv) {
                     for (int k = 0; k < want.size(); ++k)
                         if (r.msdu.orig_srcs[k].tei != want[k].tei || r.msdu.orig_srcs[k].mac != want[k].mac) { ok = false; break; }
                 }
-                std::printf("FRAME %ld accept=%d merged_orig=[%s] want=[%s]\n", frame_no, r.accept ? 1 : 0,
+                std::printf("FRAME %ld accept=%d frame_src=%d frame_dst=%d merged_orig=[%s] want=[%s]\n",
+                            frame_no, r.accept ? 1 : 0, r.msdu.msdu_src_tei, r.msdu.msdu_dst_tei,
                             qPrintable(srcs_str(r.msdu.orig_srcs)), qPrintable(srcs_str(want)));
                 char buf[64];
                 std::snprintf(buf, sizeof(buf), "parser frame %ld orig_srcs invariant", frame_no);
