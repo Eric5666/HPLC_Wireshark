@@ -40,6 +40,7 @@ class QDragEnterEvent;
 class QDropEvent;
 
 class PacketListModel;
+class ExportService;
 class HexView;
 class ProtocolTree;
 class TopoWindow;
@@ -150,6 +151,7 @@ private:
     SerialReader*    m_reader;
     FrameDispatcher* m_dispatch;
     PacketListModel* m_model;
+    ExportService*   m_export = nullptr;   ///< 导出服务(导出中 on_flush_buffer 暂停 append 进模型)
     LocalPluginEngine* m_plugin_engine = nullptr; ///< 主界面内置插件引擎(进程内后端)
     QDockWidget*  m_plugin_dock = nullptr;        ///< 插件功能面板 dock
     QAction*      m_act_show_plugin = nullptr;    ///< 菜单「显示插件面板」勾选项
@@ -170,7 +172,6 @@ private:
     QList<PacketEntry> m_pending;
     QMutex           m_pending_mutex;
     bool             m_paused;
-    bool             m_exporting;      ///< 导出中(on_flush_buffer 暂停 append 进模型)
     bool             m_follow_bottom;  ///< 是否自动滚动到最新帧(用户滚离底部则暂停)
 
     EntryBuilder     m_entry_builder;  ///< 条目构建(序号/Delta 链,GUI 侧补齐预构建条目)

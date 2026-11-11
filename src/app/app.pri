@@ -5,6 +5,7 @@
 #   - commconfigdialog.h/.cpp     通讯口设置对话框
 #   - framedispatcher.h/.cpp      解析线程 + 统计 + 跨模块编排
 #   - entrybuilder.h/.cpp         帧条目构建(解析线程预构建 + GUI 补序号/时间)
+#   - exportservice.h/.cpp        导出(回放 bin / 裸 hex / CSV,工作线程流式写)
 #
 # 依赖:common, protocol, io, ui(全模块)
 
@@ -13,6 +14,7 @@ HEADERS += \
     $$PWD/commconfigdialog.h \
     $$PWD/framedispatcher.h \
     $$PWD/entrybuilder.h \
+    $$PWD/exportservice.h \
     $$PWD/appconfig.h \
     $$PWD/updatemirror.h \
     $$PWD/net_size_cap.h \
@@ -23,6 +25,7 @@ SOURCES += \
     $$PWD/commconfigdialog.cpp \
     $$PWD/framedispatcher.cpp \
     $$PWD/entrybuilder.cpp \
+    $$PWD/exportservice.cpp \
     $$PWD/updatemirror.cpp \
     $$PWD/theme.cpp
 
