@@ -5,14 +5,15 @@
 // 站点 PB 体 = NW AssocReq MSDU(32B MAC 头 + 98B MSDU + 4B,同 sender-mac 探针)。
 // 断言(期望行为):
 //   好 CRC:站点 0 对(27)与站点 1 对(42)都学到;
-//   站点 1 块 CRC 翻转:站点 0 对仍学到,站点 1 对不得学到(坏 CRC 的 PB 不进学习解析)。
-// 未修复代码上翻转用例失败 = 缺陷复现;修复后全过。
+//   站点 1 块 CRC 翻转但 MSDU CRC32 有效:仍允许站点 1 对学习(CRC32 优先)。
+//   MSDU CRC32 失败即使 PB CRC 通过:站点 1 对不得学习。
 #include <QCoreApplication>
 #include <QDebug>
 #include <cstdio>
 #include "nw_2026_parser.h"
 #include "fieldtools.h"
 #include "crc.h"
+#include "msdu_crc_state.h"   // msdu_crc_state():学习门控依据
 
 static quint64 mac6(quint8 a, quint8 b, quint8 c, quint8 d, quint8 e, quint8 f) {
     return (quint64)a | ((quint64)b << 8) | ((quint64)c << 16)
@@ -30,7 +31,7 @@ static void put_crc24(quint8* blk, int len) {
 
 // 与 sender-mac 探针 build_nw_assoc 同构:NW AssocReq MAC 帧 134B。
 static QByteArray build_nw_assoc(int dst_tei, quint64 dst_mac, int src_tei,
-                                 quint64 src_mac, int restart) {
+                                 quint64 src_mac, int restart, bool bad_msdu_crc = false) {
     QByteArray mme(80, 0);
     quint8* m = reinterpret_cast<quint8*>(mme.data());
     m[0] = 0x01;                     // MMe version
@@ -60,6 +61,7 @@ static QByteArray build_nw_assoc(int dst_tei, quint64 dst_mac, int src_tei,
     p[32 + msdu_len + 1] = quint8((crc >> 8) & 0xFF);
     p[32 + msdu_len + 2] = quint8((crc >> 16) & 0xFF);
     p[32 + msdu_len + 3] = quint8((crc >> 24) & 0xFF);
+    if (bad_msdu_crc) p[32 + msdu_len + 3] ^= 0xFF;
     return f;
 }
 
@@ -94,7 +96,8 @@ static QByteArray build_agg_station_block(const QByteArray& msdu, int seq, bool 
 }
 
 // DL-OFDMA 2 站点帧:32B(FCH+eFC) + 站点 0 块 + 站点 1 块 = 560B。
-static QByteArray build_dlofdma(bool flip_sta1, quint64 cco, quint64 sta27, quint64 sta42) {
+static QByteArray build_dlofdma(bool flip_sta1, quint64 cco, quint64 sta27, quint64 sta42,
+                                bool bad_msdu_crc_sta1 = false) {
     QByteArray f(560, 0);
     quint8* p = reinterpret_cast<quint8*>(f.data());
     p[0] = 0x01;                     // SOF, SNID 0
@@ -113,13 +116,14 @@ static QByteArray build_dlofdma(bool flip_sta1, quint64 cco, quint64 sta27, quin
     set_bits(e, 5, 0, 5, 9);         // 站点 1 TMI 9 -> 264B (bits 40..44)
     put_crc24(e, 16);                // eFC CRC24
     f.replace(32, 264, build_station_block(build_nw_assoc(1, cco, 27, sta27, 5), 0, false));
-    f.replace(296, 264, build_station_block(build_nw_assoc(1, cco, 42, sta42, 5), 0, flip_sta1));
+    f.replace(296, 264, build_station_block(build_nw_assoc(1, cco, 42, sta42, 5, bad_msdu_crc_sta1), 0, flip_sta1));
     return f;
 }
 
 // DL-OFDMA 2 站点聚合帧:站点 0 非聚合 + 站点 1 聚合(级联记录流)。
 // 布局与 build_dlofdma 相同,仅站点 1 块换成聚合块。
-static QByteArray build_dlofdma_agg(bool flip_sta1, quint64 cco, quint64 sta27, quint64 sta42) {
+static QByteArray build_dlofdma_agg(bool flip_sta1, quint64 cco, quint64 sta27, quint64 sta42,
+                                    bool bad_msdu_crc_sta1 = false) {
     QByteArray f(560, 0);
     quint8* p = reinterpret_cast<quint8*>(f.data());
     p[0] = 0x01;                     // SOF, SNID 0
@@ -138,7 +142,7 @@ static QByteArray build_dlofdma_agg(bool flip_sta1, quint64 cco, quint64 sta27, 
     set_bits(e, 5, 0, 5, 9);         // 站点 1 TMI 9 -> 264B (bits 40..44)
     put_crc24(e, 16);                // eFC CRC24
     f.replace(32, 264, build_station_block(build_nw_assoc(1, cco, 27, sta27, 5), 0, false));
-    f.replace(296, 264, build_agg_station_block(build_nw_assoc(1, cco, 42, sta42, 5), 0, flip_sta1));
+    f.replace(296, 264, build_agg_station_block(build_nw_assoc(1, cco, 42, sta42, 5, bad_msdu_crc_sta1), 0, flip_sta1));
     return f;
 }
 
@@ -186,18 +190,31 @@ int main(int argc, char** argv) {
         // 站点 0 的对走帧级字段 (通用路径直接赋值 r.msdu,不进 tei_mac_pairs)。
         check(flip ? "flipped: sta0 pair kept" : "control: sta0 pair",
               r.msdu.msdu_src_tei == 27 && r.msdu.msdu_src_mac == sta27);
-        check(flip ? "flipped: sta1 pair ABSENT" : "control: sta1 pair",
-              flip ? !has_pair(r, 42, sta42) : has_pair(r, 42, sta42));
-        if (flip)
-            check("flipped: no learned pairs at all", r.msdu.tei_mac_pairs.isEmpty());
+        // 用户 2026-11 裁决 + 018fdc5:MSDU CRC32 压过 PB 块 CRC ——
+        // MSDU CRC 有效即可学习,即使某个 PB 块 CRC24 失败;MSDU CRC 失败才禁止。
+        // 故翻转站点 1 的 PB 块 CRC 后,站点 1 的对**仍应学到**(与旧断言相反)。
+        // ("坏载荷禁止学习"由 msdu-crc-gate-probe C9 / orig-src 覆盖)
+        check(flip ? "flipped(PB CRC 坏/MSDU CRC 好): sta1 pair kept" : "control: sta1 pair",
+              has_pair(r, 42, sta42));
+        if (flip) {
+            check("flipped: MSDU CRC32 仍为 Ok(学习放行的依据)",
+                  msdu_crc_state(r.msdu) == MsduCrcState::Ok);
+            check("flipped: learned pairs kept", !r.msdu.tei_mac_pairs.isEmpty());
+            check("flipped: STA1 AssocReq topo event retained",
+                  r.msdu.topo_extra_events.size() == 1
+                  && r.msdu.topo_extra_events[0].kind == TopoEventKind::AssocReq
+                  && r.msdu.topo_extra_events[0].nodes.size() == 1
+                  && r.msdu.topo_extra_events[0].nodes[0].tei == 0
+                  && r.msdu.topo_extra_events[0].nodes[0].mac == sta42);
+        }
         // 新增: CRC 状态检查
         bool has_crc_fail = std::any_of(r.mpdu.pb_crc_oks.begin(), r.mpdu.pb_crc_oks.end(),
                                         [](bool ok) { return !ok; });
         check(flip ? "flipped: pb_crc_oks has failure" : "control: pb_crc_oks all pass",
               flip ? has_crc_fail : !has_crc_fail);
     }
-    // 聚合分支:站点 1 为聚合 PB(级联记录流),翻转站点 1 块 CRC 后,
-    // 组装器应剔除与坏块相交的级联记录(站点 1 对不被学习);
+    // 聚合分支:站点 1 为聚合 PB(级联记录流),即使站点 1 块 CRC24 翻转,
+    // 只要 MSDU CRC32 有效,仍应学习站点 1 对及其拓扑事件(CRC32 优先);
     // 站点 0(好块,帧级通用路径)不受影响;帧本身仍 accept(CRC 错靠 pb_crc_oks 标红)。
     {
         BplcFrame fr;
@@ -209,7 +226,9 @@ int main(int argc, char** argv) {
         check("agg-flipped: accept", r.accept);
         check("agg-flipped: sta0 pair kept",
               r.msdu.msdu_src_tei == 27 && r.msdu.msdu_src_mac == sta27);
-        check("agg-flipped: sta1 pair ABSENT", !has_pair(r, 42, sta42));
+        // 同前:MSDU CRC32 压过 PB 块 CRC —— 聚合站点块 CRC 坏但 MSDU CRC 好时仍学习
+        check("agg-flipped(PB CRC 坏/MSDU CRC 好): sta1 pair kept", has_pair(r, 42, sta42));
+        check("agg-flipped: MSDU CRC32 仍为 Ok", msdu_crc_state(r.msdu) == MsduCrcState::Ok);
         // 新增:CRC 状态检查
         bool has_crc_fail = std::any_of(r.mpdu.pb_crc_oks.begin(), r.mpdu.pb_crc_oks.end(),
                                         [](bool ok) { return !ok; });
@@ -230,6 +249,37 @@ int main(int argc, char** argv) {
         bool has_crc_fail = std::any_of(r.mpdu.pb_crc_oks.begin(), r.mpdu.pb_crc_oks.end(),
                                         [](bool ok) { return !ok; });
         check("agg-control: pb_crc_oks all pass", !has_crc_fail);
+    }
+    // CRC32 FAIL must independently block learning even when the containing PB CRC24 is valid.
+    {
+        BplcFrame fr;
+        fr.meta.from_raw = true;
+        fr.data = QByteArray(1, char(0)) + build_dlofdma(false, cco, sta27, sta42, true);
+        MsduState msdu;
+        const ParseResult r = parser.parse(fr, msdu, filt);
+        dump_pairs("msdu-crc-fail", r);
+        const bool pb_all_ok = std::all_of(r.mpdu.pb_crc_oks.begin(), r.mpdu.pb_crc_oks.end(),
+                                           [](bool ok) { return ok; });
+        check("msdu-crc-fail: frame accepted", r.accept);
+        check("msdu-crc-fail: PB CRCs all pass", pb_all_ok);
+        check("msdu-crc-fail: station 0 valid pair retained",
+              r.msdu.msdu_src_tei == 27 && r.msdu.msdu_src_mac == sta27);
+        check("msdu-crc-fail: station 1 pair blocked", !has_pair(r, 42, sta42));
+    }
+    {
+        BplcFrame fr;
+        fr.meta.from_raw = true;
+        fr.data = QByteArray(1, char(0)) + build_dlofdma_agg(false, cco, sta27, sta42, true);
+        MsduState msdu;
+        const ParseResult r = parser.parse(fr, msdu, filt);
+        dump_pairs("agg-msdu-crc-fail", r);
+        const bool pb_all_ok = std::all_of(r.mpdu.pb_crc_oks.begin(), r.mpdu.pb_crc_oks.end(),
+                                           [](bool ok) { return ok; });
+        check("agg-msdu-crc-fail: frame accepted", r.accept);
+        check("agg-msdu-crc-fail: PB CRCs all pass", pb_all_ok);
+        check("agg-msdu-crc-fail: station 0 valid pair retained",
+              r.msdu.msdu_src_tei == 27 && r.msdu.msdu_src_mac == sta27);
+        check("agg-msdu-crc-fail: station 1 pair blocked", !has_pair(r, 42, sta42));
     }
     std::printf(fails ? "RESULT: %d FAILURES\n" : "RESULT: ALL PASS\n", fails);
     return fails ? 1 : 0;
