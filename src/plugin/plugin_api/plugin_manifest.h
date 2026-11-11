@@ -24,6 +24,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
+#include <QSysInfo>
 #include <QVariant>
 #include <cstdint>
 
@@ -99,6 +100,32 @@ struct PluginManifest {
     bool    valid = false;
     QString error;         ///< valid=false 时的原因
 };
+
+/// @brief 主程序运行平台标识 "<os>-<arch>"(市场 feed platforms / plugin.json 按平台 abi 的键)
+/// @details os = windows | macos | linux;arch 取**编译目标**架构(不是宿主 CPU):
+///   x86_64 | arm64,其它架构回落 QSysInfo::buildCpuArchitecture()(如 i386 / riscv64)。
+///   按编译目标取值:Windows on ARM 上跑 x64 仿真版时仍需 x86_64 插件。
+///   取值如 windows-x86_64 / windows-arm64 / linux-x86_64 / linux-arm64 /
+///   macos-x86_64 / macos-arm64。
+inline QString plugin_host_platform() {
+    const QString os =
+#if defined(Q_OS_WIN)
+        QStringLiteral("windows");
+#elif defined(Q_OS_MACOS)
+        QStringLiteral("macos");
+#else
+        QStringLiteral("linux");
+#endif
+    const QString arch =
+#if defined(Q_PROCESSOR_X86_64)
+        QStringLiteral("x86_64");
+#elif defined(Q_PROCESSOR_ARM_64)
+        QStringLiteral("arm64");
+#else
+        QSysInfo::buildCpuArchitecture();
+#endif
+    return os + QLatin1Char('-') + arch;
+}
 
 /// @brief 主程序 native 插件 ABI 标识(编译器 + Qt 大版本 + 架构)
 /// @details native 插件是编译产物,其二进制 ABI 由「Qt 大版本 + 编译器 + 架构」决定。
@@ -208,19 +235,11 @@ inline PluginManifest read_plugin_manifest(const QString& plugin_dir) {
     m.runtime      = o.value(QStringLiteral("runtime")).toString();
     // abi 支持两种写法:字符串(单平台包,向后兼容)或按平台的对象
     // {"linux-x86_64": "qt6.4.2-gcc-x64", "windows-x86_64": "qt6.10.1-mingw-x64"};
-    // 解析为当前平台的值,存入 m.abi。
+    // 按 plugin_host_platform()(如 linux-arm64)解析为当前平台的值,存入 m.abi。
     {
         const QJsonValue abi_v = o.value(QStringLiteral("abi"));
         if (abi_v.isObject()) {
-            const char* plat =
-#if defined(Q_OS_WIN)
-                "windows-x86_64";
-#elif defined(Q_OS_MACOS)
-                "macos-x86_64";
-#else
-                "linux-x86_64";
-#endif
-            m.abi = abi_v.toObject().value(QString::fromLatin1(plat)).toString();
+            m.abi = abi_v.toObject().value(plugin_host_platform()).toString();
         } else {
             m.abi = abi_v.toString();
         }

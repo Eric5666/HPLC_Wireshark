@@ -58,24 +58,30 @@ int main(int argc, char** argv) {
     // 最新条目 1.3.0 目前只发了 Windows 包;本机取 latest_compatible
     CHECK(cov.latest()->version == "1.3.0", "cov latest 1.3.0");
     const MarketVersion* cov_compat = cov.latest_compatible();
-#if defined(Q_OS_WIN)
-    // Windows:1.3.0 带 qt6-mingw-x64 ABI,当前平台可装
-    CHECK(cov_compat != nullptr && cov_compat->version == "1.3.0",
-          "cov latest_compatible 1.3.0 on windows");
-#else
-    // Linux:1.3.0 只标注了 windows 平台,回落到 1.1.0(qt6-gcc-x64)
-    CHECK(cov_compat != nullptr && cov_compat->version == "1.1.0",
-          "cov latest_compatible 1.1.0 on linux");
-#endif
-    CHECK(cov_compat->platforms.contains(
-              PluginMarket::current_platform()),
-          "cov compat platforms has current");
-    CHECK(PluginMarket::version_platform_ok(*cov_compat),
-          "cov compat version platform ok");
-    CHECK(PluginMarket::version_abi_ok(*cov_compat),
-          "cov compat version abi ok");
-    CHECK(cov_compat->abi == plugin_host_abi(),
-          "cov compat abi == host abi");
+    const QString plat = PluginMarket::current_platform();
+    if (plat == QLatin1String("windows-x86_64")) {
+        // Windows x64:1.3.0 带 qt6-mingw-x64 ABI,当前平台可装
+        CHECK(cov_compat != nullptr && cov_compat->version == "1.3.0",
+              "cov latest_compatible 1.3.0 on windows");
+    } else if (plat == QLatin1String("linux-x86_64")) {
+        // Linux x64:1.3.0 只标注了 windows 平台,回落到 1.1.0(qt6-gcc-x64)
+        CHECK(cov_compat != nullptr && cov_compat->version == "1.1.0",
+              "cov latest_compatible 1.1.0 on linux");
+    } else {
+        // arm64 等:feed 未发对应平台的 native 包 → 无兼容版本(被过滤)
+        CHECK(cov_compat == nullptr,
+              "cov no compatible version on non-x86_64 platform");
+    }
+    if (cov_compat) {
+        CHECK(cov_compat->platforms.contains(plat),
+              "cov compat platforms has current");
+        CHECK(PluginMarket::version_platform_ok(*cov_compat),
+              "cov compat version platform ok");
+        CHECK(PluginMarket::version_abi_ok(*cov_compat),
+              "cov compat version abi ok");
+        CHECK(cov_compat->abi == plugin_host_abi(),
+              "cov compat abi == host abi");
+    }
     // 不兼容平台被过滤
     MarketVersion win_only = *cov.latest();
     win_only.platforms = QStringList{"windows-x86_64"};
