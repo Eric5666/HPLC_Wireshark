@@ -191,14 +191,22 @@ int main(int argc, char** argv) {
               r.msdu.msdu_src_tei == 27 && r.msdu.msdu_src_mac == sta27);
         check(flip ? "flipped: valid MSDU CRC overrides PB CRC FAIL; sta1 learned" : "control: sta1 pair",
               has_pair(r, 42, sta42));
+        if (flip) {
+            check("flipped: STA1 AssocReq topo event retained",
+                  r.msdu.topo_extra_events.size() == 1
+                  && r.msdu.topo_extra_events[0].kind == TopoEventKind::AssocReq
+                  && r.msdu.topo_extra_events[0].nodes.size() == 1
+                  && r.msdu.topo_extra_events[0].nodes[0].tei == 0
+                  && r.msdu.topo_extra_events[0].nodes[0].mac == sta42);
+        }
         // 新增: CRC 状态检查
         bool has_crc_fail = std::any_of(r.mpdu.pb_crc_oks.begin(), r.mpdu.pb_crc_oks.end(),
                                         [](bool ok) { return !ok; });
         check(flip ? "flipped: pb_crc_oks has failure" : "control: pb_crc_oks all pass",
               flip ? has_crc_fail : !has_crc_fail);
     }
-    // 聚合分支:站点 1 为聚合 PB(级联记录流),翻转站点 1 块 CRC 后,
-    // 组装器应剔除与坏块相交的级联记录(站点 1 对不被学习);
+    // 聚合分支:站点 1 为聚合 PB(级联记录流),即使站点 1 块 CRC24 翻转,
+    // 只要 MSDU CRC32 有效,仍应学习站点 1 对及其拓扑事件(CRC32 优先);
     // 站点 0(好块,帧级通用路径)不受影响;帧本身仍 accept(CRC 错靠 pb_crc_oks 标红)。
     {
         BplcFrame fr;
