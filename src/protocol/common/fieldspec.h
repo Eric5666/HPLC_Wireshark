@@ -49,14 +49,22 @@ inline void add_fields(QVector<MsduFieldNode>& out, const QByteArray& d, int bas
         node.name = QStringLiteral("%1 [%2b]").arg(QLatin1String(s.name)).arg(s.len);
         // 宽字段(len>64)不走 get_bits:1ULL<<i 在 i>=64 时移位 UB,分支守卫又会
         // 直接返 0 恒显 0;直接给覆盖字节的十六进制(字节序与原值一致)。
-        // 注意:(a) s.bit!=0 时首尾字节里不属于本字段的邻位会一起被十六进制化
-        // (如 125 位 bit=3 的字段),RSV 显示可接受;(b) 不再走 fmt_val,丢了各字段
-        // 的 fmt 区分(HEX4 的 0x 前缀、DEC 的十进制),统一显 hex,接受的格式变化。
+        // 位序 LSB 在前:字段从 s.bit 起连续向高位走;首字节去掉低 s.bit 位
+        // (属于前一个字段),末字节只留本字段占的低 tail 位(tail=(s.bit+s.len)%8,
+        // tail 为 0 表示整字节都属于本字段)。例如 125 位 bit=3 的 RSV3:
+        // CarrierFreq=1、保留位全 0 时首字节 01 会被屏掉,不再误显"保留位非零"。
+        // (b) 不再走 fmt_val,丢了各字段的 fmt 区分(HEX4 的 0x 前缀、DEC 的
+        // 十进制),统一显 hex,接受的格式变化。
         QString val;
-        if (s.len > 64)
-            val = QString::fromLatin1(
-                d.mid(start_byte, end_byte - start_byte + 1).toHex(' ').toUpper());
-        else
+        if (s.len > 64) {
+            QByteArray raw = d.mid(start_byte, end_byte - start_byte + 1);
+            raw[0] = char(quint8(raw[0]) & quint8(0xFF << s.bit));
+            const int tail = (s.bit + s.len) % 8;
+            if (tail)
+                raw[raw.size() - 1] =
+                    char(quint8(raw[raw.size() - 1]) & quint8((1u << tail) - 1));
+            val = QString::fromLatin1(raw.toHex(' ').toUpper());
+        } else
             val = fmt_val(s.fmt, get_bits(d, start_byte, s.bit, s.len));
         node.value = val;
         // 位域覆盖的字节区间(相对数据起点;供 UI 高亮换算)

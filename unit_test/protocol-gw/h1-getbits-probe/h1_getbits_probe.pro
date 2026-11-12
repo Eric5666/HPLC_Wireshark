@@ -10,7 +10,7 @@ INCLUDEPATH += $$R $$R/common $$R/protocol $$R/protocol/common \
                $$R/protocol/gw_protocol/gw_2026/ack \
                $$R/protocol/gw_protocol/gw_2022 $$R/protocol/gw_protocol/gw_2022/sof \
                $$R/protocol/gw_protocol/gw_2022/beacon $$R/protocol/gw_protocol/gw_2022/coord \
-               $$R/protocol/gw_protocol/gw_2022/ack $$R/ui \
+               $$R/protocol/gw_protocol/gw_2022/ack $$R/ui $$R/topo \
                $$PWD/../../../3rdparty/qslog
 SOURCES += main.cpp \
            $$R/protocol/gw_protocol/gw_2026/gw_2026_parser.cpp \
@@ -29,6 +29,7 @@ SOURCES += main.cpp \
            $$R/protocol/gw_protocol/gw_2022/gw_2022_msdu_parser.cpp \
            $$R/protocol/protocolfactory.cpp \
            $$R/protocol/protocol_tree_builder.cpp \
+           $$R/topo/topo_state.cpp \
            $$R/ui/protocoltree.cpp \
            $$R/common/i18n.cpp \
            $$PWD/../../../3rdparty/qslog/QsLog.cpp \

@@ -23,15 +23,22 @@
 | `gw2026-carrier-rfdl-elen8` | GW2026 载波发现列表 RFDL IE elen=8（msdu:826-870） | 解析不崩，摘要含“ (站点属性截断)”，`tei_mac_pairs` 为空、载波成功率均为 -1 |
 | `gw2022-msdu-assoccnf-12B` | GW2022 MSDU AssocCnf b=12B（msdu:1232-1255） | 解析不崩，摘要含“ (关联确认截断)”，无事件、CCO 不更新、节点/路由为空 |
 | `gw2026-msdu-assoccnf-12B` | GW2026 MSDU AssocCnf b=12B（msdu:1370-1395） | 同上，另 `tei_mac_pairs` 为空 |
-| `wide-field-hex-dump` | `add_fields` 用 80 位 DEC 与 125 位 bit=3 的保留字段喂 26B 数据 | 两字段均显覆盖字节十六进制（不再恒 0） |
+| `wide-field-hex-dump` | `add_fields` 用 80 位 DEC 与 125 位 bit=3 的保留字段喂 26B 数据 | 两字段均显覆盖字节十六进制（不再恒 0）；125 位字段首字节邻位被屏蔽（`0x0A`→`0x08`） |
 | `getbits-qint64-guard` | `get_bits` 喂 `start_byte=INT_MAX-2` / `start_bit=INT_MAX` / `bit_len=65` | 均返 0，不崩（旧守卫 int 溢出会绕过检查） |
 | `nw2026-beacon-stacap-5B` | NW2026 信标 STA Cap 条目截到 5B（旧引用 beacon:382） | 解析不崩，`tei_mac_pairs` 为空 |
+| `rsv3-mask-cf1-zero` / `rsv3-mask-top-bit` / `rsv3-mask-low-bit` | RSV3 屏蔽（CarrierFreq=1 保留位全 0 / 仅最高位 / 仅最低位） | 全 00 / 末字节 80 / 首字节 08 |
+| `discover-rates-16/18/19/20/28/29B` | GW2022 发现列表 MMe 体长六档（陷阱真值上行 85、下行 77、最小 66） | 分档：上行 ≥19B、下行 ≥20B、最小 ≥29B 才读；`comm_rates` 整条 ≥20B 才发；任一缺失摘要追加“ (成功率截断)” |
+| `discover-topostate-min-kept` | 先 29B 体、再 20B 体喂 TopoState | 20B 体不洗掉节点原先的 min 真值（逐项覆盖） |
+| `gw2022/gw2026-assocreq-0/5/6B` | AssocReq 体 0/5/6B | <6B 不生成事件、摘要追加“ (关联请求截断)”；6B 正常生成 |
+| `gw2022/gw2026-chgproxy-0/19/20B` | ChangeProxyCnf 体 0/19/20B | <20B 不生成事件、摘要追加“ (代理变更确认截断)”；20B 正常生成 |
+| `gw2022/gw2026-assocgather-0/15/16B` | AssocGatherInd 体 0/15/16B | <16B 不生成事件、摘要追加“ (关联汇总截断)”；16B 正常生成 |
 
-共 18 个用例。另有 H1 后续修复（`fix/h1-followup-truncation-gates`）：
+共 43 个用例。另有 H1 后续修复（`fix/h1-getbits-bounds-check`）：
 
 4. `src/protocol/gw_protocol/gw_2022/gw_2022_msdu_parser.cpp` 与 `gw_2026/gw_2026_msdu_parser.cpp`：站点属性 IE 不足 12B（无线）/17B（载波）时跳过拓扑采集与 TEI→MAC 学习，摘要追加“(站点属性截断)”；关联确认体不足 18B 时跳过事件与 CCO 更新，摘要追加“(关联确认截断)”；字段树渲染不受影响。
 5. `src/protocol/common/fieldspec.h`：`add_fields` 对 len>64 的字段直接给覆盖字节十六进制，不再走 `get_bits`（旧语义恒显 0）；DEC 字段改后统一显 hex，接受的格式变化。
 6. `src/protocol/common/fieldtools.h`：`get_bits` 守卫改用 qint64 算 `last_byte`，堵 int 加法溢出。
+7. 第四份复核的后续修复（`fix/h1-getbits-bounds-check`，d237e88 之后一提交）：`fieldspec.h` 宽字段屏蔽首尾邻位；`gw_2026_sof_parser.cpp` 的 eFC 16B 注释按“文档类推、仍待实包确认”收紧措辞（拒收行为不动）；GW2022 发现列表成功率分档门（19/20/29B）+ `topo_state.cpp` 逐项覆盖；AssocReq/ChangeProxyCnf/AssocGatherInd 三处截断门（6B/20B/16B）。
 
 ## 运行
 

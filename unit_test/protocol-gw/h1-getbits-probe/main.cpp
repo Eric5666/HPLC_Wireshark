@@ -11,6 +11,11 @@
 // 且 TEI→MAC 学习一并跳过;(g)d7/d8 12B AssocCnf 不生成事件、不更新 CCO;
 // (h)d9 宽字段(len>64)显覆盖字节十六进制,不再恒 0;(i)d10 get_bits 守卫
 // 用 qint64 算 last_byte,超大偏移不再 int 溢出绕过检查。
+// 第四份复核的后续修复(问题 3/5/新问题/三小项):(j)d11 RSV3 屏蔽:
+// CarrierFreq=1、保留位全 0 时首字节 01 被屏掉,不再误显"保留位非零";
+// (k)d12/d13 GW2022 发现列表成功率分档门(19/20/29B)与 TopoState 逐项
+// 覆盖回归点;(l)d14/d15/d16 三小项三处门(AssocReq 6B、ChangeProxyCnf
+// 20B、AssocGatherInd 16B),截断不生成事件。
 // 另渲染一帧截断 OFDMA 帧的字段树,验证 gw_2026_tree.cpp 的 eFC 循环
 // 在 rsz<32 时被跳过(纵深防御)。
 // 用法:./build.sh (构建 + 运行;构建时 qmake 传 SANITIZERS=address)。
@@ -28,6 +33,7 @@
 #include "gw_2026_msdu_parser.h"
 #include "nw_2026_beacon_parser.h"
 #include "protocoltree.h"
+#include "topo_state.h"
 #include "crc.h"
 
 static int g_passes = 0;
@@ -393,7 +399,8 @@ int main(int argc, char* argv[]) {
     }
 
     // --- (d9) >64 位保留字段不走 get_bits,显覆盖字节十六进制 (fieldspec:48) ---
-    // 80 位 DEC 旧语义恒显 0;125 位 bit=3 的字段首尾邻位混入,RSV 显示可接受。
+    // 80 位 DEC 旧语义恒显 0;125 位 bit=3 的字段首字节邻位被屏蔽(0x0A→0x08),
+    // 末字节 tail=0 不处理。第四份复核的屏蔽修复:首字节去掉低 s.bit 位。
     {
         QByteArray d(26, 0);
         for (int i = 0; i < d.size(); ++i) d[i] = (char)i;   // 0x00..0x19
@@ -406,7 +413,7 @@ int main(int argc, char* argv[]) {
         check("wide-field-hex-dump",
               nodes.size() == 2
                   && nodes[0].value == QStringLiteral("00 01 02 03 04 05 06 07 08 09")
-                  && nodes[1].value == QStringLiteral("0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19"),
+                  && nodes[1].value == QStringLiteral("08 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19"),
               QStringLiteral("n=%1 v0=%2 v1=%3").arg(nodes.size())
                   .arg(nodes.size() > 0 ? nodes[0].value : QStringLiteral("-"))
                   .arg(nodes.size() > 1 ? nodes[1].value : QStringLiteral("-")));
@@ -423,6 +430,310 @@ int main(int argc, char* argv[]) {
         check("getbits-qint64-guard",
               v1 == 0 && v2 == 0 && v3 == 0,
               QStringLiteral("v1=%1 v2=%2 v3=%3").arg(v1).arg(v2).arg(v3));
+    }
+
+    // --- (d11) RSV3 屏蔽:宽字段首字节邻位去掉 (fieldspec 屏蔽分支) ---
+    // 布局按 kMMeAssocGatherIndSpec(SPLC-4 表102):CarrierFreq byte12 低 3 位、
+    // RSV3 从 bit 3 起 125 位;add_fields(mme, base=6),RSV3 占 mme[18..33]。
+    {
+        static const FieldSpec kRsv3Spec[] = {
+            {"CarrierFreq", 12, 0, 3, Fmt::DEC},
+            {"RSV3", 12, 3, 125, Fmt::HEX4},
+        };
+        auto rsv3_of = [](const QByteArray& mme) {
+            QVector<MsduFieldNode> nodes;
+            add_fields(nodes, mme, 6, kRsv3Spec, 2);
+            return nodes.size() == 2 ? nodes[1].value : QStringLiteral("-");
+        };
+        const QString kAllZero =
+            QStringLiteral("00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00");
+        {
+            QByteArray mme(34, 0);
+            mme[18] = 0x01;   // CarrierFreq=1,保留位全 0 → 首字节 01 应被屏掉
+            check("rsv3-mask-cf1-zero", rsv3_of(mme) == kAllZero,
+                  QStringLiteral("rsv3=%1").arg(rsv3_of(mme)));
+        }
+        {
+            QByteArray mme(34, 0);
+            mme[33] = (char)0x80;   // 仅保留区最高位 → 末字节 80
+            check("rsv3-mask-top-bit",
+                  rsv3_of(mme) == QStringLiteral("00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80"),
+                  QStringLiteral("rsv3=%1").arg(rsv3_of(mme)));
+        }
+        {
+            QByteArray mme(34, 0);
+            mme[18] = 0x08;   // 仅保留区最低位(bit3) → 首字节 08
+            check("rsv3-mask-low-bit",
+                  rsv3_of(mme) == QStringLiteral("08 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"),
+                  QStringLiteral("rsv3=%1").arg(rsv3_of(mme)));
+        }
+    }
+
+    // --- (d12) GW2022 发现列表成功率分档门 (msdu:1516-1566) ---
+    // b=MMe 体(msdu_body.mid(4));陷阱真值上行 85@b[18]、下行 77@b[19]、
+    // 最小 66@b[28]、TEI=9、代理 TEI=2。分档:上行 ≥19B、下行 ≥20B、
+    // 最小 ≥29B;comm_rates 整条 ≥20B 才发;任一缺失摘要追加" (成功率截断)"。
+    {
+        auto make_discover = [](int blen) {
+            QByteArray body(16 + 4 + blen, 0);
+            quint8* p = reinterpret_cast<quint8*>(body.data());
+            p[7] = 0x00;                   // msdu_type = NET_MANAGEMENT
+            p[8] = (quint8)(4 + blen); p[9] = 0x00;  // msdu_len=4+blen
+            p[16] = 0x08;                  // MMType=0x08 (MME_DISCOVER_NODE_LIST)
+            quint8* b = p + 20;
+            b[0] = 0x09; b[1] = 0x20;      // sta_tei=9,proxy_tei=2
+            b[4] = 0x00; b[5] = 0x11; b[6] = 0x22; b[7] = 0x33; b[8] = 0x44; b[9] = 0x55;
+            b[10] = 0x66; b[11] = 0x77; b[12] = 0x88; b[13] = 0x99; b[14] = 0xAA; b[15] = 0xBB;
+            if (blen > 18) b[18] = 85;
+            if (blen > 19) b[19] = 77;
+            if (blen > 28) b[28] = 66;
+            return body;
+        };
+        auto check_discover = [&](int blen, int exp_up, int exp_down, int exp_min,
+                                  bool exp_cr, bool exp_suffix) {
+            auto info = GW_2022_MsduParser::parse(make_discover(blen));
+            char name[32];
+            std::snprintf(name, sizeof name, "discover-rates-%dB", blen);
+            const bool cr_ok = exp_cr
+                ? (info.topo_event.comm_rates.size() == 1
+                   && info.topo_event.comm_rates[0].tei == 9
+                   && info.topo_event.comm_rates[0].up == 85
+                   && info.topo_event.comm_rates[0].down == 77)
+                : info.topo_event.comm_rates.isEmpty();
+            const bool suffix_ok = exp_suffix
+                ? info.summary.contains(QStringLiteral(" (成功率截断)"))
+                : !info.summary.contains(QStringLiteral(" (成功率截断)"));
+            check(name,
+                  info.present && info.topo_event.kind == TopoEventKind::DiscoverList
+                      && info.topo_event.nodes.size() == 1
+                      && info.topo_event.proxy_comm_rate == exp_up
+                      && info.topo_event.proxy_down_comm_rate == exp_down
+                      && info.topo_event.min_comm_rate == exp_min
+                      && cr_ok && suffix_ok,
+                  QStringLiteral("up=%1 down=%2 min=%3 cr=%4 summary=%5")
+                      .arg(info.topo_event.proxy_comm_rate)
+                      .arg(info.topo_event.proxy_down_comm_rate)
+                      .arg(info.topo_event.min_comm_rate)
+                      .arg(info.topo_event.comm_rates.size()).arg(info.summary));
+        };
+        check_discover(16, -1, -1, -1, false, true);
+        check_discover(18, -1, -1, -1, false, true);
+        check_discover(19, 85, -1, -1, false, true);
+        check_discover(20, 85, 77, -1, true, true);
+        check_discover(28, 85, 77, -1, true, true);
+        check_discover(29, 85, 77, 66, true, false);
+    }
+
+    // --- (d13) TopoState 逐项覆盖回归点:20B 体不洗掉节点原先的 min 真值 ---
+    {
+        TopoState st;
+        auto mk = [](int blen) {
+            QByteArray body(16 + 4 + blen, 0);
+            quint8* p = reinterpret_cast<quint8*>(body.data());
+            p[7] = 0x00;
+            p[8] = (quint8)(4 + blen); p[9] = 0x00;
+            p[16] = 0x08;
+            quint8* b = p + 20;
+            b[0] = 0x09; b[1] = 0x20;
+            b[4] = 0x00; b[5] = 0x11; b[6] = 0x22; b[7] = 0x33; b[8] = 0x44; b[9] = 0x55;
+            b[10] = 0x66; b[11] = 0x77; b[12] = 0x88; b[13] = 0x99; b[14] = 0xAA; b[15] = 0xBB;
+            if (blen > 18) b[18] = 85;
+            if (blen > 19) b[19] = 77;
+            if (blen > 28) b[28] = 66;
+            return body;
+        };
+        TopoEvent e29 = GW_2022_MsduParser::parse(mk(29)).topo_event;
+        e29.nid = 1;
+        st.apply(e29);
+        TopoEvent e20 = GW_2022_MsduParser::parse(mk(20)).topo_event;
+        e20.nid = 1;
+        st.apply(e20);
+        const TopoNode& n9 = st.nodes[9];
+        check("discover-topostate-min-kept",
+              n9.proxy_comm_rate == 85 && n9.proxy_down_comm_rate == 77
+                  && n9.min_comm_rate == 66 && n9.comm_rate_known,
+              QStringLiteral("up=%1 down=%2 min=%3 known=%4")
+                  .arg(n9.proxy_comm_rate).arg(n9.proxy_down_comm_rate)
+                  .arg(n9.min_comm_rate).arg(n9.comm_rate_known));
+    }
+
+    // --- (d14) 三小项:AssocReq 体不足 6B 跳过事件 (gw_2022:1167 / gw_2026:1310) ---
+    {
+        auto make_assoc_req = [](int blen) {
+            QByteArray body(16 + 4 + blen, 0);
+            quint8* p = reinterpret_cast<quint8*>(body.data());
+            p[7] = 0x00;                   // NET_MANAGEMENT
+            p[8] = (quint8)(4 + blen); p[9] = 0x00;  // msdu_len=4+blen
+            p[16] = 0x00;                  // MMType=0x00 (MME_ASSOC_REQ)
+            quint8* b = p + 20;
+            for (int i = 0; i < blen && i < 6; ++i) b[i] = (quint8)(0x11 + i * 0x11);
+            return body;
+        };
+        {
+            auto info = GW_2022_MsduParser::parse(make_assoc_req(0));
+            check("gw2022-assocreq-0B",
+                  info.present && info.topo_event.kind == TopoEventKind::Other
+                      && info.summary.contains(QStringLiteral(" (关联请求截断)")),
+                  QStringLiteral("kind=%1 summary=%2")
+                      .arg((int)info.topo_event.kind).arg(info.summary));
+        }
+        {
+            auto info = GW_2022_MsduParser::parse(make_assoc_req(5));
+            check("gw2022-assocreq-5B-gate",
+                  info.present && info.topo_event.kind == TopoEventKind::Other
+                      && info.summary.contains(QStringLiteral(" (关联请求截断)")),
+                  QStringLiteral("kind=%1 sta_mac=0x%2 summary=%3")
+                      .arg((int)info.topo_event.kind).arg(info.sta_mac, 0, 16)
+                      .arg(info.summary));
+        }
+        {
+            auto info = GW_2022_MsduParser::parse(make_assoc_req(6));
+            check("gw2022-assocreq-6B",
+                  info.present && info.topo_event.kind == TopoEventKind::AssocReq
+                      && info.topo_event.nodes.size() == 1
+                      && !info.summary.contains(QStringLiteral(" (关联请求截断)")),
+                  QStringLiteral("kind=%1 nodes=%2 desc=%3")
+                      .arg((int)info.topo_event.kind).arg(info.topo_event.nodes.size())
+                      .arg(info.topo_event.desc));
+        }
+        {
+            auto info = GW_2026_MsduParser::parse(make_assoc_req(0));
+            check("gw2026-assocreq-0B",
+                  info.present && info.topo_event.kind == TopoEventKind::Other
+                      && info.summary.contains(QStringLiteral(" (关联请求截断)")),
+                  QStringLiteral("kind=%1 summary=%2")
+                      .arg((int)info.topo_event.kind).arg(info.summary));
+        }
+        {
+            auto info = GW_2026_MsduParser::parse(make_assoc_req(6));
+            check("gw2026-assocreq-6B",
+                  info.present && info.topo_event.kind == TopoEventKind::AssocReq
+                      && info.topo_event.nodes.size() == 1
+                      && !info.summary.contains(QStringLiteral(" (关联请求截断)")),
+                  QStringLiteral("kind=%1 nodes=%2 desc=%3")
+                      .arg((int)info.topo_event.kind).arg(info.topo_event.nodes.size())
+                      .arg(info.topo_event.desc));
+        }
+    }
+
+    // --- (d15) 三小项:ChangeProxyCnf 体不足 20B 跳过事件 (gw_2022:1763 / gw_2026:1714) ---
+    {
+        auto make_chg_cnf = [](int blen) {
+            QByteArray body(16 + 4 + blen, 0);
+            quint8* p = reinterpret_cast<quint8*>(body.data());
+            p[7] = 0x00;
+            p[8] = (quint8)(4 + blen); p[9] = 0x00;
+            p[16] = 0x04;                  // MMType=0x04 (MME_CHANGE_PROXY_CNF)
+            quint8* b = p + 20;
+            if (blen > 4) b[4] = 0x09;     // sta_tei=9
+            if (blen > 6) b[6] = 0x05;     // proxy_tei=5
+            return body;
+        };
+        {
+            auto info = GW_2022_MsduParser::parse(make_chg_cnf(0));
+            check("gw2022-chgproxy-0B",
+                  info.present && info.topo_event.kind == TopoEventKind::Other
+                      && info.summary.contains(QStringLiteral(" (代理变更确认截断)")),
+                  QStringLiteral("kind=%1 summary=%2")
+                      .arg((int)info.topo_event.kind).arg(info.summary));
+        }
+        {
+            auto info = GW_2022_MsduParser::parse(make_chg_cnf(19));
+            check("gw2022-chgproxy-19B",
+                  info.present && info.topo_event.kind == TopoEventKind::Other
+                      && info.summary.contains(QStringLiteral(" (代理变更确认截断)")),
+                  QStringLiteral("kind=%1 summary=%2")
+                      .arg((int)info.topo_event.kind).arg(info.summary));
+        }
+        {
+            auto info = GW_2022_MsduParser::parse(make_chg_cnf(20));
+            check("gw2022-chgproxy-20B",
+                  info.present && info.topo_event.kind == TopoEventKind::ChangeProxyCnf
+                      && info.topo_event.desc.contains(QStringLiteral("STA TEI=9"))
+                      && !info.summary.contains(QStringLiteral(" (代理变更确认截断)")),
+                  QStringLiteral("kind=%1 desc=%2")
+                      .arg((int)info.topo_event.kind).arg(info.topo_event.desc));
+        }
+        {
+            auto info = GW_2026_MsduParser::parse(make_chg_cnf(0));
+            check("gw2026-chgproxy-0B",
+                  info.present && info.topo_event.kind == TopoEventKind::Other
+                      && info.summary.contains(QStringLiteral(" (代理变更确认截断)")),
+                  QStringLiteral("kind=%1 summary=%2")
+                      .arg((int)info.topo_event.kind).arg(info.summary));
+        }
+        {
+            auto info = GW_2026_MsduParser::parse(make_chg_cnf(20));
+            check("gw2026-chgproxy-20B",
+                  info.present && info.topo_event.kind == TopoEventKind::ChangeProxyCnf
+                      && info.topo_event.desc.contains(QStringLiteral("STA TEI=9"))
+                      && !info.summary.contains(QStringLiteral(" (代理变更确认截断)")),
+                  QStringLiteral("kind=%1 desc=%2")
+                      .arg((int)info.topo_event.kind).arg(info.topo_event.desc));
+        }
+    }
+
+    // --- (d16) 三小项:AssocGatherInd 体不足 16B 跳过事件 (gw_2022:1348 / gw_2026:1495) ---
+    {
+        auto make_gather = [](int blen) {
+            QByteArray body(16 + 4 + blen, 0);
+            quint8* p = reinterpret_cast<quint8*>(body.data());
+            p[7] = 0x00;
+            p[8] = (quint8)(4 + blen); p[9] = 0x00;
+            p[16] = 0x02;                  // MMType=0x02 (MME_ASSOC_GATHER_IND)
+            quint8* b = p + 20;
+            if (blen > 2) {                // gcco_mac 陷阱值
+                b[2] = 0x66; b[3] = 0x77; b[4] = 0x88; b[5] = 0x99; b[6] = 0xAA; b[7] = 0xBB;
+            }
+            if (blen > 8) b[8] = 0x05;     // gproxy_tei=5
+            return body;
+        };
+        {
+            auto info = GW_2022_MsduParser::parse(make_gather(0));
+            check("gw2022-assocgather-0B",
+                  info.present && info.topo_event.kind == TopoEventKind::Other
+                      && info.summary.contains(QStringLiteral(" (关联汇总截断)")),
+                  QStringLiteral("kind=%1 summary=%2")
+                      .arg((int)info.topo_event.kind).arg(info.summary));
+        }
+        {
+            auto info = GW_2022_MsduParser::parse(make_gather(15));
+            check("gw2022-assocgather-15B",
+                  info.present && info.topo_event.kind == TopoEventKind::Other
+                      && info.summary.contains(QStringLiteral(" (关联汇总截断)")),
+                  QStringLiteral("kind=%1 summary=%2")
+                      .arg((int)info.topo_event.kind).arg(info.summary));
+        }
+        {
+            auto info = GW_2022_MsduParser::parse(make_gather(16));
+            check("gw2022-assocgather-16B",
+                  info.present && info.topo_event.kind == TopoEventKind::AssocGatherInd
+                      && info.topo_event.cco_mac != 0
+                      && info.topo_event.desc.contains(QStringLiteral("0 个站点入网"))
+                      && !info.summary.contains(QStringLiteral(" (关联汇总截断)")),
+                  QStringLiteral("kind=%1 cco=0x%2 desc=%3")
+                      .arg((int)info.topo_event.kind).arg(info.topo_event.cco_mac, 0, 16)
+                      .arg(info.topo_event.desc));
+        }
+        {
+            auto info = GW_2026_MsduParser::parse(make_gather(0));
+            check("gw2026-assocgather-0B",
+                  info.present && info.topo_event.kind == TopoEventKind::Other
+                      && info.summary.contains(QStringLiteral(" (关联汇总截断)")),
+                  QStringLiteral("kind=%1 summary=%2")
+                      .arg((int)info.topo_event.kind).arg(info.summary));
+        }
+        {
+            auto info = GW_2026_MsduParser::parse(make_gather(16));
+            check("gw2026-assocgather-16B",
+                  info.present && info.topo_event.kind == TopoEventKind::AssocGatherInd
+                      && info.topo_event.cco_mac != 0
+                      && info.topo_event.desc.contains(QStringLiteral("0 个站点入网"))
+                      && !info.summary.contains(QStringLiteral(" (关联汇总截断)")),
+                  QStringLiteral("kind=%1 cco=0x%2 desc=%3")
+                      .arg((int)info.topo_event.kind).arg(info.topo_event.cco_mac, 0, 16)
+                      .arg(info.topo_event.desc));
+        }
     }
 
     std::printf("RESULT: %d PASS, %d FAIL\n", g_passes, g_fails);

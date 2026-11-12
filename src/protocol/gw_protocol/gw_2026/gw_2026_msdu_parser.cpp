@@ -1314,7 +1314,12 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
                 add_fields(root.children, b, 0, kAssocReqSpec, kAssocReqSpecN, head_size + 4);
                 // STAMACAddr(0,0,48):关联请求源 TEI 未知(0)时,供 Source 列显示 STA-X [MAC]
                 out.sta_mac = get_bits(b, 0, 0, 48);
-                // 拓扑事件:关联请求(STA 正在入网;TEI 未分配,用 tei=0 承载 MAC)
+                // 拓扑事件:关联请求(STA 正在入网;TEI 未分配,用 tei=0 承载 MAC);
+                // 体不足 6B 时 MAC 读不全(越界读 0 记一条全零事件),跳过事件生成。
+                if (b.size() < 6) {
+                    pa::warn("gw_2026:truncated", QStringLiteral("assoc req %1B<6B").arg(b.size()));
+                    append_summary(out, trl::L(" (关联请求截断)"));
+                } else {
                 out.topo_event.kind = TopoEventKind::AssocReq;
                 out.topo_event.nodes.append({0, out.sta_mac});
                 // STA 重启检测用:关联请求由 STA 本人发出,MSDU 头 RestartCount 即该 STA 的;
@@ -1326,6 +1331,7 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
                 if (const QString reason = boot_reason_suffix(b); !reason.isEmpty())
                     out.topo_event.desc = trl::L("关联请求: STA %1 正在入网（%2）")
                         .arg(mac_str(out.sta_mac)).arg(reason);
+                }
                 MsduFieldNode mn;
                 mn.name  = QStringLiteral("ManufacturerInfo [144b]");
                 mn.value = bytes_hex(b, 24, 18);
@@ -1508,10 +1514,15 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
                 int sta_num = (int)get_bits(b, 11, 0, 8);  // 汇总站点数(51347)
                 int off = 16;                              // 站点信息起点
                 // 拓扑事件:关联汇总(批量站点入网 + 代理);仅 AssocResult=0(允许加入网络)时更新拓扑
+                // 体不足 16B(固定头口径)时结果字节读 0 撞上成功语义,跳过事件生成。
                 const quint8 gar = (quint8)get_bits(b, 0, 0, 8);
                 const quint16 gproxy_tei = (quint16)get_bits(b, 8, 0, 12);
                 const bool g_ok = (gar == 0);
-                if (g_ok) {
+                if (g_ok && b.size() < 16) {
+                    pa::warn("gw_2026:truncated", QStringLiteral("assoc gather ind %1B<16B").arg(b.size()));
+                    append_summary(out, trl::L(" (关联汇总截断)"));
+                }
+                if (g_ok && b.size() >= 16) {
                     const quint64 gcco_mac = (quint64)get_bits(b, 2, 0, 48);
                     out.topo_event.kind = TopoEventKind::AssocGatherInd;
                     if (gcco_mac) out.topo_event.cco_mac = gcco_mac;
@@ -1716,7 +1727,11 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
                 add_fields(root.children, b, 0, kChangeProxyCnfSpec,
                            kChangeProxyCnfSpecN, head_size + 4);
                 // 拓扑事件:代理变更确认(STA 换代理);仅 Result=0(成功)时更新拓扑
-                {
+                // 体不足 20B(固定头口径)时结果字节读 0 撞上成功语义,跳过事件生成。
+                if (b.size() < 20) {
+                    pa::warn("gw_2026:truncated", QStringLiteral("change proxy cnf %1B<20B").arg(b.size()));
+                    append_summary(out, trl::L(" (代理变更确认截断)"));
+                } else {
                     const quint8 pres = (quint8)get_bits(b, 0, 0, 8);
                     const quint16 sta_tei = (quint16)get_bits(b, 4, 0, 12);
                     const quint16 proxy_tei = (quint16)get_bits(b, 6, 0, 12);
@@ -2222,6 +2237,9 @@ struct I18nReg {
         trl::register_en(" (RFDL 截断)", " (RFDL truncated)");
         trl::register_en(" (站点属性截断)", " (Station Attribute truncated)");
         trl::register_en(" (关联确认截断)", " (Assoc confirm truncated)");
+        trl::register_en(" (关联请求截断)", " (Assoc Request truncated)");
+        trl::register_en(" (代理变更确认截断)", " (Change Proxy Confirm truncated)");
+        trl::register_en(" (关联汇总截断)", " (Assoc Gather truncated)");
         trl::register_en("发现列表消息", "Discovery List Message");
         trl::register_en("载波发现列表消息", "Carrier Discovery List Message");
         trl::register_en("信道评估参数更新", "Channel Evaluation Param Update");
