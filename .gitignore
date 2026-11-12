@@ -57,7 +57,7 @@ src/crash/tests/build_win/
 src/crash/tests/build_switch/
 *.dmp
 *.dmp.bak
-3rdparty/lua-5.4.6/
+3rdparty/lua-5.4.9/
 
 # 超大调试抓包不入库(73MB,仅本地调试;如需入库走 Git LFS)
 wireshark_support_plugins/test_splc2_mixed.pcap

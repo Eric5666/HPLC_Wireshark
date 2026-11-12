@@ -20,8 +20,8 @@ HEADERS += ../host/plugin_backend.h \
     ../host/native_backend.h \
     ../host/script_painter.h
 
-# Lua 5.4.6 (bundled)
-LUA_SRC = $$PWD/../../../3rdparty/lua-5.4.6/src
+# Lua 5.4.9 (bundled)
+LUA_SRC = $$PWD/../../../3rdparty/lua-5.4.9/src
 INCLUDEPATH += $$LUA_SRC
 LIBS += $$LUA_SRC/liblua.a
 
