@@ -45,10 +45,20 @@ inline void add_fields(QVector<MsduFieldNode>& out, const QByteArray& d, int bas
         const int end_byte   = start_byte + (s.bit + s.len - 1) / 8;
         // 越界保护:数据不足时停止(错位/跨协议解析避免 get_bits 越界读)
         if (start_byte < 0 || end_byte >= d.size()) break;
-        quint64 v = get_bits(d, start_byte, s.bit, s.len);
         MsduFieldNode node;
         node.name = QStringLiteral("%1 [%2b]").arg(QLatin1String(s.name)).arg(s.len);
-        node.value = fmt_val(s.fmt, v);
+        // 宽字段(len>64)不走 get_bits:1ULL<<i 在 i>=64 时移位 UB,分支守卫又会
+        // 直接返 0 恒显 0;直接给覆盖字节的十六进制(字节序与原值一致)。
+        // 注意:(a) s.bit!=0 时首尾字节里不属于本字段的邻位会一起被十六进制化
+        // (如 125 位 bit=3 的字段),RSV 显示可接受;(b) 不再走 fmt_val,丢了各字段
+        // 的 fmt 区分(HEX4 的 0x 前缀、DEC 的十进制),统一显 hex,接受的格式变化。
+        QString val;
+        if (s.len > 64)
+            val = QString::fromLatin1(
+                d.mid(start_byte, end_byte - start_byte + 1).toHex(' ').toUpper());
+        else
+            val = fmt_val(s.fmt, get_bits(d, start_byte, s.bit, s.len));
+        node.value = val;
         // 位域覆盖的字节区间(相对数据起点;供 UI 高亮换算)
         int first_bit = (rel_base + base + s.byte) * 8 + s.bit;
         int last_bit  = first_bit + s.len - 1;

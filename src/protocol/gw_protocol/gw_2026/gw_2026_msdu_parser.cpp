@@ -828,6 +828,13 @@ static void parse_rfdl(MsduInfo& out, const QByteArray& rfdl, int rel_base, bool
             if (carrier) {
                 // 载波发现列表(msg_type 2)站点属性:HDC2.0 4-2 表63 23B
                 add_fields(g.children, content, 0, kCarrierRfdlAttrSpec, kCarrierRfdlAttrSpecN, content_abs);
+                // 截断 IE(<17B,最后读 MinCommRate@byte16)不采拓扑——越界读 0 会被当成
+                // 0% 成功率写进节点,TEI→MAC 学习也一并跳过(elen=8 时 sender_tei 读真值也会学进假对);
+                // 字段树仍由 add_fields 正常渲染(静默截断尾部字段)。
+                if (content.size() < 17) {
+                    pa::warn("gw_2026:truncated", QStringLiteral("station attr %1B<17B").arg(content.size()));
+                    append_summary(out, trl::L(" (站点属性截断)"));
+                } else {
                 // TEI→MAC 学习(HDC2.0 4-2 表62/表63:头 MAC@0-5 为发送节点 MAC,IE TEI@0 为发送节点 TEI):
                 // 单跳 MSDU 无 MSDU_BASE 头,头对覆盖不到;无线版 HDC2.0 4-2 表92 IE 无发送方 TEI,故仅载波分支学。
                 const quint16 sender_tei = (quint16)get_bits(content, 0, 0, 12);
@@ -839,6 +846,7 @@ static void parse_rfdl(MsduInfo& out, const QByteArray& rfdl, int rel_base, bool
                 out.topo_event.proxy_comm_rate      = (up_v  <= 100) ? (qint32)up_v  : -1;
                 out.topo_event.proxy_down_comm_rate = (dwn_v <= 100) ? (qint32)dwn_v : -1;
                 out.topo_event.min_comm_rate        = (min_v <= 100) ? (qint16)min_v : -1;
+                }
                 annotate_unit(g.children, "ProxyCommRate", QStringLiteral("%"));
                 annotate_unit(g.children, "ProxyDownCommRate", QStringLiteral("%"));
                 annotate_unit(g.children, "MinCommRate", QStringLiteral("%"));
@@ -848,6 +856,12 @@ static void parse_rfdl(MsduInfo& out, const QByteArray& rfdl, int rel_base, bool
             } else {
                 // 无线发现列表(msg_type 0)站点属性:表92 14B
                 add_fields(g.children, content, 0, kRfdlAttrSpec, kRfdlAttrSpecN, content_abs);
+                // 截断 IE(<12B,最后读 MinRcvRate@byte11)不采拓扑——越界读 0 会被当成
+                // 0% 成功率写进节点,字段树仍由 add_fields 正常渲染(静默截断尾部字段)。
+                if (content.size() < 12) {
+                    pa::warn("gw_2026:truncated", QStringLiteral("station attr %1B<12B").arg(content.size()));
+                    append_summary(out, trl::L(" (站点属性截断)"));
+                } else {
                 out.topo_event.proxy_tei = (quint16)get_bits(content, 6, 0, 12);
                 out.topo_event.rf_role = (quint8)get_bits(content, 7, 4, 4);
                 out.topo_event.rf_hop = (quint8)get_bits(content, 8, 4, 4);
@@ -857,6 +871,7 @@ static void parse_rfdl(MsduInfo& out, const QByteArray& rfdl, int rel_base, bool
                 out.topo_event.proxy_up_rate   = (up_v   <= 100) ? (qint16)up_v   : -1;
                 out.topo_event.proxy_down_rate = (down_v <= 100) ? (qint16)down_v : -1;
                 out.topo_event.min_link_rate   = (min_v  <= 100) ? (qint16)min_v  : -1;
+                }
                 translate_enum(g.children, "Role", kRole, 5);
                 annotate_unit(g.children, "ProxyUpRcvRate", QStringLiteral("%"));
                 annotate_unit(g.children, "ProxyDownRcvRate", QStringLiteral("%"));
@@ -1368,7 +1383,9 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
                 // MMeAssocCnf(关联确认):固定头到 b[40],RouteInfo 从 b[40] 起
                 add_fields(root.children, b, 0, kAssocCnfSpec, kAssocCnfSpecN, head_size + 4);
                 // 拓扑事件:关联确认(STA 入网 + 代理 + CCO MAC);仅成功(0=成功,0x0A=再次入网成功)时更新拓扑
-                {
+                // 截断体(<18B)不采拓扑——assoc_res@12、sta_tei@14、link@15、proxy_tei@16-17
+                // 读不全时越界读 0 会被当成入网成功;字段树与 RouteInfo 不受影响。
+                if (b.size() >= 18) {
                     const quint8 assoc_res = (quint8)get_bits(b, 12, 0, 8);
                     const quint64 sta_mac = get_bits(b, 0, 0, 48);
                     const quint64 cco_mac = get_bits(b, 6, 0, 48);
@@ -1392,6 +1409,9 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
                         .arg(sta_tei)
                         .arg(proxy_tei ? QString::number(proxy_tei) : QStringLiteral("-"));
                     }
+                } else {
+                    pa::warn("gw_2026:truncated", QStringLiteral("assoc cnf %1B<18B").arg(b.size()));
+                    append_summary(out, trl::L(" (关联确认截断)"));
                 }
                 apply_dicts(root.children);
                 annotate_unit(root.children, "STAReAssocTime", QStringLiteral("ms"));
@@ -2200,6 +2220,8 @@ struct I18nReg {
         trl::register_en("过零NTB采集指示", "MMeZeroCrossNTBCollectInd");
         trl::register_en("过零NTB上报", "MMeZeroCrossNTBReport");
         trl::register_en(" (RFDL 截断)", " (RFDL truncated)");
+        trl::register_en(" (站点属性截断)", " (Station Attribute truncated)");
+        trl::register_en(" (关联确认截断)", " (Assoc confirm truncated)");
         trl::register_en("发现列表消息", "Discovery List Message");
         trl::register_en("载波发现列表消息", "Carrier Discovery List Message");
         trl::register_en("信道评估参数更新", "Channel Evaluation Param Update");
