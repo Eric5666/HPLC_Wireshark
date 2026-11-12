@@ -234,6 +234,26 @@ jobs:
           fi
           [ "$fail" = "0" ] || exit 1
 
+      - name: H1 get_bits bounds-check regression (h1-getbits-probe)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          ASAN_OPTIONS: detect_leaks=1
+        run: |
+          set -e
+          # 与 gw-learn 那步共用 Qt symlink farm(单独重跑本步时按 qmake -query 重建)
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)"  "$QT_ROOT/plugins"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          # build.sh 默认构建并运行(ASan,79 用例);探针有 FAIL 即 exit 1,本步随之变红
+          (cd unit_test/protocol-gw/h1-getbits-probe && bash build.sh)
+
       - name: Topology anomaly / identity-conflict regression (MAC↔TEI, restart-count)
         env:
           QT_QPA_PLATFORM: offscreen

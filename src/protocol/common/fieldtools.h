@@ -23,6 +23,17 @@ inline quint64 get_bits(const quint8* d, int start_byte, int start_bit, int bit_
 }
 
 inline quint64 get_bits(const QByteArray& d, int start_byte, int start_bit, int bit_len) {
+    // 集中边界检查(新 H1):越界返回 0,不读出缓冲区;bit_len>64 顺带挡住
+    // 1ULL<<i 的移位 UB(M2 的 QByteArray 路径)。裸指针版不改,调用方如需
+    // 区分"真 0"与"越界"须自行先查长度。
+    // last_byte 用 qint64 算:int 加法在 start_byte=INT_MAX-2 时会溢出回绕成
+    // 负数、绕过检查(UBSan 已复现),改 64 位后超大偏移直接返 0。
+    if (start_byte < 0 || start_bit < 0 || bit_len <= 0 || bit_len > 64)
+        return 0;   // 越界:返回 0,由调用方的长度检查决定是否标记"截断"
+    const qint64 last_byte = qint64(start_byte) + (qint64(start_bit) + bit_len - 1) / 8;
+    if (last_byte >= d.size())
+        return 0;   // 越界:返回 0,由调用方的长度检查决定是否标记"截断"
+
     return get_bits(reinterpret_cast<const quint8*>(d.constData()),
                     start_byte, start_bit, bit_len);
 }

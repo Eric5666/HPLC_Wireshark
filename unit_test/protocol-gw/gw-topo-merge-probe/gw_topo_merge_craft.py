@@ -208,6 +208,7 @@ def tda_frame_11(sta0_tei, sta0_msdu, sta1_tei, sta1_msdu):
     set_bits(f, 17, 4, 9, 50)
     set_bits(f, 18, 5, 3, 0)
     set_bits(f, 19, 0, 5, 2)   # sta1 DivCopy -> 136
+    store_crc24(f, 16, 16)     # eFC FCS(与 ofdma_frame_11() 同款;无 FCS 会被 eFC CRC24 门整帧拒收)
     off = 32
     for chunk in (sta0_msdu, sta1_msdu):
         f[off:off + 136] = build_pb_block(0xC0, chunk, 136)

@@ -61,6 +61,10 @@ static QByteArray gw_ofdma_seq(const QVector<QVector<int>>& seqs, bool cut_last,
         set_bits(e, 2, 0, 5, copy_mode);         // 站1 分集拷贝模式
         set_bits(e, 2, 5, 1, seqs[1].size() - 1);// 站1 PB 个数
     }
+    // eFC FCS -> bytes 29..31:无 FCS 会被 eFC CRC24 门整帧拒收(877f838 引入;
+    // 与 build_gw2026_ofdma_tda_sim.py 的 build_ofdma() 同款 store_crc24(f, 16, 16))
+    // 写在 PB 循环前:截断(cut_last)只截 PB 块,头 32B 始终完整。
+    put_crc24(p + 16, 16);
     int off = 32;
     for (int i = 0; i < seqs.size(); ++i) {
         for (int j = 0; j < seqs[i].size(); ++j) {
