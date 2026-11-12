@@ -32,7 +32,7 @@ CMAKE_BIN="$(_to_bash_path "${CMAKE_BIN:-cmake}")"
 MAKE_BIN="$(_to_bash_path "${MAKE_BIN:-}")"
 
 # ---- 可复现版本钉 ----
-SENTRY_NATIVE_REF="${SENTRY_NATIVE_REF:-1578046f0a7922f29b44665bbfc0690aafe743a5}"
+SENTRY_NATIVE_REF="${SENTRY_NATIVE_REF:-7afc37457d7fcc37fb0bace9c8045d3fa687717f}"
 SENTRY_NATIVE_URL="${SENTRY_NATIVE_URL:-https://github.com/getsentry/sentry-native.git}"
 
 JOBS=$(nproc 2>/dev/null || echo 4)
