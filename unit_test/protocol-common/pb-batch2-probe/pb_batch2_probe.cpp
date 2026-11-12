@@ -853,11 +853,19 @@ static void test_gw_efc_truncated() {
         set_bits(buf.data(), 7, 3, 2, 1);
         set_bits(buf.data(), 11, 3, 5, 3);
         set_bits(buf.data() + 16, 2, 0, 5, 3);
+        // eFC FCS -> bytes 29..31:上游 877f838 起 eFC CRC24 错整帧拒收,完整 eFC 须带 FCS
+        put_crc24(buf.data() + 16, 16);
         const QByteArray raw = QByteArray::fromRawData(reinterpret_cast<const char*>(buf.data()), 32);
         MpduInfo info; MsduState msdu; QByteArray complete;
         const QString err = gw_2026_sof::assemble(raw, info, msdu, complete, 0, false);
         check("efc-trunc/ofdma len=32: not rejected as eFC-truncated",
               !err.contains(QStringLiteral("eFC")));
+        // 同一帧翻 eFC FCS 一位 ⇒ eFC CRC24 门整帧拒收,且不留站点
+        buf[29] ^= 0x01;
+        MpduInfo info2; MsduState msdu2; QByteArray complete2;
+        const QString err2 = gw_2026_sof::assemble(raw, info2, msdu2, complete2, 0, false);
+        check("efc-crc/ofdma len=32 bad eFC FCS: rejected, no stations",
+              err2.contains(QStringLiteral("CRC24")) && info2.sof_stations.isEmpty());
     }
 }
 
