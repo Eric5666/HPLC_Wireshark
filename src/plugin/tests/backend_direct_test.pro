@@ -20,6 +20,6 @@ HEADERS += ../host/plugin_backend.h \
     ../host/native_backend.h \
     ../host/script_painter.h
 
-# Lua 5.4.6 (bundled)
-# Lua 5.4.6(内嵌,缺失时自动获取/构建,与 bplc-plugin-host 同源)
+# Lua 5.4.9 (bundled)
+# Lua 5.4.9(内嵌,缺失时自动获取/构建,与 bplc-plugin-host 同源)
 include(../lua_bundle.pri)
