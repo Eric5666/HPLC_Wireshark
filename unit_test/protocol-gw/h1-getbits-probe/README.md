@@ -32,13 +32,17 @@
 | `gw2022/gw2026-assocreq-0/5/6B` | AssocReq 体 0/5/6B | <6B 不生成事件、摘要追加“ (关联请求截断)”；6B 正常生成 |
 | `gw2022/gw2026-chgproxy-0/19/20B` | ChangeProxyCnf 体 0/19/20B | <20B 不生成事件、摘要追加“ (代理变更确认截断)”；20B 正常生成 |
 | `gw2022/gw2026-assocgather-0/15/16B` | AssocGatherInd 体 0/15/16B | <16B 不生成事件、摘要追加“ (关联汇总截断)”；16B 正常生成 |
+| `gw2022/gw2026-chgpxreq-0/1/2/3/13/14/16/24B`、`tei0-24B` | ChangeProxyReq 体 0–24B（陷阱 STA TEI=9、新代理 7、旧代理 5） | <14B 仍记一条截断事件（只进事件表），说明“消息截断：期望至少 14 字节，实际 M 字节”+“ (STA TEI=9)”（≥2B 时）、摘要追加“ (代理变更请求截断)”、字段树末节点“(消息截断)”、TopoState 事件 1 条节点 0 个；14/16/24B 正常显示“代理变更请求: STA TEI=9 5→7”；STA TEI=0 的 24B 不出事件 |
+| `gw2022/gw2026-leaveind-0/3/15B-n2`、`22B-n2`、`16B-n1`、`16B-n0`、`22B-n1`、`28B-n2` | LeaveInd 体 0/3/15B（n=2）、22B n=2、16B n=1、16B n=0、22B n=1、28B n=2 | M<16 只写截断原因、不标任何站点离线；16≤M<16+6n 已读 MAC 照常标离线、说明写实际个数并标注截断；16B n=0 完整帧仍是空说明记录（本次不改，钉死现状）；22B n=1 / 28B n=2 正常 |
+| `gw2022/gw2026-leaveind-partial-mark` | 22B n=2 喂进预置两个在线节点的 TopoState | 只读到的 1 个 MAC 标离线，另一个仍在线，事件 1 条 |
 
-共 43 个用例。另有 H1 后续修复（`fix/h1-getbits-bounds-check`）：
+共 79 个用例。另有 H1 后续修复（`fix/h1-getbits-bounds-check`）：
 
 4. `src/protocol/gw_protocol/gw_2022/gw_2022_msdu_parser.cpp` 与 `gw_2026/gw_2026_msdu_parser.cpp`：站点属性 IE 不足 12B（无线）/17B（载波）时跳过拓扑采集与 TEI→MAC 学习，摘要追加“(站点属性截断)”；关联确认体不足 18B 时跳过事件与 CCO 更新，摘要追加“(关联确认截断)”；字段树渲染不受影响。
 5. `src/protocol/common/fieldspec.h`：`add_fields` 对 len>64 的字段直接给覆盖字节十六进制，不再走 `get_bits`（旧语义恒显 0）；DEC 字段改后统一显 hex，接受的格式变化。
 6. `src/protocol/common/fieldtools.h`：`get_bits` 守卫改用 qint64 算 `last_byte`，堵 int 加法溢出。
 7. 第四份复核的后续修复（`fix/h1-getbits-bounds-check`，d237e88 之后一提交）：`fieldspec.h` 宽字段屏蔽首尾邻位；`gw_2026_sof_parser.cpp` 的 eFC 16B 注释按“文档类推、仍待实包确认”收紧措辞（拒收行为不动）；GW2022 发现列表成功率分档门（19/20/29B）+ `topo_state.cpp` 逐项覆盖；AssocReq/ChangeProxyCnf/AssocGatherInd 三处截断门（6B/20B/16B）。
+8. 截断帧保留并标注（`fix/h1-getbits-bounds-check`，10e599f 之后一提交）：`gw_2022/gw_2026_msdu_parser.cpp` 的 ChangeProxyReq 体不足 14B、LeaveInd 固定头不足 16B / MAC 列表不足 16+6n 时仍记一条事件（只进事件表，不改拓扑），说明写截断原因、摘要追加“ (代理变更请求截断)”/“ (离线指示截断)”、字段树末尾加“(消息截断)”节点、各调一次 `pa::warn`；LeaveInd 说明按实际读到的 MAC 数写（不再写声明的 n）；16B n=0 的完整离线指示帧仍是空说明记录，本次不改。
 
 ## 运行
 

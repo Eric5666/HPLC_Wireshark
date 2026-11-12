@@ -16,6 +16,9 @@
 // (k)d12/d13 GW2022 发现列表成功率分档门(19/20/29B)与 TopoState 逐项
 // 覆盖回归点;(l)d14/d15/d16 三小项三处门(AssocReq 6B、ChangeProxyCnf
 // 20B、AssocGatherInd 16B),截断不生成事件。
+// (m) 截断帧保留并标注(d17/d18):ChangeProxyReq 体不足 14B 与 LeaveInd
+// 固定头不足 16B / MAC 列表不足 16+6n 时仍记一条事件(只进事件表,不改
+// 拓扑),说明写截断原因、摘要加后缀、字段树末尾加"(消息截断)"节点。
 // 另渲染一帧截断 OFDMA 帧的字段树,验证 gw_2026_tree.cpp 的 eFC 循环
 // 在 rsz<32 时被跳过(纵深防御)。
 // 用法:./build.sh (构建 + 运行;构建时 qmake 传 SANITIZERS=address)。
@@ -138,6 +141,15 @@ static bool tree_has(const QVector<MsduFieldNode>& nodes, const QString& needle)
             return true;
     }
     return false;
+}
+
+// MMe 组节点("MMe: …")的最后一个子节点名(截断提示节点加在组末尾)。
+static QString mme_last_child(const QVector<MsduFieldNode>& tree) {
+    for (const auto& n : tree) {
+        if (n.name.startsWith(QStringLiteral("MMe: ")) && !n.children.isEmpty())
+            return n.children.last().name;
+    }
+    return QStringLiteral("-");
 }
 
 int main(int argc, char* argv[]) {
@@ -734,6 +746,178 @@ int main(int argc, char* argv[]) {
                       .arg((int)info.topo_event.kind).arg(info.topo_event.cco_mac, 0, 16)
                       .arg(info.topo_event.desc));
         }
+    }
+
+    // --- (d17) 截断帧保留并标注:代理变更请求 ChangeProxyReq 体不足 14B ---
+    // (gw_2022:1432 / gw_2026:1581;14B 门:OldProxyTEI 在 byte12 起 12 位,占
+    // byte12-13;14-23B 三 TEI 都完整,不标截断;0/1B 原不出事件,补丁后出一截断
+    // 记录,提案写明有意改动。截断事件只进事件表,不改拓扑。)
+    {
+        auto make_chg_req = [](int blen, quint16 sta_tei = 9) {
+            QByteArray body(16 + 4 + blen, 0);
+            quint8* p = reinterpret_cast<quint8*>(body.data());
+            p[7] = 0x00;                   // NET_MANAGEMENT
+            p[8] = (quint8)(4 + blen); p[9] = 0x00;  // msdu_len=4+blen
+            p[16] = 0x03;                  // MMType=0x03 (MME_CHANGE_PROXY_REQ)
+            quint8* b = p + 20;
+            if (blen > 0) b[0] = (quint8)(sta_tei & 0xFF);   // STA TEI 低 8 位
+            if (blen > 1) b[1] = (quint8)(sta_tei >> 8);      // STA TEI 高 4 位
+            if (blen > 2) b[2] = 0x07;     // NewProxyTEI=7
+            if (blen > 12) b[12] = 0x05;   // OldProxyTEI=5
+            return body;
+        };
+        auto run_chg_req = [&](auto parse, const char* proto, int blen, quint16 sta_tei = 9) {
+            MsduInfo info = parse(make_chg_req(blen, sta_tei));
+            char name[40];
+            if (sta_tei == 0)
+                std::snprintf(name, sizeof name, "%s-chgpxreq-tei0-24B", proto);
+            else
+                std::snprintf(name, sizeof name, "%s-chgpxreq-%dB", proto, blen);
+            TopoState st;
+            TopoEvent e = info.topo_event;
+            e.nid = 1;
+            st.apply(e);
+            if (blen < 14 && sta_tei != 0) {
+                const QString exp = (blen >= 2)
+                    ? QStringLiteral("消息截断：期望至少 14 字节，实际 %1 字节 (STA TEI=9)").arg(blen)
+                    : QStringLiteral("消息截断：期望至少 14 字节，实际 %1 字节").arg(blen);
+                check(name,
+                      info.present && info.topo_event.kind == TopoEventKind::ChangeProxyReq
+                          && info.topo_event.desc == exp
+                          && info.summary.contains(QStringLiteral(" (代理变更请求截断)"))
+                          && mme_last_child(info.tree) == QStringLiteral("(消息截断)")
+                          && st.events.size() == 1 && st.nodes.isEmpty(),
+                      QStringLiteral("kind=%1 desc=%2 summary=%3 tree_last=%4 ev=%5 nodes=%6")
+                          .arg((int)info.topo_event.kind).arg(info.topo_event.desc)
+                          .arg(info.summary).arg(mme_last_child(info.tree))
+                          .arg(st.events.size()).arg(st.nodes.size()));
+            } else if (sta_tei == 0) {
+                check(name,
+                      info.present && info.topo_event.kind == TopoEventKind::Other
+                          && !info.summary.contains(QStringLiteral(" (代理变更请求截断)"))
+                          && st.events.isEmpty() && st.nodes.isEmpty(),
+                      QStringLiteral("kind=%1 desc=%2 summary=%3 ev=%4 nodes=%5")
+                          .arg((int)info.topo_event.kind).arg(info.topo_event.desc)
+                          .arg(info.summary).arg(st.events.size()).arg(st.nodes.size()));
+            } else {
+                check(name,
+                      info.present && info.topo_event.kind == TopoEventKind::ChangeProxyReq
+                          && info.topo_event.desc == QStringLiteral("代理变更请求: STA TEI=9 5→7")
+                          && !info.summary.contains(QStringLiteral(" (代理变更请求截断)"))
+                          && st.events.size() == 1 && st.nodes.isEmpty(),
+                      QStringLiteral("kind=%1 desc=%2 summary=%3 ev=%4 nodes=%5")
+                          .arg((int)info.topo_event.kind).arg(info.topo_event.desc)
+                          .arg(info.summary).arg(st.events.size()).arg(st.nodes.size()));
+            }
+        };
+        for (int blen : {0, 1, 2, 3, 13, 14, 16, 24})
+            run_chg_req(GW_2022_MsduParser::parse, "gw2022", blen);
+        run_chg_req(GW_2022_MsduParser::parse, "gw2022", 24, 0);
+        for (int blen : {0, 1, 2, 3, 13, 14, 16, 24})
+            run_chg_req(GW_2026_MsduParser::parse, "gw2026", blen);
+        run_chg_req(GW_2026_MsduParser::parse, "gw2026", 24, 0);
+    }
+
+    // --- (d18) 截断帧保留并标注:离线指示 LeaveInd 固定头 16B + 6B×n ---
+    // (gw_2022:1866 / gw_2026:1804;M<16 只写截断原因、不标任何站点离线;
+    // 16≤M<16+6n 已读 MAC 照常标离线、说明写实际个数并标注截断;16B n=0 的
+    // 完整帧仍是空说明记录,提案备注写明这次不改,此处把现状钉死。)
+    {
+        auto make_leave = [](int blen, int n) {
+            QByteArray body(16 + 4 + blen, 0);
+            quint8* p = reinterpret_cast<quint8*>(body.data());
+            p[7] = 0x00;
+            p[8] = (quint8)(4 + blen); p[9] = 0x00;
+            p[16] = 0x06;                  // MMType=0x06 (MME_LEAVE_IND)
+            quint8* b = p + 20;
+            if (blen > 2) b[2] = (quint8)(n & 0xFF);        // LeaveSTANum 低字节
+            if (blen > 3) b[3] = (quint8)(n >> 8);
+            // MAC A @16..21 = 0x001122334455,MAC B @22..27 = 0x66778899AABB
+            static const quint8 macA[6] = {0x55, 0x44, 0x33, 0x22, 0x11, 0x00};
+            static const quint8 macB[6] = {0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66};
+            for (int i = 0; i < 6 && 16 + i < blen; ++i) b[16 + i] = macA[i];
+            for (int i = 0; i < 6 && 22 + i < blen; ++i) b[22 + i] = macB[i];
+            return body;
+        };
+        auto run_leave = [&](auto parse, const char* proto, int blen, int n) {
+            MsduInfo info = parse(make_leave(blen, n));
+            char name[40];
+            std::snprintf(name, sizeof name, "%s-leaveind-%dB-n%d", proto, blen, n);
+            TopoState st;
+            TopoEvent e = info.topo_event;
+            e.nid = 1;
+            st.apply(e);
+            const int need = 16 + 6 * n;
+            const QString detail = QStringLiteral("kind=%1 desc=%2 leaves=%3 summary=%4 tree_last=%5 ev=%6 nodes=%7")
+                .arg((int)info.topo_event.kind).arg(info.topo_event.desc)
+                .arg(info.topo_event.leaves.size()).arg(info.summary)
+                .arg(mme_last_child(info.tree)).arg(st.events.size()).arg(st.nodes.size());
+            if (blen < 16) {
+                check(name,
+                      info.present && info.topo_event.kind == TopoEventKind::LeaveInd
+                          && info.topo_event.desc == QStringLiteral("消息截断：期望至少 16 字节，实际 %1 字节").arg(blen)
+                          && info.topo_event.leaves.isEmpty()
+                          && info.summary.contains(QStringLiteral(" (离线指示截断)"))
+                          && mme_last_child(info.tree) == QStringLiteral("(消息截断)")
+                          && st.events.size() == 1 && st.nodes.isEmpty(),
+                      detail);
+            } else if (blen < need) {
+                const int k = (blen - 16) / 6;  // 实际读到的 MAC 数
+                check(name,
+                      info.present && info.topo_event.kind == TopoEventKind::LeaveInd
+                          && info.topo_event.desc == QStringLiteral("离线指示: %1 个站点离线 (消息截断：声明 %2 个站点，期望 %3 字节，实际 %4 字节)").arg(k).arg(n).arg(need).arg(blen)
+                          && info.topo_event.leaves.size() == k
+                          && info.summary.contains(QStringLiteral(" (离线指示截断)"))
+                          && mme_last_child(info.tree) == QStringLiteral("(消息截断)")
+                          && st.events.size() == 1 && st.nodes.isEmpty(),
+                      detail);
+            } else if (n == 0) {
+                // 16B n=0 完整帧:空说明记录是既有现状,本次不改,钉死。
+                check(name,
+                      info.present && info.topo_event.kind == TopoEventKind::LeaveInd
+                          && info.topo_event.desc.isEmpty()
+                          && info.topo_event.leaves.isEmpty()
+                          && !info.summary.contains(QStringLiteral(" (离线指示截断)"))
+                          && st.events.size() == 1 && st.nodes.isEmpty(),
+                      detail);
+            } else {
+                check(name,
+                      info.present && info.topo_event.kind == TopoEventKind::LeaveInd
+                          && info.topo_event.desc == QStringLiteral("离线指示: %1 个站点离线").arg(n)
+                          && info.topo_event.leaves.size() == n
+                          && !info.summary.contains(QStringLiteral(" (离线指示截断)"))
+                          && st.events.size() == 1 && st.nodes.isEmpty(),
+                      detail);
+            }
+        };
+        for (const auto& c : {std::make_pair(0, 2), std::make_pair(3, 2), std::make_pair(15, 2),
+                              std::make_pair(22, 2), std::make_pair(16, 1), std::make_pair(16, 0),
+                              std::make_pair(22, 1), std::make_pair(28, 2)}) {
+            run_leave(GW_2022_MsduParser::parse, "gw2022", c.first, c.second);
+            run_leave(GW_2026_MsduParser::parse, "gw2026", c.first, c.second);
+        }
+        // 已读全的 MAC 照常标离线:seed 两个在线节点,22B n=2 只够读 1 个 MAC。
+        auto run_partial_mark = [&](auto parse, const char* name) {
+            TopoState st;
+            TopoNode a; a.tei = 5; a.mac = 0x001122334455ULL; a.status = NodeStatus::Online;
+            TopoNode b; b.tei = 6; b.mac = 0x66778899AABBULL; b.status = NodeStatus::Online;
+            st.nodes[5] = a;
+            st.nodes[6] = b;
+            st.mac_to_tei[TopoState::nid_mac_key(1, 0x001122334455ULL)] = 5;
+            st.mac_to_tei[TopoState::nid_mac_key(1, 0x66778899AABBULL)] = 6;
+            TopoEvent e = parse(make_leave(22, 2)).topo_event;
+            e.nid = 1;
+            st.apply(e);
+            check(name,
+                  st.nodes[5].status == NodeStatus::Offline
+                      && st.nodes[6].status == NodeStatus::Online
+                      && st.events.size() == 1,
+                  QStringLiteral("tei5=%1 tei6=%2 ev=%3")
+                      .arg((int)st.nodes[5].status).arg((int)st.nodes[6].status)
+                      .arg(st.events.size()));
+        };
+        run_partial_mark(GW_2022_MsduParser::parse, "gw2022-leaveind-partial-mark");
+        run_partial_mark(GW_2026_MsduParser::parse, "gw2026-leaveind-partial-mark");
     }
 
     std::printf("RESULT: %d PASS, %d FAIL\n", g_passes, g_fails);

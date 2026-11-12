@@ -1183,6 +1183,18 @@ static QString boot_reason_suffix(const QByteArray& b) {
     }
 }
 
+// 截断 MMe 的统一提示:说明文字同时进拓扑事件"变更说明"列和字段树,
+// 外层 CRC 只覆盖整帧,内部消息长度不足拦不住,保留记录便于排查设备端问题帧。
+static QString truncated_note(int need, int got) {
+    return trl::L("消息截断：期望至少 %1 字节，实际 %2 字节").arg(need).arg(got);
+}
+static void add_truncated_node(QVector<MsduFieldNode>& parent, const QString& note) {
+    MsduFieldNode tn;
+    tn.name = trl::L("(消息截断)");
+    tn.value = note;
+    parent.append(tn);
+}
+
 // ================= 主解析 =================
 MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
     MsduInfo out;
@@ -1573,7 +1585,21 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
                     const quint16 sta_tei = (quint16)get_bits(b, 0, 0, 12);
                     const quint16 new_proxy = (quint16)get_bits(b, 2, 0, 12);
                     const quint16 old_proxy = (quint16)get_bits(b, 12, 0, 12);
-                    if (sta_tei) {
+                    // OldProxyTEI 在 byte12 起 12 位(占 byte12-13),读满三个 TEI 需 14B
+                    constexpr int kNeed = 14;
+                    if (b.size() < kNeed) {
+                        // 截断帧仍记一条(只入事件表,不改拓扑,同原逻辑),但只写截断原因,
+                        // 不写读成 0 的代理 TEI,免得显示成"-→-"像无代理的正常事件
+                        const QString note = truncated_note(kNeed, b.size());
+                        pa::warn("gw_2026:truncated",
+                                 QStringLiteral("change proxy req %1B<%2B").arg(b.size()).arg(kNeed));
+                        append_summary(out, trl::L(" (代理变更请求截断)"));
+                        add_truncated_node(root.children, note);
+                        out.topo_event.kind = TopoEventKind::ChangeProxyReq;
+                        out.topo_event.desc = (b.size() >= 2 && sta_tei)
+                            ? note + QStringLiteral(" (STA TEI=%1)").arg(sta_tei)
+                            : note;
+                    } else if (sta_tei) {
                         out.topo_event.kind = TopoEventKind::ChangeProxyReq;
                         out.topo_event.desc = trl::L("代理变更请求: STA TEI=%1 %2→%3")
                             .arg(sta_tei)
@@ -1795,6 +1821,18 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
                 int off = 16;
                 // 拓扑事件:离网指示(按 MAC 标记离网)
                 out.topo_event.kind = TopoEventKind::LeaveInd;
+                // 固定头 16B(Reason 2 + LeaveSTANum 2 + LeaveDelayTime 2 + RSV0 10),之后 6B×n 个 MAC
+                constexpr int kHead = 16;
+                if (b.size() < kHead) {
+                    // 固定头不全,站点数不可信:记一条只写截断原因的记录,不标任何站点离网
+                    const QString note = truncated_note(kHead, b.size());
+                    pa::warn("gw_2026:truncated",
+                             QStringLiteral("leave ind %1B<%2B").arg(b.size()).arg(kHead));
+                    append_summary(out, trl::L(" (离线指示截断)"));
+                    add_truncated_node(root.children, note);
+                    out.topo_event.desc = note;
+                    break;
+                }
                 if (n > 0 && off + 6 <= b.size()) {
                     auto& lg = group(root.children,
                                      QStringLiteral("LeaveSTAMACList [%1]").arg(n));
@@ -1809,7 +1847,19 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
                         lg.children.append(mac);
                         off += 6;
                     }
-                    out.topo_event.desc = trl::L("离线指示: %1 个站点离线").arg(n);
+                    out.topo_event.desc = trl::L("离线指示: %1 个站点离线").arg(out.topo_event.leaves.size());
+                }
+                // MAC 列表不足声明的 n 个:已读全的 MAC 照常标离网,说明里写实际个数并标注截断
+                const int need = kHead + 6 * n;
+                if (b.size() < need) {
+                    const QString note = trl::L("消息截断：声明 %1 个站点，期望 %2 字节，实际 %3 字节")
+                                             .arg(n).arg(need).arg(b.size());
+                    pa::warn("gw_2026:truncated",
+                             QStringLiteral("leave ind %1B<%2B (n=%3)").arg(b.size()).arg(need).arg(n));
+                    append_summary(out, trl::L(" (离线指示截断)"));
+                    add_truncated_node(root.children, note);
+                    out.topo_event.desc = trl::L("离线指示: %1 个站点离线").arg(out.topo_event.leaves.size())
+                                          + QStringLiteral(" (") + note + QStringLiteral(")");
                 }
                 break;
             }
@@ -2307,6 +2357,11 @@ struct I18nReg {
         trl::register_en("代理变更请求: STA TEI=%1 %2→%3", "Proxy change request: STA TEI=%1 %2→%3");
         trl::register_en("代理变更(批量): %1 个站点代理→%2", "Proxy change (batch): %1 stations proxy→%2");
         trl::register_en("离线指示: %1 个站点离线", "Leave indication: %1 stations left");
+        trl::register_en("消息截断：期望至少 %1 字节，实际 %2 字节", "Message truncated: expected at least %1 bytes, got %2");
+        trl::register_en("消息截断：声明 %1 个站点，期望 %2 字节，实际 %3 字节", "Message truncated: %1 stations declared, expected %2 bytes, got %3");
+        trl::register_en("(消息截断)", "(Message truncated)");
+        trl::register_en(" (代理变更请求截断)", " (Change Proxy Request truncated)");
+        trl::register_en(" (离线指示截断)", " (Leave Indication truncated)");
         trl::register_en("%1 - %2 (%3b/邻居)", "%1 - %2 (%3b/neighbor)");
     }
 };
