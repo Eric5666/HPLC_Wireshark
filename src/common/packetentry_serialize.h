@@ -4,8 +4,8 @@
 ///          版本/字节序不确定性;序列化文件仅在同一进程会话内往返
 ///          (换页临时文件,不跨版本/跨平台持久化)。
 ///          读写字段顺序必须严格一致,改动结构体后同步更新本文件。
-#ifndef PACKETENTRY_SERIALIZE_H
-#define PACKETENTRY_SERIALIZE_H
+#ifndef BPLC_PACKETENTRY_SERIALIZE_H
+#define BPLC_PACKETENTRY_SERIALIZE_H
 
 #include "bplcframe.h"
 #include <QDataStream>
@@ -1022,4 +1022,4 @@ inline bool read_block_file(const QString& path, QVector<PacketEntry>& entries) 
 
 }  // namespace pser
 
-#endif // PACKETENTRY_SERIALIZE_H
+#endif  // BPLC_PACKETENTRY_SERIALIZE_H

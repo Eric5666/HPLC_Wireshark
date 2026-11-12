@@ -10,8 +10,8 @@
 ///       头/字符串池/轻量索引,条目按需逐条解码(v3 块格式),以控制常驻
 ///       内存、支持任意深度回溯。过滤只扫索引不解码条目;导出按需流式
 ///       遍历全部条目。
-#ifndef PACKETLISTMODEL_H
-#define PACKETLISTMODEL_H
+#ifndef BPLC_PACKETLISTMODEL_H
+#define BPLC_PACKETLISTMODEL_H
 
 #include "bplcframe.h"
 #include "packetentry_serialize.h"   // pser::BlockReader(盘块随机访问)
@@ -169,4 +169,4 @@ private:
     mutable QList<int>     m_lru;          ///< 盘块最近使用顺序(前=最旧)
 };
 
-#endif // PACKETLISTMODEL_H
+#endif  // BPLC_PACKETLISTMODEL_H

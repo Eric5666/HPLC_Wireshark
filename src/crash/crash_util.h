@@ -1,5 +1,6 @@
 // crash_util.h - 内部小工具(无 Qt 依赖)
-#pragma once
+#ifndef BPLC_CRASH_UTIL_H
+#define BPLC_CRASH_UTIL_H
 
 #include <string>
 
@@ -20,3 +21,5 @@ std::string join(const std::string& a, const std::string& b);
 std::string sentry_dsn_to_minidump_url(const std::string& dsn);
 
 } // namespace crash_util
+
+#endif  // BPLC_CRASH_UTIL_H

@@ -1,7 +1,7 @@
 /// @file framedispatcher.h
 /// @brief 帧分发与统计容器
-#ifndef FRAMEDISPATCHER_H
-#define FRAMEDISPATCHER_H
+#ifndef BPLC_FRAMEDISPATCHER_H
+#define BPLC_FRAMEDISPATCHER_H
 
 #include "iprotocolparser.h"
 #include "frame_credit.h"
@@ -72,4 +72,4 @@ private:
     std::shared_ptr<FrameCredit> m_credit;  ///< 背压额度(可空)
 };
 
-#endif // FRAMEDISPATCHER_H
+#endif  // BPLC_FRAMEDISPATCHER_H

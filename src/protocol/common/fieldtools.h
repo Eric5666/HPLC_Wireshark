@@ -2,8 +2,8 @@
 /// @brief 位域取值/设置 + 通用十六进制/MAC 格式化(协议无关公共工具)
 /// @details 从原 fieldspec.h 抽取的纯位域工具。位序为 LSB(与 Python BitDefine 一致):
 ///          start_byte/start_bit 为起始坐标,bit_len 为位长,跨字节按位连续。
-#ifndef FIELDTOOLS_H
-#define FIELDTOOLS_H
+#ifndef BPLC_FIELDTOOLS_H
+#define BPLC_FIELDTOOLS_H
 
 #include <QByteArray>
 #include <QString>
@@ -47,4 +47,4 @@ inline QString hex4(quint64 v)  { return QString("0x%1").arg(v, 4, 16, QChar('0'
 /// 48-bit MAC:帧内原始字节序显示(低字节在前);唯一实现见 common/mac_format.h
 inline QString mac_str(quint64 v) { return format_mac_u64(v); }
 
-#endif // FIELDTOOLS_H
+#endif  // BPLC_FIELDTOOLS_H

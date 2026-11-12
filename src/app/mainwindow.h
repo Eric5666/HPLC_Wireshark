@@ -1,7 +1,7 @@
 /// @file mainwindow.h
 /// @brief 主窗口
-#ifndef MAINWINDOW_H
-#define MAINWINDOW_H
+#ifndef BPLC_MAINWINDOW_H
+#define BPLC_MAINWINDOW_H
 
 #include <QMainWindow>
 #include <QTimer>
@@ -179,4 +179,4 @@ private:
     std::atomic<int> m_pending_count{0};  ///< pending 帧数(原子,阈值触发同步 flush 用)
 };
 
-#endif // MAINWINDOW_H
+#endif  // BPLC_MAINWINDOW_H

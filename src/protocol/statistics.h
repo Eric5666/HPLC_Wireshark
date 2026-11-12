@@ -1,8 +1,8 @@
 /// @file statistics.h
 /// @brief 帧类型统计:BEACON/SOF/ACK/COORD × HPLC/HRF
 /// @details 内部 QHash<int, qint64> + QMutex,UI 端 500ms 拉一次 snapshot。
-#ifndef STATISTICS_H
-#define STATISTICS_H
+#ifndef BPLC_STATISTICS_H
+#define BPLC_STATISTICS_H
 
 #include <QObject>
 #include <QHash>
@@ -40,4 +40,4 @@ private:
     QHash<int, qint64> m_counts;
 };
 
-#endif // STATISTICS_H
+#endif  // BPLC_STATISTICS_H

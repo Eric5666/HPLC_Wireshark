@@ -4,8 +4,8 @@
 ///          ParseResult/ParseFilter 是协议无关的展示结构(字段由公共
 ///          MpduInfo/MsduInfo 承载,南网仅多 snid/vlan_tag 等字段),UI/过滤/
 ///          导出/序列化统一消费,不感知具体协议。
-#ifndef IPROTOCOLPARSER_H
-#define IPROTOCOLPARSER_H
+#ifndef BPLC_IPROTOCOLPARSER_H
+#define BPLC_IPROTOCOLPARSER_H
 
 #include "bplcframe.h"
 #include "common/protocolvariant.h"
@@ -159,4 +159,4 @@ public:
 Q_DECLARE_METATYPE(ParseResult)
 Q_DECLARE_METATYPE(ParseFilter)
 
-#endif // IPROTOCOLPARSER_H
+#endif  // BPLC_IPROTOCOLPARSER_H

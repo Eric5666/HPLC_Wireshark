@@ -2,7 +2,8 @@
 //
 // 每个 backend_*.cpp 实现对应的一对函数;未编译的后端由 backend_stub.cpp
 // 提供空实现,保证链接通过。
-#pragma once
+#ifndef BPLC_CRASH_BACKEND_H
+#define BPLC_CRASH_BACKEND_H
 
 #include "crash_handler.h"
 
@@ -16,3 +17,5 @@ void backend_crashpad_shutdown();
 void backend_crashpad_install_abort_hook();
 // 手动 dump(Qt qFatal 钩子用);仅 crashpad 后端。
 void backend_crashpad_dump_without_crash();
+
+#endif  // BPLC_CRASH_BACKEND_H

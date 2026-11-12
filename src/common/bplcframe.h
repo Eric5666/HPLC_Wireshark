@@ -8,8 +8,8 @@
 /// @note 不依赖 Qt MOC,可被非 Qt 模块 include
 /// @author BPLC_STA_QtMonitor
 /// @date 2026-09-05
-#ifndef BPLCFRAME_H
-#define BPLCFRAME_H
+#ifndef BPLC_BPLCFRAME_H
+#define BPLC_BPLCFRAME_H
 
 #include <climits>
 #include <QByteArray>
@@ -625,4 +625,4 @@ inline QString dir_display(const PacketEntry& e) {
 }
 Q_DECLARE_METATYPE(PacketEntry)
 
-#endif // BPLCFRAME_H
+#endif  // BPLC_BPLCFRAME_H

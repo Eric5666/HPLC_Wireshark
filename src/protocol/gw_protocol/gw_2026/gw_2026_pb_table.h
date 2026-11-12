@@ -5,8 +5,8 @@
 ///   信标/单块帧同样按 FCH TMI 查表;-1 = TMI 无效。
 /// @note 南网 NW_2021 的 PB 大小定义不同(见 nw_protocol/nw_2021/nw_2021_pb_table.h),
 ///       故本表按协议+版本独立,不与其他协议共享。
-#ifndef GW_2026_PB_TABLE_H
-#define GW_2026_PB_TABLE_H
+#ifndef BPLC_GW_2026_PB_TABLE_H
+#define BPLC_GW_2026_PB_TABLE_H
 
 #include <QtGlobal>
 
@@ -72,4 +72,4 @@ inline int gw_2026_max_pb_num(quint8 band, quint8 mode) {
     return gw_2026_pb_num_table[band][mode];
 }
 
-#endif // GW_2026_PB_TABLE_H
+#endif  // BPLC_GW_2026_PB_TABLE_H

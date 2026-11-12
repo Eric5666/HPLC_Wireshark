@@ -5,8 +5,8 @@
 ///          - make_parser_by_id(按 id) / make_tree_builder(按 variant) 查本表;
 ///          - 插件实现同一接口即可同时提供"解析器 + 字段树 + 显示名"。
 ///          内置协议在各自 <proto>_provider.cpp 里静态自注册(见各协议目录)。
-#ifndef IPROTOCOLPROVIDER_H
-#define IPROTOCOLPROVIDER_H
+#ifndef BPLC_IPROTOCOLPROVIDER_H
+#define BPLC_IPROTOCOLPROVIDER_H
 
 #include "common/protocolvariant.h"
 #include <QString>
@@ -38,4 +38,4 @@ public:
     virtual std::unique_ptr<IProtocolTreeBuilder> create_tree_builder() const = 0;
 };
 
-#endif // IPROTOCOLPROVIDER_H
+#endif  // BPLC_IPROTOCOLPROVIDER_H

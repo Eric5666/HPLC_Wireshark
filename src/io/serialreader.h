@@ -2,8 +2,8 @@
 /// @brief ReaderWorker + SerialReader:后台切帧的两种封装
 /// @details ReaderConfig 是用户配置;ReaderMode 区分串口/文件/裸 hex。
 ///          ReaderWorker 在独立 QThread 跑,SerialReader 仅做线程包装。
-#ifndef SERIALREADER_H
-#define SERIALREADER_H
+#ifndef BPLC_SERIALREADER_H
+#define BPLC_SERIALREADER_H
 
 #include <QObject>
 #include <QThread>
@@ -156,4 +156,4 @@ private:
     std::shared_ptr<FrameCredit> m_credit;
 };
 
-#endif // SERIALREADER_H
+#endif  // BPLC_SERIALREADER_H

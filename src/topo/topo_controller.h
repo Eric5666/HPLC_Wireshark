@@ -1,5 +1,5 @@
-#ifndef TOPO_CONTROLLER_H
-#define TOPO_CONTROLLER_H
+#ifndef BPLC_TOPO_CONTROLLER_H
+#define BPLC_TOPO_CONTROLLER_H
 
 #include "topo_worker.h"
 #include <QObject>
@@ -44,4 +44,4 @@ private:
     TopoReplayWorker* m_worker = nullptr;
 };
 
-#endif // TOPO_CONTROLLER_H
+#endif  // BPLC_TOPO_CONTROLLER_H

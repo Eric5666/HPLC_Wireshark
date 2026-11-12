@@ -4,8 +4,8 @@
 ///          协议解析器在关键管理消息(关联请求/关联确认/代理变更/发现列表/离网指示)
 ///          解析时填充 MsduInfo::topo_event(首事件)与 topo_extra_events(多站点后续事件);
 ///          TopoState 消费这些事件,累积为节点图 + 事件表(主界面逐个 apply)。
-#ifndef TOPO_STATE_H
-#define TOPO_STATE_H
+#ifndef BPLC_TOPO_STATE_H
+#define BPLC_TOPO_STATE_H
 
 #include "bplcframe.h"
 #include <QHash>
@@ -391,4 +391,4 @@ void replay_topo_logs(const QVector<TopoLogItem>& topo_log,
 TopoState* ensure_restart_sample_state(QHash<quint32, TopoState>& states,
                                        quint32 net_id, int restart_count);
 
-#endif // TOPO_STATE_H
+#endif  // BPLC_TOPO_STATE_H

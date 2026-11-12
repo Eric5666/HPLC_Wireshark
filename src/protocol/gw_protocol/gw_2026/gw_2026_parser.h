@@ -2,8 +2,8 @@
 /// @brief 国网 GW_2026 双模协议解析器头文件
 /// @details 提供 GW_2026_Parser 类(IProtocolParser 实现),把一帧 BplcFrame
 ///          解码为 MPDU/MAC 字段,并支持 SOF 多 PB 块的 MSDU 重组。
-#ifndef GW_2026_PARSER_H
-#define GW_2026_PARSER_H
+#ifndef BPLC_GW_2026_PARSER_H
+#define BPLC_GW_2026_PARSER_H
 
 #include "bplcframe.h"
 #include "iprotocolparser.h"
@@ -41,4 +41,4 @@ private:
     GW_2022_Parser m_legacy;
 };
 
-#endif // GW_2026_PARSER_H
+#endif  // BPLC_GW_2026_PARSER_H

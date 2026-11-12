@@ -1,15 +1,23 @@
 /// @file market_test.cpp
 /// @brief 插件市场后端单元测试(feed 解析/版本比较/sha256/解包/安装/启停/卸载)
 /// @details 用法(仓库根):
-///   cd src/plugin/tests && mkdir -p build_market && cd build_market \
-///     && /home/hatch/qt/6.5.3/gcc_64/bin/qmake ../market_test.pro && make \
-///     && QT_QPA_PLATFORM=offscreen ./market_test
+///   mkdir -p build/market && cd build/market
+///   qmake ../../src/plugin/tests/market_test.pro && make
+///   QT_QPA_PLATFORM=offscreen ./market_test
+///   自包含:默认在临时目录里生成 market.json 与 js-topo-1.3.0.zip 夹具
+///   (不再依赖外部 BPLC_Plugin_Market 检出);设置 MARKET_JSON + MARKET_ZIP
+///   两个环境变量时改用真实市场仓库的文件(内容须与下方断言一致)。
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QtGlobal>
 
+#include "miniz.h"
 #include "plugin_market.h"
 #include "plugin_env.h"
 
@@ -24,23 +32,113 @@ static int g_fail = 0;
         }                                                           \
     } while (0)
 
+// ---- 自包含夹具:js-topo-1.3.0.zip + 4 个插件的 market.json ----
+namespace {
+
+bool write_fixture_zip(const QString& zip_path) {
+    const QByteArray manifest = R"({"name":"js-topo","version":"1.3.0",
+        "runtime":"js","entry":"topo.js","api_version":1,"protocol_id":"TOPO",
+        "display_name":"拓扑","display_name_en":"Topology",
+        "settings":[
+          {"key":"max_nodes","type":"integer","default":200,"minimum":1,"maximum":9999},
+          {"key":"show_labels","type":"boolean","default":true},
+          {"key":"layout","type":"string","default":"auto","enum":["auto","tree","radial"]}]})";
+    const QByteArray entry = "function on_frame(f) { return null; }\n";
+    mz_zip_archive za{};
+    const QByteArray path = QFile::encodeName(zip_path);
+    if (!mz_zip_writer_init_file(&za, path.constData(), 0)) return false;
+    bool ok = mz_zip_writer_add_mem(&za, "plugin.json", manifest.constData(),
+                                    size_t(manifest.size()), MZ_DEFAULT_COMPRESSION) &&
+              mz_zip_writer_add_mem(&za, "topo.js", entry.constData(),
+                                    size_t(entry.size()), MZ_DEFAULT_COMPRESSION);
+    ok = mz_zip_writer_finalize_archive(&za) && ok;
+    ok = mz_zip_writer_end(&za) && ok;
+    return ok;
+}
+
+QJsonObject fixture_version(const QString& ver, const QString& date,
+                            const QString& sha = QString(64, QLatin1Char('a')),
+                            const QStringList& platforms = {},
+                            const QString& abi = QString()) {
+    QJsonObject v{{"version", ver},
+                  {"url", "https://example.invalid/pkg-" + ver + ".zip"},
+                  {"sha256", sha},
+                  {"size", 1024},
+                  {"min_app_version", "1.0.0"},
+                  {"updated_at", date}};
+    if (!platforms.isEmpty()) v["platforms"] = QJsonArray::fromStringList(platforms);
+    if (!abi.isEmpty()) v["abi"] = abi;
+    return v;
+}
+
+QJsonObject fixture_plugin(const QString& name, const QJsonArray& versions) {
+    return QJsonObject{
+        {"name", name}, {"display_name", name}, {"display_name_en", name + " (en)"},
+        {"description", "fixture"}, {"category", "test"}, {"author", "market_test"},
+        {"readme_url", "https://example.invalid/readme/" + name + ".md"},
+        {"versions", versions}};
+}
+
+QByteArray build_fixture_feed(const QString& topo_sha) {
+    const QString plat = PluginMarket::current_platform();
+    const QString abi = plugin_host_abi();
+    QJsonArray topo{fixture_version("1.0.0", "2026-09-28"),
+                    fixture_version("1.1.0", "2026-09-29"),
+                    fixture_version("1.2.0", "2026-09-30"),
+                    fixture_version("1.3.0", "2026-10-02", topo_sha)};
+    QJsonArray other{fixture_version("1.0.0", "2026-09-28")};
+    // native:1.3.0 只发 Windows 包;1.1.0 标注本平台 + 本机 host ABI
+    QJsonArray cov{
+        fixture_version("1.0.0", "2026-09-20", QString(64, 'a'), {"windows-x86_64"}, "x"),
+        fixture_version("1.1.0", "2026-09-25", QString(64, 'a'), {plat}, abi),
+        fixture_version("1.2.0", "2026-09-27", QString(64, 'a'), {"windows-x86_64"}, "x"),
+        fixture_version("1.3.0", "2026-10-02", QString(64, 'a'), {"windows-x86_64"},
+                        "qt6-mingw-x64")};
+    if (plat == QStringLiteral("windows-x86_64")) {
+        // Windows 上让 1.3.0 本机可装(与原用例的平台分支一致)
+        cov[3] = fixture_version("1.3.0", "2026-10-02", QString(64, 'a'), {plat}, abi);
+    }
+    QJsonArray plugins{fixture_plugin("js-topo", topo), fixture_plugin("lua-stats", other),
+                       fixture_plugin("js-replay", other), fixture_plugin("cpp-coverage", cov)};
+    return QJsonDocument(QJsonObject{{"plugins", plugins}}).toJson();
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName("BPLC_MarketTest");
     QCoreApplication::setApplicationVersion("1.3.0");
 
-    // feed 解析:用真实市场仓库的 market.json
-    const QString feed_path =
-        QString::fromLocal8Bit(qgetenv("MARKET_JSON"));
-    QFile ff(feed_path.isEmpty()
-                 ? QStringLiteral("/home/hatch/workspace/BPLC_Plugin_Market/"
-                                  "market.json")
-                 : feed_path);
+    // feed / 包:默认用临时目录里生成的夹具,MARKET_JSON+MARKET_ZIP 可换成真实市场仓库
+    QTemporaryDir fixture_dir;
+    CHECK(fixture_dir.isValid(), "fixture dir");
+    QString feed_path = QString::fromLocal8Bit(qgetenv("MARKET_JSON"));
+    QString zip_path = QString::fromLocal8Bit(qgetenv("MARKET_ZIP"));
+    const bool fixture_feed = feed_path.isEmpty() || zip_path.isEmpty();
+    if (fixture_feed) {
+        zip_path = fixture_dir.filePath(QStringLiteral("js-topo-1.3.0.zip"));
+        CHECK(write_fixture_zip(zip_path), "write fixture zip");
+        QFile zf(zip_path);
+        CHECK(zf.open(QIODevice::ReadOnly), "open fixture zip");
+        const QString sha = QString::fromLatin1(
+            QCryptographicHash::hash(zf.readAll(), QCryptographicHash::Sha256).toHex());
+        feed_path = fixture_dir.filePath(QStringLiteral("market.json"));
+        QFile jf(feed_path);
+        CHECK(jf.open(QIODevice::WriteOnly) &&
+                  jf.write(build_fixture_feed(sha)) > 0,
+              "write fixture market.json");
+    }
+    QFile ff(feed_path);
     CHECK(ff.open(QIODevice::ReadOnly), "open market.json");
     QString perr;
     const QList<MarketPlugin> feed =
         PluginMarket::parse_feed(ff.readAll(), &perr);
     CHECK(perr.isEmpty() && feed.size() == 4, "parse 4 plugins");
+    if (feed.size() != 4) {
+        qWarning("FAIL: feed unusable, aborting (%s)", qPrintable(perr));
+        return 1;
+    }
     const MarketPlugin& topo = feed[0];
     CHECK(topo.name == "js-topo", "topo name");
     CHECK(topo.versions.size() == 4, "topo 4 versions");
@@ -63,12 +161,13 @@ int main(int argc, char** argv) {
         // Windows x64:1.3.0 带 qt6-mingw-x64 ABI,当前平台可装
         CHECK(cov_compat != nullptr && cov_compat->version == "1.3.0",
               "cov latest_compatible 1.3.0 on windows");
-    } else if (plat == QLatin1String("linux-x86_64")) {
-        // Linux x64:1.3.0 只标注了 windows 平台,回落到 1.1.0(qt6-gcc-x64)
+    } else if (plat == QLatin1String("linux-x86_64") || fixture_feed) {
+        // Linux x64:1.3.0 只标注了 windows 平台,回落到 1.1.0(qt6-gcc-x64);
+        // 自生成夹具把 1.1.0 标为本机平台 + 本机 host ABI,任何非 Windows x64 平台(含 arm64)同样回落到 1.1.0
         CHECK(cov_compat != nullptr && cov_compat->version == "1.1.0",
               "cov latest_compatible 1.1.0 on linux");
     } else {
-        // arm64 等:feed 未发对应平台的 native 包 → 无兼容版本(被过滤)
+        // 真实市场 feed(MARKET_JSON/MARKET_ZIP)上的 arm64 等:未发对应平台的 native 包 → 无兼容版本(被过滤)
         CHECK(cov_compat == nullptr,
               "cov no compatible version on non-x86_64 platform");
     }
@@ -143,11 +242,6 @@ int main(int argc, char** argv) {
     CHECK(PluginMarket::app_version_ok(""), "app ver empty ok");
 
     // sha256 校验:与 market.json 记录值比对(js-topo 最新版)
-    const QString zip_env = QString::fromLocal8Bit(qgetenv("MARKET_ZIP"));
-    const QString zip_path = zip_env.isEmpty()
-        ? QStringLiteral("/home/hatch/workspace/BPLC_Plugin_Market/plugins/"
-                         "js-topo/js-topo-1.3.0.zip")
-        : zip_env;
     CHECK(PluginMarket::verify_sha256(zip_path, topo.latest()->sha256),
           "sha256 match feed");
     CHECK(!PluginMarket::verify_sha256(
@@ -220,6 +314,10 @@ int main(int argc, char** argv) {
     CHECK(inst.size() == 1 && inst[0].manifest.version == "1.3.0" &&
               inst[0].enabled,
           "installed listed, enabled");
+    if (inst.isEmpty()) {
+        qWarning("FAIL: install produced nothing, aborting (%s)", qPrintable(fin_err));
+        return 1;
+    }
     // meta.json 记录来源与更新时间(离线安装:source=file)
     CHECK(inst[0].source == "file", "installed source=file");
     CHECK(!inst[0].updated_at.isEmpty(), "installed updated_at set");
