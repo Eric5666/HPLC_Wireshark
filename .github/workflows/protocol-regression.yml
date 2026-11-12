@@ -338,6 +338,11 @@ jobs:
           (cd unit_test/protocol-nw/msdu-crc-gate-probe && bash build.sh)
           ./unit_test/protocol-nw/msdu-crc-gate-probe/build/msdu_crc_gate_probe
 
+          # PB 块 CRC 失败口径(用户 2026-11):NW/GW 四个解析器 FC OK ⇒ 解析 + 红;
+          # MSDU CRC32 OK ⇒ MSDU 照常解析;MSDU CRC32 FAIL ⇒ 不解析/不学习
+          (cd unit_test/filter/pb-crc-red-probe && bash build.sh)
+          ./unit_test/filter/pb-crc-red-probe/build/pb_crc_red_probe
+
       - name: Plugin backend / script sandbox / block format regression
         env:
           QT_QPA_PLATFORM: offscreen

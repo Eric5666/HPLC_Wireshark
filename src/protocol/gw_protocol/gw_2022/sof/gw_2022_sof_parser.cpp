@@ -36,7 +36,9 @@ int sof_rf_pb_size(quint8 idx) {
 namespace gw_2022_sof {
 
 QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
-                 QByteArray& complete_msdu_body, quint8 band, bool is_rf) {
+                 QByteArray& complete_msdu_body, quint8 band, bool is_rf,
+                 QByteArray* crc_candidate_body) {
+    if (crc_candidate_body) crc_candidate_body->clear();
     const quint8* p = reinterpret_cast<const quint8*>(body.constData());
 
     // FCH 业务字段(相对 FCH 起点)
@@ -105,6 +107,9 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
     if (pb_asm::body_parseable_with_good_msdu_span(
             res, pb_size - 4, pb_asm::SpanLayout::Gw))
         complete_msdu_body = res.msdu_body;
+    // 用户 2026-11 裁决(与南网 nw_2021/nw_2026 同口径):PB 块 CRC 不再是 MSDU 解析的
+    // 前置门 —— 体流另行交给调用方,由 MSDU CRC32 三态决定是否采用(见 gw_20xx_parser)。
+    if (crc_candidate_body) *crc_candidate_body = res.msdu_body;
     return QString();
 }
 
