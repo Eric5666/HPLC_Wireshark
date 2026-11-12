@@ -8,7 +8,7 @@ CRC: crc24_lsb from protocol/common/crc.h (poly=0xC60001, init=0, LSB-first,
 computed over len-3 bytes, stored in the last 3 bytes little-endian).
 FCH FCS: crc over bytes 0..12, stored at 13..15.
 PBCS: crc over head+body, stored in the last 3 bytes of each PB block.
-eFC FCS (OFDMA, table 11): same convention over eFC bytes 0..12, stored 13..15.
+eFC FCS (OFDMA 表 11 / TDA 表 13):same convention over eFC bytes 0..12, stored 13..15.
 
 Design notes (see gw2026_ofdma_tda_sim_notes.md):
 - Frames are spec-correct at FCH/eFC/station-PB level (tables 10/11 for OFDMA,
@@ -23,6 +23,8 @@ Design notes (see gw2026_ofdma_tda_sim_notes.md):
   set spec FCH sym = 1 (Standard) while the parser reads 2 (Long), so the
   discrepancy is visible in the tree.
 """
+
+import os
 
 # ---------- bit helpers ----------
 def set_bits(buf, byte, bit, length, value):
@@ -197,6 +199,9 @@ def build_tda():
     set_bits(f, 18, 5, 3, 0)         # eFC sta1 band = 0
     set_bits(f, 19, 0, 5, 2)         # eFC sta1 DivCopy (TMI) = 2 -> PB 136
     set_bits(f, 19, 5, 3, 0)         # RSV
+    store_crc24(f, 16, 16)           # eFC FCS -> bytes 29..31(与 OFDMA 同款;
+                                     # 旧版生成器漏写,帧尾 CRC 全 0,带 eFC CRC
+                                     # 校验的解析器会整帧拒收)
     # station payloads from byte 32: sta0 PB, sta1 PB (each 136, single block)
     off = 32
     for head, tag in ((0xC0, "TDA-STA0-PB0"), (0xC0, "TDA-STA1-PB0")):

@@ -819,9 +819,11 @@ void TopoState::apply(const TopoEvent& e) {
         && (e.proxy_comm_rate >= 0 || e.proxy_down_comm_rate >= 0 || e.min_comm_rate >= 0)) {
         for (const auto& p : e.nodes) {
             TopoNode& n = nodes[p.tei];
-            n.proxy_comm_rate = e.proxy_comm_rate;
-            n.proxy_down_comm_rate = e.proxy_down_comm_rate;
-            n.min_comm_rate = e.min_comm_rate;
+            // 逐项覆盖:缺失项(-1)不写,不洗掉节点已有的真值(20B 体 min=-1 时
+            // 不清除原先的 min 真值);与 apply_channel_info 的写法一致。
+            if (e.proxy_comm_rate >= 0) n.proxy_comm_rate = e.proxy_comm_rate;
+            if (e.proxy_down_comm_rate >= 0) n.proxy_down_comm_rate = e.proxy_down_comm_rate;
+            if (e.min_comm_rate >= 0) n.min_comm_rate = e.min_comm_rate;
             n.comm_rate_known = true;
         }
     }

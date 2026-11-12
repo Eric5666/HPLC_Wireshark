@@ -259,7 +259,9 @@ void GW_2026_TreeBuilder::build(QTreeWidgetItem* root, const PacketEntry& e) {
                 // eFC(表11,自 byte16):站点1-3 ×[TEI 12b/RU 4b/分集拷贝 5b/PB个数 1b/RSV 2b],每站 3B,
                 // 站点数由 FCH 站点数字段决定;其后加密标志位(eFC (9,0))+保留至 (12,0-7)
                 // eFC(表11,固定 16B,内部字节 0-15,其中 13-15 为帧控制校验) ⇒ PB 自 byte32 起
-                const int n_efc = (sn >= 1 && sn <= 3) ? sn : 0;
+                // 帧长不足 32B 时 eFC 不存在,本站循环跳过(新 H1 纵深防御;截断帧
+                // 已由 assemble() 拒收,这里只防 get_bits(raw, 16..27) 越界读)。
+                const int n_efc = (rsz >= 32 && sn >= 1 && sn <= 3) ? sn : 0;
                 for (int s = 1; s <= n_efc; ++s) {
                     const int b = 16 + (s - 1) * 3;
                     tree_add_bit_field(sof, QString("eFC Sta%1 DstTEI").arg(s),
@@ -313,7 +315,9 @@ void GW_2026_TreeBuilder::build(QTreeWidgetItem* root, const PacketEntry& e) {
                 // eFC(表13,自 byte16):每站 4B×(站点数-1):
                 //   TEI(b,0,12)/数据载荷符号数(b+1,4,9)/TF与数据载荷频段(b+2,5,3)/分集拷贝(b+3,0,5)/RSV(b+3,5,3)
                 //   eFC(表13,固定 16B) ⇒ PB 自 byte32 起
-                const int n_efc = (sn >= 1 && sn <= 3) ? sn : 0;
+                // 帧长不足 32B 时 eFC 不存在,本站循环跳过(新 H1 纵深防御;截断帧
+                // 已由 assemble() 拒收,这里只防 get_bits(raw, 16..27) 越界读)。
+                const int n_efc = (rsz >= 32 && sn >= 1 && sn <= 3) ? sn : 0;
                 for (int s = 1; s <= n_efc; ++s) {
                     const int b = 16 + (s - 1) * 4;
                     tree_add_bit_field(sof, QString("eFC Sta%1 DstTEI").arg(s),

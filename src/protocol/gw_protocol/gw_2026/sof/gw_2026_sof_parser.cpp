@@ -75,6 +75,20 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
             return QString();
         }
         if (sof_dt == 2 || sof_dt == 3) {
+            // eFC(表11/13,固定 16B):FCH 16B + eFC 16B = 32B。帧长不足 32B 时
+            // eFC 字段读到 byte27 会越界(新 H1),先整帧拒收;再按南网同款
+            // 校验 eFC CRC24(eFC[13..15],即 p[29..31]),不对同样整帧拒收。
+            if (body.size() < 32)
+                return trl::L("OFDMA/TDA eFC 截断(帧长 %1B，需至少 32B)").arg(body.size());
+            {
+                const quint32 efc_crc_calc = crc24_lsb(p + 16, 16);
+                const quint32 efc_crc_rx =
+                    (quint32)p[29] | ((quint32)p[30] << 8) | ((quint32)p[31] << 16);
+                if (efc_crc_calc != efc_crc_rx)
+                    return trl::L("OFDMA/TDA eFC CRC24 错(calc=%1 rx=%2)")
+                               .arg(efc_crc_calc, 6, 16, QChar('0'))
+                               .arg(efc_crc_rx, 6, 16, QChar('0'));
+            }
             const bool is_ofdma = (sof_dt == 2);
             // 站点数(表10 (7,3,2) / 表12 (7,3,2)):0=保留 1=2站 2=3站 3=4站
             const quint8 sn_code = (quint8)get_bits(p, 7, 3, 2);
@@ -173,8 +187,10 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
             //   · PB 头 START/END/seq 时序合法（首块 0x40=START / 末块 0x81=END / 单块 0xC0）
             //   · 源码与 Python 独立复算、Lua tshark 三方 CRC 值一致
             // 未验证(weak) —— 只有实包能证伪：
-            //   · eFC 是否恒为 16 字节（表11/13 内部字节号 0-15 是推断依据，
-            //     「扩展帧控制符号数」是时序属性，不影响字节布局的判断尚待实包确认）
+            //   · eFC 是否恒为 16 字节：表11/13 内部字节号 0-15、校验在 13-15，
+            //     且符号数是时序属性（表 6：FCH 符号数随频段变而字节长恒 16B，同理），
+            //     故文档内 eFC 按 16B 理解；但规约未明文定 eFC 总长，真实设备是否
+            //     存在更长 eFC 或 eFC 后私有字段，仍待实包确认。
             //   · 分集拷贝模式(5bit) → PB 大小 的映射：已按分集拷贝模式表
             //     (gw_2026_diversity_pb_size,HDC 2.0 4-1 物理层 5.1.9.7 表18)
             //     实现,并用 5.2.5.7「只允许 PB72/PB136」做约束
@@ -281,6 +297,10 @@ struct I18nRegSof {
         trl::register_en("PB 块超出帧长", "PB block exceeds frame length");
         trl::register_en("OFDMA/TDA 站点数为保留值 0(表10/表12 仅定义 1-3)",
                          "OFDMA/TDA Station Count Is Reserved Value 0 (Tables 10/12 Define 1-3 Only)");
+        trl::register_en("OFDMA/TDA eFC 截断(帧长 %1B，需至少 32B)",
+                         "OFDMA/TDA eFC Truncated (Frame Length %1B, At Least 32B Required)");
+        trl::register_en("OFDMA/TDA eFC CRC24 错(calc=%1 rx=%2)",
+                         "OFDMA/TDA eFC CRC24 Error (calc=%1 rx=%2)");
         trl::register_en("帧子类型为保留值(表7 仅定义 0-3)",
                          "Frame Subtype Is Reserved Value (Table 7 Defines 0-3 Only)");
         trl::register_en("OFDMA PB 大小越界(copy_mode=%1 → %2B，协议限 72/136)",

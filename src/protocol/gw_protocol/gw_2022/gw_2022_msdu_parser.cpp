@@ -844,6 +844,12 @@ static void parse_rfdl(MsduInfo& out, const QByteArray& rfdl, int rel_base) {
             g.rel_start = content_abs; g.rel_len = elen;
             add_fields(g.children, content, 0, kRfdlAttrSpec, kRfdlAttrSpecN, content_abs);
             // 拓扑采集(表126 站点属性,不改渲染):代理 TEI/上下行接收率/最小接收率/RF 跳数/角色
+            // 截断 IE(<12B,最后读 MinRcvRate@byte11)不采拓扑——越界读 0 会被当成
+            // 0% 成功率写进节点,字段树仍由 add_fields 正常渲染(静默截断尾部字段)。
+            if (content.size() < 12) {
+                pa::warn("gw_2022:truncated", QStringLiteral("station attr %1B<12B").arg(content.size()));
+                append_summary(out, trl::L(" (站点属性截断)"));
+            } else {
             out.topo_event.proxy_tei = (quint16)get_bits(content, 6, 0, 12);
             out.topo_event.rf_role = (quint8)get_bits(content, 7, 4, 4);
             out.topo_event.rf_hop = (quint8)get_bits(content, 8, 4, 4);
@@ -853,6 +859,7 @@ static void parse_rfdl(MsduInfo& out, const QByteArray& rfdl, int rel_base) {
             out.topo_event.proxy_up_rate   = (up_v   <= 100) ? (qint16)up_v   : -1;
             out.topo_event.proxy_down_rate = (down_v <= 100) ? (qint16)down_v : -1;
             out.topo_event.min_link_rate   = (min_v  <= 100) ? (qint16)min_v  : -1;
+            }
             translate_enum(g.children, "Role", kRole, 5);
             annotate_unit(g.children, "ProxyUpRcvRate", QStringLiteral("%"));
             annotate_unit(g.children, "ProxyDownRcvRate", QStringLiteral("%"));
@@ -1046,6 +1053,18 @@ static QString boot_reason_suffix(const QByteArray& b) {
     }
 }
 
+// 截断 MMe 的统一提示:说明文字同时进拓扑事件"变更说明"列和字段树,
+// 外层 CRC 只覆盖整帧,内部消息长度不足拦不住,保留记录便于排查设备端问题帧。
+static QString truncated_note(int need, int got) {
+    return trl::L("消息截断：期望至少 %1 字节，实际 %2 字节").arg(need).arg(got);
+}
+static void add_truncated_node(QVector<MsduFieldNode>& parent, const QString& note) {
+    MsduFieldNode tn;
+    tn.name = trl::L("(消息截断)");
+    tn.value = note;
+    parent.append(tn);
+}
+
 // ================= 主解析 =================
 MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
     MsduInfo out;
@@ -1164,7 +1183,12 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                 add_fields(root.children, b, 0, kAssocReqSpec, kAssocReqSpecN, head_size + 4);
                 // STAMACAddr(0,0,48):关联请求源 TEI 未知(0)时,供 Source 列显示 STA-X [MAC]
                 out.sta_mac = get_bits(b, 0, 0, 48);
-                // 拓扑事件:关联请求(STA 正在入网;TEI 未分配,用 tei=0 承载 MAC)
+                // 拓扑事件:关联请求(STA 正在入网;TEI 未分配,用 tei=0 承载 MAC);
+                // 体不足 6B 时 MAC 读不全(越界读 0 记一条全零事件),跳过事件生成。
+                if (b.size() < 6) {
+                    pa::warn("gw_2022:truncated", QStringLiteral("assoc req %1B<6B").arg(b.size()));
+                    append_summary(out, trl::L(" (关联请求截断)"));
+                } else {
                 out.topo_event.kind = TopoEventKind::AssocReq;
                 out.topo_event.nodes.append({0, out.sta_mac});
                 // STA 重启检测用:关联请求由 STA 本人发出,MSDU 头 RestartCount 即该 STA 的;
@@ -1176,6 +1200,7 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                 if (const QString reason = boot_reason_suffix(b); !reason.isEmpty())
                     out.topo_event.desc = trl::L("关联请求: STA %1 正在入网（%2）")
                         .arg(mac_str(out.sta_mac)).arg(reason);
+                }
                 MsduFieldNode mn;
                 mn.name  = QStringLiteral("ManufacturerInfo [144b]");
                 mn.value = bytes_hex(b, 24, 18);
@@ -1233,7 +1258,9 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                 // MMeAssocCnf(关联确认):固定头到 b[40],RouteInfo 从 b[40] 起
                 add_fields(root.children, b, 0, kAssocCnfSpec, kAssocCnfSpecN, head_size + 4);
                 // 拓扑事件:关联确认(STA 入网 + 代理 + CCO MAC);仅成功(0=成功,0x0A=再次入网成功)时更新拓扑
-                {
+                // 截断体(<18B)不采拓扑——assoc_res@12、sta_tei@14、link@15、proxy_tei@16-17
+                // 读不全时越界读 0 会被当成入网成功;字段树与 RouteInfo 不受影响。
+                if (b.size() >= 18) {
                     const quint8 assoc_res = (quint8)get_bits(b, 12, 0, 8);
                     const quint64 sta_mac = get_bits(b, 0, 0, 48);
                     const quint64 cco_mac = get_bits(b, 6, 0, 48);
@@ -1254,6 +1281,9 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                         .arg(sta_tei)
                         .arg(proxy_tei ? QString::number(proxy_tei) : QStringLiteral("-"));
                     }
+                } else {
+                    pa::warn("gw_2022:truncated", QStringLiteral("assoc cnf %1B<18B").arg(b.size()));
+                    append_summary(out, trl::L(" (关联确认截断)"));
                 }
                 apply_dicts(root.children);
                 annotate_unit(root.children, "STAReAssocTime", QStringLiteral("ms"));
@@ -1350,10 +1380,15 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                 int sta_num = (int)get_bits(b, 11, 0, 8);  // 汇总站点数(51347)
                 int off = 16;                              // 站点信息起点
                 // 拓扑事件:关联汇总(批量站点入网 + 代理);仅 AssocResult=0(允许加入网络)时更新拓扑
+                // 体不足 16B(固定头口径)时结果字节读 0 撞上成功语义,跳过事件生成。
                 const quint8 gar = (quint8)get_bits(b, 0, 0, 8);
                 const quint16 gproxy_tei = (quint16)get_bits(b, 8, 0, 12);
                 const bool g_ok = (gar == 0);
-                if (g_ok) {
+                if (g_ok && b.size() < 16) {
+                    pa::warn("gw_2022:truncated", QStringLiteral("assoc gather ind %1B<16B").arg(b.size()));
+                    append_summary(out, trl::L(" (关联汇总截断)"));
+                }
+                if (g_ok && b.size() >= 16) {
                     const quint64 gcco_mac = (quint64)get_bits(b, 2, 0, 48);
                     out.topo_event.kind = TopoEventKind::AssocGatherInd;
                     if (gcco_mac) out.topo_event.cco_mac = gcco_mac;
@@ -1401,7 +1436,21 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                     const quint16 sta_tei = (quint16)get_bits(b, 0, 0, 12);
                     const quint16 new_proxy = (quint16)get_bits(b, 2, 0, 12);
                     const quint16 old_proxy = (quint16)get_bits(b, 12, 0, 12);
-                    if (sta_tei) {
+                    // OldProxyTEI 在 byte12 起 12 位(占 byte12-13),读满三个 TEI 需 14B
+                    constexpr int kNeed = 14;
+                    if (b.size() < kNeed) {
+                        // 截断帧仍记一条(只入事件表,不改拓扑,同原逻辑),但只写截断原因,
+                        // 不写读成 0 的代理 TEI,免得显示成"-→-"像无代理的正常事件
+                        const QString note = truncated_note(kNeed, b.size());
+                        pa::warn("gw_2022:truncated",
+                                 QStringLiteral("change proxy req %1B<%2B").arg(b.size()).arg(kNeed));
+                        append_summary(out, trl::L(" (代理变更请求截断)"));
+                        add_truncated_node(root.children, note);
+                        out.topo_event.kind = TopoEventKind::ChangeProxyReq;
+                        out.topo_event.desc = (b.size() >= 2 && sta_tei)
+                            ? note + QStringLiteral(" (STA TEI=%1)").arg(sta_tei)
+                            : note;
+                    } else if (sta_tei) {
                         out.topo_event.kind = TopoEventKind::ChangeProxyReq;
                         out.topo_event.desc = trl::L("代理变更请求: STA TEI=%1 %2→%3")
                             .arg(sta_tei)
@@ -1526,8 +1575,11 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                     if (sta_tei && sta_mac) out.topo_event.nodes.append({sta_tei, sta_mac});
                     if (sta_tei && proxy_tei) out.topo_event.routes.append({sta_tei, proxy_tei});
                     // 成功率:ProxyCommRate(上行)/ProxyDownCommRate(下行)为百分比,
-                    // 填入 comm_rates 供 TopoState 更新通讯成功率状态(对齐南网)
-                    {
+                    // 填入 comm_rates 供 TopoState 更新通讯成功率状态(对齐南网)。
+                    // comm_rates 整条只在上行、下行都读满时发(体 ≥20B):
+                    // CommRateInfo 的 up/down 是 quint8、无 -1 哨兵,缺下行发半条
+                    // 没法表达"未知";低于 20B 的体不发 comm_rates。
+                    if (b.size() >= 20) {
                         const quint8 up_rate = (quint8)get_bits(b, 18, 0, 8);
                         const quint8 down_rate = (quint8)get_bits(b, 19, 0, 8);
                         if (sta_tei && (up_rate <= 100 || down_rate <= 100)) {
@@ -1543,13 +1595,23 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                         .arg(proxy_tei ? QString::number(proxy_tei) : QStringLiteral("-"));
                     // 载波组(表95 byte18/19/28):与代理站点通信成功率/下行/最小 → proxy_comm_rate/down/min_comm_rate
                     // (独立于 RFDL proxy_* 与 0x005E comm_rates;值 0-100,超出无效=-1)
+                    // 成功率读数分档:上行读满需 19B、下行 20B、最小 29B;不够时对应
+                    // 字段保持 -1(未知),不读 0 写进拓扑。只门读数,不跳过整个事件
+                    // (16B 体内的 TEI/MAC/代理关系/邻居位图是真值)。
                     {
-                        const quint8 up_v  = (quint8)get_bits(b, 18, 0, 8);
-                        const quint8 dwn_v = (quint8)get_bits(b, 19, 0, 8);
-                        const quint8 min_v = (quint8)get_bits(b, 28, 0, 8);
-                        out.topo_event.proxy_comm_rate      = (up_v  <= 100) ? (qint32)up_v  : -1;
-                        out.topo_event.proxy_down_comm_rate = (dwn_v <= 100) ? (qint32)dwn_v : -1;
-                        out.topo_event.min_comm_rate        = (min_v <= 100) ? (qint16)min_v : -1;
+                        const qint32 up_v  = (b.size() >= 19)
+                            ? (qint32)(quint8)get_bits(b, 18, 0, 8) : -1;
+                        const qint32 dwn_v = (b.size() >= 20)
+                            ? (qint32)(quint8)get_bits(b, 19, 0, 8) : -1;
+                        const qint16 min_v = (b.size() >= 29)
+                            ? (qint16)(quint8)get_bits(b, 28, 0, 8) : -1;
+                        out.topo_event.proxy_comm_rate      = (up_v  >= 0 && up_v  <= 100) ? up_v  : -1;
+                        out.topo_event.proxy_down_comm_rate = (dwn_v >= 0 && dwn_v <= 100) ? dwn_v : -1;
+                        out.topo_event.min_comm_rate        = (min_v >= 0 && min_v <= 100) ? min_v : -1;
+                        if (b.size() < 29) {
+                            pa::warn("gw_2022:truncated", QStringLiteral("discover list rates %1B<29B").arg(b.size()));
+                            append_summary(out, trl::L(" (成功率截断)"));
+                        }
                     }
                 }
                 apply_dicts(root.children);
@@ -1753,7 +1815,11 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                 add_fields(root.children, b, 0, kChangeProxyCnfSpec,
                            kChangeProxyCnfSpecN, head_size + 4);
                 // 拓扑事件:代理变更确认(STA 换代理);仅 Result=0(成功)时更新拓扑
-                {
+                // 体不足 20B(固定头口径)时结果字节读 0 撞上成功语义,跳过事件生成。
+                if (b.size() < 20) {
+                    pa::warn("gw_2022:truncated", QStringLiteral("change proxy cnf %1B<20B").arg(b.size()));
+                    append_summary(out, trl::L(" (代理变更确认截断)"));
+                } else {
                     const quint8 pres = (quint8)get_bits(b, 0, 0, 8);
                     const quint16 sta_tei = (quint16)get_bits(b, 4, 0, 12);
                     const quint16 proxy_tei = (quint16)get_bits(b, 6, 0, 12);
@@ -1817,6 +1883,18 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                 int off = 16;
                 // 拓扑事件:离网指示(按 MAC 标记离网)
                 out.topo_event.kind = TopoEventKind::LeaveInd;
+                // 固定头 16B(Reason 2 + LeaveSTANum 2 + LeaveDelayTime 2 + RSV0 10),之后 6B×n 个 MAC
+                constexpr int kHead = 16;
+                if (b.size() < kHead) {
+                    // 固定头不全,站点数不可信:记一条只写截断原因的记录,不标任何站点离网
+                    const QString note = truncated_note(kHead, b.size());
+                    pa::warn("gw_2022:truncated",
+                             QStringLiteral("leave ind %1B<%2B").arg(b.size()).arg(kHead));
+                    append_summary(out, trl::L(" (离线指示截断)"));
+                    add_truncated_node(root.children, note);
+                    out.topo_event.desc = note;
+                    break;
+                }
                 if (n > 0 && off + 6 <= b.size()) {
                     auto& lg = group(root.children,
                                      QStringLiteral("LeaveSTAMACList [%1]").arg(n));
@@ -1831,7 +1909,19 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
                         lg.children.append(mac);
                         off += 6;
                     }
-                    out.topo_event.desc = trl::L("离线指示: %1 个站点离线").arg(n);
+                    out.topo_event.desc = trl::L("离线指示: %1 个站点离线").arg(out.topo_event.leaves.size());
+                }
+                // MAC 列表不足声明的 n 个:已读全的 MAC 照常标离网,说明里写实际个数并标注截断
+                const int need = kHead + 6 * n;
+                if (b.size() < need) {
+                    const QString note = trl::L("消息截断：声明 %1 个站点，期望 %2 字节，实际 %3 字节")
+                                             .arg(n).arg(need).arg(b.size());
+                    pa::warn("gw_2022:truncated",
+                             QStringLiteral("leave ind %1B<%2B (n=%3)").arg(b.size()).arg(need).arg(n));
+                    append_summary(out, trl::L(" (离线指示截断)"));
+                    add_truncated_node(root.children, note);
+                    out.topo_event.desc = trl::L("离线指示: %1 个站点离线").arg(out.topo_event.leaves.size())
+                                          + QStringLiteral(" (") + note + QStringLiteral(")");
                 }
                 break;
             }
@@ -2194,6 +2284,12 @@ struct I18nReg {
         trl::register_en("过零NTB采集指示", "MMeZeroCrossNTBCollectInd");
         trl::register_en("过零NTB上报", "MMeZeroCrossNTBReport");
         trl::register_en(" (RFDL 截断)", " (RFDL truncated)");
+        trl::register_en(" (站点属性截断)", " (Station Attribute truncated)");
+        trl::register_en(" (关联确认截断)", " (Assoc confirm truncated)");
+        trl::register_en(" (成功率截断)", " (Success Rate truncated)");
+        trl::register_en(" (关联请求截断)", " (Assoc Request truncated)");
+        trl::register_en(" (代理变更确认截断)", " (Change Proxy Confirm truncated)");
+        trl::register_en(" (关联汇总截断)", " (Assoc Gather truncated)");
         trl::register_en("发现列表消息", "Discovery List Message");
         trl::register_en("单跳 MSDU 类型 %1", "Simple MSDU type %1");
         trl::register_en("MSDU 截断(长度 %1 > 可用 %2)", "MSDU truncated (len %1 > avail %2)");
@@ -2259,6 +2355,11 @@ struct I18nReg {
         trl::register_en("代理变更请求: STA TEI=%1 %2→%3", "Proxy change request: STA TEI=%1 %2→%3");
         trl::register_en("代理变更(批量): %1 个站点代理→%2", "Proxy change (batch): %1 stations proxy→%2");
         trl::register_en("离线指示: %1 个站点离线", "Leave indication: %1 stations left");
+        trl::register_en("消息截断：期望至少 %1 字节，实际 %2 字节", "Message truncated: expected at least %1 bytes, got %2");
+        trl::register_en("消息截断：声明 %1 个站点，期望 %2 字节，实际 %3 字节", "Message truncated: %1 stations declared, expected %2 bytes, got %3");
+        trl::register_en("(消息截断)", "(Message truncated)");
+        trl::register_en(" (代理变更请求截断)", " (Change Proxy Request truncated)");
+        trl::register_en(" (离线指示截断)", " (Leave Indication truncated)");
         trl::register_en("%1 - %2 (%3b/邻居)", "%1 - %2 (%3b/neighbor)");
     }
 };

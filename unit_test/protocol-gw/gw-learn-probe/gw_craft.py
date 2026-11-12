@@ -207,6 +207,7 @@ def tda_frame():
     set_bits(f, 17, 4, 9, 50)
     set_bits(f, 18, 5, 3, 0)
     set_bits(f, 19, 0, 5, 2)   # sta1 DivCopy -> 136
+    store_crc24(f, 16, 16)     # eFC FCS(与 ofdma_frame() 同款;无 FCS 会被 eFC CRC24 门整帧拒收)
     sta0 = app_msdu(2, 0xAABBCCDDEE02)
     sta1 = app_msdu(3, 0xAABBCCDDEE03)
     off = 32
