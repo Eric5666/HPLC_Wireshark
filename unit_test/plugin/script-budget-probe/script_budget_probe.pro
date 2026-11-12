@@ -24,5 +24,5 @@ HEADERS += $$REPO/src/plugin/host/plugin_backend.h \
     $$REPO/src/plugin/host/native_backend.h \
     $$REPO/src/plugin/host/script_painter.h
 
-# Lua 5.4.6(内嵌,缺失时自动获取/构建)
+# Lua 5.4.9(内嵌,缺失时自动获取/构建)
 include($$REPO/src/plugin/lua_bundle.pri)
