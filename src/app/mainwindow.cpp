@@ -11,24 +11,19 @@
 #include "QSimpleUpdater.h"
 #include "appconfig.h"
 #include "updatemirror.h"
-#include "playbackwriter.h"
+#include "exportservice.h"
+#include "capturecontroller.h"
 #include "i18n.h"
-#include "packetentry_serialize.h"
-#include "fieldtools.h"
 #include "topo_window.h"
-#include "topo_input.h"
 #include "plugin_panels.h"
 #include "plugin_manager.h"
 #include "market_dialog.h"
 #include "plugin_market.h"
 #include "QsLog.h"
 
-#include <QtConcurrent>
 #include <QCoreApplication>
 #include <QDockWidget>
 #include <QTabWidget>
-#include <QDataStream>
-#include <QFutureWatcher>
 #include <QToolBar>
 #include <QToolButton>
 #include <QAction>
@@ -44,10 +39,8 @@
 #include <QMenuBar>
 #include <QSettings>
 #include <QFileDialog>
-#include <QFile>
-#include <QTextStream>
-#include <QStringConverter>
 #include <QMutexLocker>
+#include <QElapsedTimer>
 #include <QDateTime>
 #include <QKeySequence>
 #include <QVBoxLayout>
@@ -86,13 +79,10 @@ MainWindow::MainWindow(QWidget* parent)
       m_splitter_bottom(nullptr), m_tree_protocol(nullptr),
       m_hex_view(nullptr), m_lbl_hex_title(nullptr),
       m_status_left(nullptr), m_status_mid(nullptr), m_status_right(nullptr),
-      m_reader(nullptr), m_dispatch(nullptr), m_model(nullptr),
+      m_capture(nullptr), m_model(nullptr),
       m_flush_timer(nullptr), m_status_timer(nullptr),
-      m_paused(false), m_exporting(false),
-      m_follow_bottom(true),
-      m_last_ntb(0),
-      m_have_last_ntb(false),
-      m_index_counter(0) {
+      m_paused(false),
+      m_follow_bottom(true) {
     qRegisterMetaType<ParseResult>("ParseResult");
     qRegisterMetaType<BplcFrame>("BplcFrame");
     qRegisterMetaType<ReaderConfig>("ReaderConfig");
@@ -105,10 +95,8 @@ MainWindow::MainWindow(QWidget* parent)
     build_ui();
     wire_signals();
 
-    m_reader   = new SerialReader(this);
-    m_dispatch = new FrameDispatcher(this);
-    m_dispatch->connect_source(m_reader);
-    m_dispatch->set_flow_credit(m_reader->flow_credit());   // 背压:在途帧上限
+    // 采集控制:Reader + 解析 dispatcher(背压额度、协议切换重建)
+    m_capture = new CaptureController(this);
 
     // TopoController owns domain processing, persistence and worker lifecycle.
     m_topo_controller = new TopoController(this);
@@ -129,19 +117,27 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_status_left) m_status_left->setToolTip(message);
     }, Qt::QueuedConnection);
 
-    connect(m_dispatch, &FrameDispatcher::parsed,
-            this,       &MainWindow::on_parsed,
-            Qt::QueuedConnection);
+    // 解析结果已由 CaptureController 排队投递到 GUI 线程(重建 dispatcher 无需重连)
+    connect(m_capture, &CaptureController::parsed,
+            this,      &MainWindow::on_parsed);
     setup_plugin_ui();       // 插件引擎 + 功能面板 dock + 插件菜单
-    connect_plugin_feed();   // m_reader frame_ready → 插件引擎(喂帧)
-    connect(m_reader, &SerialReader::status_message,
+    // 条目构建(GUI 侧):每帧提交拓扑输入 + 喂插件
+    m_entry_builder.set_topo_controller(m_topo_controller);
+    m_entry_builder.set_plugin_engine(m_plugin_engine);
+    connect_plugin_feed();   // 插件引擎 → 主界面(跳帧/弹表格)
+    connect(m_capture, &CaptureController::status_message,
             this,      &MainWindow::on_status_message);
-    connect(m_reader, &SerialReader::error_occurred,
+    connect(m_capture, &CaptureController::error_occurred,
             this,      &MainWindow::on_error);
-    connect(m_reader, &SerialReader::progress_percent,
+    connect(m_capture, &CaptureController::progress_percent,
             this,      [this](int p) {
                 m_status_left->setText(trl::L("回放进度: %1%").arg(p));
             });
+
+    // 导出服务:格式选择 + 后台流式导出,进度/结果写状态栏
+    m_export = new ExportService(this);
+    connect(m_export, &ExportService::status_changed,
+            this, [this](const QString& text) { m_status_left->setText(text); });
 
     m_flush_timer = new QTimer(this);
     connect(m_flush_timer, &QTimer::timeout, this, &MainWindow::on_flush_buffer);
@@ -469,24 +465,8 @@ void MainWindow::wire_signals() {
             });
 }
 
-static ReaderConfig load_config_from_settings() {
-    ReaderConfig c;                       // 来源:config.ini [reader]
-    int mode = appcfg::reader_mode();
-    c.mode = ReaderMode(mode);
-    c.serial_name = appcfg::reader_com();
-    c.baud_rate   = appcfg::reader_baud();
-    c.file_path   = appcfg::reader_file();
-    return c;
-}
-
-static void save_config_to_settings(const ReaderConfig& c) {
-    appcfg::set_reader(int(c.mode), c.serial_name, c.baud_rate,
-                       c.file_path);
-}
-
 void MainWindow::on_start() {
-    if (!m_reader) return;
-    ReaderConfig init = load_config_from_settings();
+    ReaderConfig init = CaptureController::load_config();
     const QString old_proto = appcfg::protocol();
     CommConfigDialog dlg(this, init);
     if (m_plugin_engine)
@@ -495,15 +475,15 @@ void MainWindow::on_start() {
     if (dlg.exec() != QDialog::Accepted) return;
 
     ReaderConfig cfg = dlg.config();
-    save_config_to_settings(cfg);
+    CaptureController::save_config(cfg);
 
     // 协议下拉框变更确定后:提示「重启后生效,若点击开始则立即生效」;
     // 点「开始」→ 停止 + 清空 + 重建 dispatcher(用新协议立即生效)。
     if (appcfg::protocol() != old_proto && confirm_protocol_rebuild())
         rebuild_dispatcher();
 
-    m_have_last_ntb = false;
-    m_reader->start(cfg);
+    m_entry_builder.restart_delta_chain();
+    m_capture->start(cfg);
     m_status_left->setText(QString("Running: %1")
         .arg(cfg.mode == ReaderMode::SerialPort
                 ? QString("%1 @ %2,%3,%4,%5,%6")
@@ -516,7 +496,7 @@ void MainWindow::on_start() {
 }
 
 void MainWindow::on_stop() {
-    if (m_reader) m_reader->stop();
+    m_capture->stop();
     m_status_left->setText(QStringLiteral("Stopped"));
 }
 
@@ -528,14 +508,12 @@ void MainWindow::on_pause() {
 
 void MainWindow::on_clear() {
     m_model->clear_all();
-    m_index_counter = 0;
-    m_last_ntb = 0;
-    m_have_last_ntb = false;
+    m_entry_builder.reset();
     {
         QMutexLocker lock(&m_pending_mutex);
         m_pending.clear();
     }
-    if (m_dispatch) m_dispatch->statistics()->reset();
+    if (FrameStatistics* stats = m_capture->statistics()) stats->reset();
     // 拓扑状态随报文清空(此前漏清会导致旧拓扑残留);回放日志/快照/回放水位同步清零
     if (m_topo_controller) m_topo_controller->clear();
     ++m_topo_request_id;
@@ -546,282 +524,20 @@ void MainWindow::on_clear() {
     m_status_left->setText(QStringLiteral("Cleared"));
 }
 
-namespace {
-/// @brief 按全局顺序把快照的全部条目交给 fn:盘块(未就绪块用内存副本)+ 热区
-/// @return 实际交出的条目数(读不到的块不计,调用方与 snap.total 比对)
-template <typename Fn>
-qint64 for_each_snapshot_entry(const PacketListModel::ExportSnapshot& snap, Fn&& fn) {
-    qint64 n = 0;
-    for (int b = 0; b < snap.block_paths.size(); ++b) {
-        const PacketListModel::BlockMem mem = snap.block_mem.value(b);
-        if (mem) {
-            for (const PacketEntry& e : *mem) { fn(e); ++n; }
-            continue;
-        }
-        QVector<PacketEntry> block;   // 独立文件句柄,线程安全
-        if (!pser::read_block_file(snap.block_paths[b], block)) continue;
-        for (const PacketEntry& e : block) { fn(e); ++n; }
-    }
-    for (const PacketEntry& e : snap.hot) { fn(e); ++n; }
-    return n;
-}
-
-/// 导出格式
-enum class ExportFormat { Bin, Text, Csv };
-
-// TEI→MAC 映射表(与 PacketListModel 内部一致)
-using TeiMacMap = QHash<quint32, QHash<quint16, quint64>>;
-
-static quint64 csv_lookup_mac(const TeiMacMap& macs, quint32 nid, quint16 tei) {
-    const auto it = macs.constFind(nid);
-    if (it == macs.constEnd()) return 0;
-    const auto jt = it->constFind(tei);
-    return (jt == it->constEnd()) ? 0 : jt.value();
-}
-
-/// CSV 单元格转义(含逗号/引号/换行时双引号包裹,内部引号翻倍)
-static QString csv_escape(const QString& s) {
-    if (!s.contains(',') && !s.contains('"') && !s.contains('\n') && !s.contains('\r'))
-        return s;
-    QString t = s;
-    t.replace('"', QStringLiteral("\"\""));
-    return QLatin1Char('"') + t + QLatin1Char('"');
-}
-
-/// 复现 PacketListModel::data() 的列渲染,生成一行 CSV 单元格(与表格列一致)
-static QStringList csv_row(const PacketEntry& e, const TeiMacMap& macs) {
-    QStringList c;
-    c << QString::number(e.index);
-    // Time
-    c << (e.meta.frame_time.isValid()
-              ? e.meta.frame_time.toString(QStringLiteral("HH:mm:ss.zzz"))
-              : QStringLiteral("%1 s").arg(e.epoch_ms / 1000.0, 0, 'f', 6));
-    // Delta
-    c << QStringLiteral("%1 s").arg(e.delta_us / 1e6, 0, 'f', 6);
-    // Orig Src
-    {
-        QString s;
-        if (e.accepted && e.msdu.present && !e.msdu.simple_head && e.msdu.msdu_src_tei > 0) {
-            const int tei = e.msdu.msdu_src_tei;
-            s = (tei == kTeiCco) ? QStringLiteral("CCO") : QStringLiteral("STA-%1").arg(tei);
-            quint64 mac = e.msdu.msdu_src_mac;
-            if (!mac) mac = csv_lookup_mac(macs, e.mpdu.net_id, quint16(tei));
-            if (mac) s += QStringLiteral(" [%1]").arg(mac_str(mac));
-        }
-        c << s;
-    }
-    // Source
-    {
-        QString s;
-        if (!e.accepted) {
-            s = QStringLiteral("DROP");
-        } else {
-            const quint16 tei = e.mpdu.src_tei;
-            if (e.mpdu.frame_type == 3 && tei == 0) {
-                s = QStringLiteral("CCO");
-                const quint64 mac = csv_lookup_mac(macs, e.mpdu.net_id, 1);
-                if (mac) s += QStringLiteral(" [%1]").arg(mac_str(mac));
-            } else if (tei != 0) {
-                s = (tei == kTeiCco) ? QStringLiteral("CCO") : QStringLiteral("STA-%1").arg(tei);
-                const quint64 mac = csv_lookup_mac(macs, e.mpdu.net_id, tei);
-                if (mac) s += QStringLiteral(" [%1]").arg(mac_str(mac));
-            } else if (e.msdu.sta_mac) {
-                s = QStringLiteral("STA-X [%1]").arg(mac_str(e.msdu.sta_mac));
-            } else {
-                s = e.meta.is_rf ? QStringLiteral("RF") : QStringLiteral("PLC");
-            }
-        }
-        c << s;
-    }
-    // Destination
-    {
-        QString s;
-        if (!e.accepted) {
-            s = e.reason;
-        } else if (e.mpdu.dst_tei == kTeiBroadcast) {
-            s = QStringLiteral("BROADCAST");
-        } else {
-            const quint16 tei = e.mpdu.dst_tei;
-            if (tei != 0) {
-                s = (tei == kTeiCco) ? QStringLiteral("CCO") : QStringLiteral("STA-%1").arg(tei);
-                const quint64 mac = csv_lookup_mac(macs, e.mpdu.net_id, tei);
-                if (mac) s += QStringLiteral(" [%1]").arg(mac_str(mac));
-            } else {
-                s = QStringLiteral("*");
-            }
-        }
-        c << s;
-    }
-    // Orig Dst
-    {
-        QString s;
-        if (e.accepted && e.msdu.present && !e.msdu.simple_head && e.msdu.msdu_dst_tei > 0) {
-            const int tei = e.msdu.msdu_dst_tei;
-            s = (tei == kTeiBroadcast) ? QStringLiteral("BCAST")
-              : (tei == kTeiCco) ? QStringLiteral("CCO") : QStringLiteral("STA-%1").arg(tei);
-            if (tei == kTeiBroadcast) {
-                if (e.msdu.msdu_dst_mac) s += QStringLiteral(" [%1]").arg(mac_str(e.msdu.msdu_dst_mac));
-            } else {
-                quint64 mac = e.msdu.msdu_dst_mac;
-                if (!mac) mac = csv_lookup_mac(macs, e.mpdu.net_id, quint16(tei));
-                if (mac) s += QStringLiteral(" [%1]").arg(mac_str(mac));
-            }
-        }
-        c << s;
-    }
-    // Dir
-    c << dir_display(e);
-    // Protocol
-    c << (!e.accepted ? QStringLiteral("ERR")
-                      : e.meta.is_rf ? QStringLiteral("RF") : QStringLiteral("HPLC"));
-    // Frame Type
-    c << (!e.accepted ? QStringLiteral("-") : e.mpdu.frame_type_name());
-    // MSDU Type
-    c << ((e.accepted && e.msdu.present) ? e.msdu.summary : QString());
-    // MSDU Seq
-    c << ((e.accepted && e.msdu.present) ? QString::number(e.msdu.msdu_seq) : QString());
-    // Length
-    c << QString::number(e.raw_bytes.size());
-    // Info
-    {
-        QString s;
-        if (!e.accepted) {
-            s = e.reason;
-        } else {
-            const QString nid = QString::number(e.mpdu.net_id, 16).toUpper().rightJustified(6, QChar('0'));
-            if (e.mpdu.frame_type == 0)
-                s = QStringLiteral("NetID=0x%1 ts=%2").arg(nid).arg(e.meta.timestamp);
-            else if (e.mpdu.frame_type == 1)
-                // 无线帧无 TMI(南网无线表131 只有 MCS/PBLen),与 packetlistmodel SOF 摘要同口径
-                s = QStringLiteral("NetID=0x%1 src=%2 dst=%3 %4=%5 PBNum=%6%7")
-                        .arg(nid).arg(e.mpdu.src_tei).arg(e.mpdu.dst_tei)
-                        .arg(e.meta.is_rf ? QStringLiteral("MCS") : QStringLiteral("TMI"))
-                        .arg(e.meta.is_rf ? e.mpdu.mcs : e.mpdu.tmi)
-                        .arg(e.mpdu.pb_num)
-                        .arg(e.msdu_body.isEmpty() ? QString()
-                                                   : QStringLiteral(" MSDU[%1B]").arg(e.msdu_body.size()));
-            else
-                s = QStringLiteral("NetID=0x%1 src=%2 dst=%3")
-                        .arg(nid).arg(e.mpdu.src_tei).arg(e.mpdu.dst_tei);
-        }
-        c << s;
-    }
-    return c;
-}
-
-/// @brief 导出结果:实际处理的帧数与写文件是否成功
-struct ExportResult {
-    qint64 frames = 0;     ///< 交给 writer 的帧数(与快照总数比对,不符即有块丢失)
-    bool   io_ok = false;  ///< 文件打开与写入均无错误
-};
-
-/// @brief 工作线程导出:遍历快照盘块 + 热区,流式写文件(不阻塞 GUI)
-ExportResult run_export(const PacketListModel::ExportSnapshot& snap,
-                        const QString& path, ExportFormat fmt) {
-    ExportResult r;
-    QFile out(path);
-    if (!out.open(QIODevice::WriteOnly)) return r;
-    if (fmt == ExportFormat::Text) {
-        playback::RawHexWriter w(&out);
-        r.frames = for_each_snapshot_entry(snap, [&w](const PacketEntry& e) { w.add(e); });
-    } else if (fmt == ExportFormat::Bin) {
-        playback::PlaybackBinWriter w(&out);
-        r.frames = for_each_snapshot_entry(snap, [&w](const PacketEntry& e) { w.add(e); });
-    } else {   // ExportFormat::Csv
-        QTextStream ts(&out);
-        // 本地编码存储(Windows 中文系统=GBK/ANSI 代码页),Excel 直接打开不乱码
-        ts.setEncoding(QStringConverter::System);
-        ts << QStringLiteral("#,Time,Delta,Orig Src,Source,Destination,Orig Dst,Dir,"
-                             "Protocol,Frame Type,MSDU Type,MSDU Seq,Length,Info\n");
-        const auto emit_row = [&](const PacketEntry& e) {
-            const QStringList cells = csv_row(e, snap.tei_mac);
-            for (int i = 0; i < cells.size(); ++i) {
-                if (i) ts << ',';
-                ts << csv_escape(cells[i]);
-            }
-            ts << '\n';
-        };
-        r.frames = for_each_snapshot_entry(snap, emit_row);
-        ts.flush();
-    }
-    out.close();
-    r.io_ok = out.error() == QFile::NoError;
-    return r;
-}
-}  // namespace
-
 void MainWindow::on_export() {
-    if (m_model->total_count() == 0) {
-        m_status_left->setText(trl::L("无可导出的帧"));
-        return;
-    }
-    // 三种导出格式:①回放 bin(0x3C 封装帧流+BCD 时间标签)
-    // ②裸数据 hex 文本(每行一帧,无 0x3C/0x3E/0x3D 封装):
-    //   [ts 4B LE][phr_mcs][option][channel][isRF][MPDU];回放(RawHex)
-    //   按 ts 还原捕获时刻,缺失时回退本地时间
-    // ③CSV 表格(每行内容,便于 Excel 排查;仅导出,不支持导入)
-    QString selected;
-    const QString filter = trl::L("回放文件 (*.bin)") + QStringLiteral(";;") +
-                           trl::L("裸 hex 文本 (*.txt)") + QStringLiteral(";;") +
-                           trl::L("CSV 表格 (*.csv)");
-    QString f = QFileDialog::getSaveFileName(
-        this, trl::L("导出为文件"),
-        "BPLC_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") +
-            (selected.contains(QStringLiteral(".txt")) ? ".txt"
-             : selected.contains(QStringLiteral(".csv")) ? ".csv" : ".bin"),
-        filter, &selected);
-    if (f.isEmpty()) return;
-    ExportFormat fmt = ExportFormat::Bin;
-    if (selected.contains(QStringLiteral(".txt"))) {
-        fmt = ExportFormat::Text;
-        if (!f.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive))
-            f += QStringLiteral(".txt");
-    } else if (selected.contains(QStringLiteral(".csv"))) {
-        fmt = ExportFormat::Csv;
-        if (!f.endsWith(QStringLiteral(".csv"), Qt::CaseInsensitive))
-            f += QStringLiteral(".csv");
-    } else if (!f.endsWith(QStringLiteral(".bin"), Qt::CaseInsensitive)) {
-        f += QStringLiteral(".bin");
-    }
-    // 导出快照 + 工作线程流式导出(不阻塞界面)
-    const PacketListModel::ExportSnapshot snap = m_model->make_export_snapshot();
-    const qint64 total = m_model->total_count();
-    m_exporting = true;   // 暂停 flush 进模型,保证快照一致 + 线程安全
-    m_status_left->setText(trl::L("正在导出 %1 帧...").arg(total));
-
-    auto* watcher = new QFutureWatcher<ExportResult>(this);
-    connect(watcher, &QFutureWatcher<ExportResult>::finished, this,
-            [this, watcher, f, total]() {
-        m_exporting = false;
-        const ExportResult res = watcher->result();
-        watcher->deleteLater();
-        QFile out(f);
-        if (!res.io_ok) {
-            m_status_left->setText(trl::L("导出失败:写入文件出错 → %1").arg(f));
-        } else if (res.frames != total) {
-            // 有盘块读不到:如实报告,不再声称导出了全部帧
-            m_status_left->setText(trl::L("导出不完整:仅写出 %1 / %2 帧 → %3")
-                                       .arg(res.frames).arg(total).arg(f));
-        } else if (!out.exists() || out.size() == 0) {
-            m_status_left->setText(trl::L("没有可写入的帧数据"));
-        } else {
-            m_status_left->setText(trl::L("已导出 %1 帧 → %2").arg(total).arg(f));
-        }
-    });
-    watcher->setFuture(QtConcurrent::run([snap, f, fmt]() {
-        return run_export(snap, f, fmt);
-    }));
+    // 格式选择 + 后台流式导出见 ExportService;导出期间 on_flush_buffer 暂停 append
+    m_export->export_model(this, m_model);
 }
 
 void MainWindow::on_settings() {
-    ReaderConfig init = load_config_from_settings();
+    ReaderConfig init = CaptureController::load_config();
     const QString old_proto = appcfg::protocol();
     CommConfigDialog dlg(this, init);
     if (m_plugin_engine)
         connect(&dlg, &CommConfigDialog::theme_changed,
                 m_plugin_engine, &LocalPluginEngine::notify_theme_changed);
     if (dlg.exec() != QDialog::Accepted) return;
-    save_config_to_settings(dlg.config());
+    CaptureController::save_config(dlg.config());
     if (appcfg::protocol() != old_proto && confirm_protocol_rebuild())
         rebuild_dispatcher();
     m_status_left->setText(trl::L("配置已保存(Ctrl+E 开始捕获)"));
@@ -842,29 +558,13 @@ bool MainWindow::confirm_protocol_rebuild() {
 /// @brief 停止旧解析线程并重建 dispatcher(拖放导入/协议切换共用):
 ///        丢弃积压帧、重置 MSDU 重组与统计,按 config.ini 协议实例化新解析器
 void MainWindow::reset_dispatcher() {
-    // 回放忙碌时不能同步 delete(析构里 wait 会卡 GUI 直至崩溃):
-    // shutdown 立即断开 worker 信号 + 退出解析线程(停止处理积压帧、
-    // 停止向 GUI 投递 parsed),再断外部连接并 deleteLater 异步销毁。
-    if (m_dispatch) {
-        m_dispatch->shutdown();
-        m_dispatch->disconnect_source(m_reader);
-        m_dispatch->disconnect(this);
-        m_dispatch->deleteLater();
-        m_dispatch = nullptr;
-    }
-    m_dispatch = new FrameDispatcher(this);   // 按 config.ini 新协议实例化解析器
-    m_dispatch->connect_source(m_reader);
-    m_dispatch->set_flow_credit(m_reader->flow_credit());   // 背压:在途帧上限
-
-    connect(m_dispatch, &FrameDispatcher::parsed,
-            this,       &MainWindow::on_parsed,
-            Qt::QueuedConnection);
+    m_capture->reset_dispatcher();   // 丢弃积压帧 + 按 config.ini 新协议重建解析器
     if (m_plugin_engine) m_plugin_engine->reset_all();  // 新采集/回放:插件状态清零
 }
 
 /// @brief 协议切换立即生效:停止当前采集/回放 → 清空 → 用新协议重建解析器
 void MainWindow::rebuild_dispatcher() {
-    if (m_reader) m_reader->stop();
+    m_capture->stop();
     on_clear();                       // 清空列表/协议树/hex/统计(旧 dispatcher 仍在)
     reset_dispatcher();
     m_status_left->setText(trl::L("协议已立即生效(Ctrl+E 开始捕获)"));
@@ -897,13 +597,13 @@ void MainWindow::dropEvent(QDropEvent* event) {
 
 void MainWindow::start_file_import(const QString& path) {
     // 仅允许在停止状态导入;采集/回放运行中拒绝(避免打断正在进行的捕获)
-    if (m_reader && m_reader->is_running()) {
+    if (m_capture->is_running()) {
         QMessageBox::warning(this, trl::L("导入"),
                              trl::L("正在捕获/回放中,请先点击停止后再拖入文件"));
         return;
     }
     const QString ext = QFileInfo(path).suffix().toLower();
-    ReaderConfig cfg = load_config_from_settings();
+    ReaderConfig cfg = CaptureController::load_config();
     if (ext == QStringLiteral("bin")) {
         cfg.mode = ReaderMode::FilePlayback;
     } else if (ext == QStringLiteral("txt") || ext == QStringLiteral("hex")) {
@@ -914,13 +614,12 @@ void MainWindow::start_file_import(const QString& path) {
         return;
     }
     cfg.file_path = path;
-    save_config_to_settings(cfg);
+    CaptureController::save_config(cfg);
 
-    if (!m_reader) return;
-    m_reader->stop();      // 停止旧采集/回放(abort 打断同步回放循环)
+    m_capture->stop();     // 停止旧采集/回放(abort 打断同步回放循环)
     on_clear();            // 清空列表/协议树/hex/统计
     reset_dispatcher();    // 重建解析器:丢弃旧回放积压帧 + 重置 MSDU 重组/统计
-    m_reader->start(cfg);
+    m_capture->start(cfg);
     m_status_left->setText(QStringLiteral("Running: %1").arg(path));
 }
 
@@ -941,71 +640,16 @@ void MainWindow::on_goto() {
     jump_packet_to_frame(idx);
 }
 
-PacketEntry MainWindow::make_entry(const ParseResult& r, qint64 now) {
-    PacketEntry e;
-    e.index     = ++m_index_counter;
-    // 带时间标签(回放导出的 bin)时用帧内绝对时刻,保证 Time/Delta/再导出
-    // 均以原始捕获时间为基准;否则退化为本地接收时刻
-    qint64 t = (r.meta.frame_time.isValid())
-                   ? r.meta.epoch_ms : now;   // 用 parse 时缓存的 epoch_ms,避免时区转换
-    e.epoch_ms  = t;
-    e.accepted  = r.accept;     // 拒收行 Info 列显示 reason,着色走灰/红判定
-    e.reason    = r.reject_reason;
-    // Delta:内置解析器已在解析时算好显示 Delta(好帧锚点链,见 DisplayTimeAnchor),
-    // 直接取用;插件解析器不算(-1)时沿用旧 NTB 差算法(m_last_ntb 链)。
-    // 本地接收时间(0x3C 打点 arrival_us)只作 serialreader 断段(seg_start)
-    // 判断参考,不参与 Delta 计算。
-    e.delta_us = (r.display_delta_us >= 0)
-        ? r.display_delta_us
-        : playback::next_delta_us(r.meta, m_last_ntb, m_have_last_ntb);
-    e.meta      = r.meta;
-    e.mpdu      = r.mpdu;
-    // 协议身份来自解析器,非全局配置。
-    // 映射统一走 entry_protocol_id():它保留插件位(0x80),否则插件帧会被当内置帧渲染。
-    e.protocol = entry_protocol_id(r.protocol);
-    e.msdu_body = r.msdu_body;
-    e.raw_wire  = r.raw_wire;
-    e.msdu      = r.msdu;    // MSDU/MAC 层字段树(SOF 重组完成时非空)
-    e.beacon    = r.beacon;  // BEACON 载荷区字段树(BEACON 帧时非空)
-    e.msdu_raw_base = r.msdu_raw_base;
-    e.raw_bytes = r.payload_for_log;
-    e.dissect_fields = r.dissect_fields;  // 插件解析器通用字段树(内置解析恒空)
-    // Topology input normalization is owned by its module; MainWindow only forwards it.
-    const TopoFrameInput topo_frame = make_topo_frame_input(e);
-    if (topo_frame.net_id != 0 && m_topo_controller) m_topo_controller->submit_frame(topo_frame);
-    e.search_text = make_search_text(e);   // 缓存可搜索全文,过滤匹配复用
-    // 插件:喂"解析好的帧"(单入口 parse)——帧序号/时间戳/topoEvent 均已就绪,
-    // 插件 topo 与原版共享同一份解码数据,不再走独立事件侧信道
-    if (m_plugin_engine) {
-        BplcFrame pf;
-        pf.meta = r.meta;
-        pf.raw_wire = r.raw_wire;
-        pf.data = r.raw_wire.isEmpty() ? r.payload_for_log : r.raw_wire;
-        pf.arrival_us = r.arrival_us;
-        pf.decoded_index = e.index;
-        pf.decoded_epoch_ms = e.epoch_ms;
-        if (e.msdu.topo_event.kind != TopoEventKind::Other)
-            pf.topo_event = e.msdu.topo_event;
-        // 标量透传:主程序已解析好的单值直接给插件
-        pf.accepted = r.accept;
-        pf.error_reason = r.reject_reason;
-        pf.mpdu = r.mpdu;
-        pf.msdu_present = e.msdu.present;
-        pf.msdu_summary = e.msdu.summary;
-        m_plugin_engine->feed_frame(pf);
-    }
-    return e;
-}
-
 void MainWindow::enqueue_entry(PacketEntry&& e) {
     QMutexLocker lock(&m_pending_mutex);
     m_pending.append(std::move(e));
     m_pending_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-void MainWindow::on_parsed(const ParseResult& r) {
-    if (m_paused) return;
-    enqueue_entry(make_entry(r, QDateTime::currentMSecsSinceEpoch()));
+void MainWindow::on_parsed(const PreparedEntryPtr& p) {
+    if (m_paused || !p) return;
+    // 条目已在解析线程预构建:这里只补序号/时间/Delta 并分发拓扑/插件
+    enqueue_entry(m_entry_builder.build(*p, QDateTime::currentMSecsSinceEpoch()));
     // 高速灌帧(错协议解析跳过重活、极快)时,parsed 事件会把 100ms 的
     // flush timer 挤出事件队列,导致 pending 堆积到数万帧、一次性 flush 卡顿。
     // 达到阈值即同步 flush,把巨批摊平为小批,与国网正常解析的节奏一致。
@@ -1014,7 +658,7 @@ void MainWindow::on_parsed(const ParseResult& r) {
 }
 
 void MainWindow::on_flush_buffer() {
-    if (m_exporting) return;   // 导出期间暂停 append 进模型,保证快照一致且线程安全
+    if (m_export->is_exporting()) return;   // 导出期间暂停 append 进模型,保证快照一致且线程安全
     QElapsedTimer flush_t;
     flush_t.start();
     QList<PacketEntry> snapshot;
@@ -1244,8 +888,8 @@ void MainWindow::on_error(const QString& e) {
 }
 
 void MainWindow::refresh_status_bar() {
-    if (!m_dispatch) return;
-    auto* stats = m_dispatch->statistics();
+    auto* stats = m_capture->statistics();
+    if (!stats) return;
     auto snap = stats->snapshot();
     using Key = FrameStatistics::Key;
     auto v = [&](Key k) { return snap.value(int(k), 0); };
@@ -1320,10 +964,6 @@ struct I18nRegMainWindow {
         trl::register_en("应用", "Apply");
         trl::register_en("继续", "Resume");
         trl::register_en("作者邮箱", "Author email");
-        trl::register_en("导出为文件", "Export to file");
-        trl::register_en("裸 hex 文本 (*.txt)", "Raw hex text (*.txt)");
-        trl::register_en("回放文件 (*.bin)", "Replay files (*.bin)");
-        trl::register_en("CSV 表格 (*.csv)", "CSV table (*.csv)");
         trl::register_en("[错误] ", "[Error] ");
         trl::register_en("  显示过滤器:", "  Display Filter:");
         trl::register_en("字节视图(十六进制,左偏移 + 中间 hex + 右侧 ASCII + RAW DATA):",
@@ -1335,7 +975,6 @@ struct I18nRegMainWindow {
         trl::register_en("发现新版本,点击下载安装", "New version available, click to download");
         trl::register_en("发现新版本,请点击右上角\"立即更新\"下载",
                          "New version found, click [Update Now] at top-right to download");
-        trl::register_en("正在导出 %1 帧...", "Exporting %1 frames...");
         trl::register_en("协议已更改", "Protocol changed");
         trl::register_en("协议已更改,重启后生效。若点击「开始」则立即生效。",
                          "Protocol changed. Takes effect after restart, or click [Start] to apply immediately.");
@@ -1361,12 +1000,7 @@ struct I18nRegMainWindow {
         trl::register_en("关于(&A)", "About(&A)");
         trl::register_en("关于 BPLC STA Monitor", "About BPLC STA Monitor");
         trl::register_en("BPLC/HRF 协议 STA 报文监控上位机(串口捕获 + 离线回放)。", "BPLC/HRF Protocol STA Packet Monitor (Serial Capture + Offline Replay).");
-        trl::register_en("无可导出的帧", "No frames to export");
-        trl::register_en("没有可写入的帧数据", "No frame data to write");
-        trl::register_en("已导出 %1 帧 → %2", "Exported %1 frames → %2");
-        trl::register_en("导出失败:写入文件出错 → %1", "Export failed: error writing file → %1");
         trl::register_en("历史拓扑回放失败: ", "Historical topology replay failed: ");
-        trl::register_en("导出不完整:仅写出 %1 / %2 帧 → %3", "Export incomplete: only %1 / %2 frames written → %3");
         trl::register_en("配置已保存(Ctrl+E 开始捕获)", "Settings saved (Ctrl+E to start capture)");
         trl::register_en("导入", "Import");
         trl::register_en("正在捕获/回放中,请先点击停止后再拖入文件", "Capture/replay in progress, please stop it before dropping files");
@@ -1420,9 +1054,9 @@ void MainWindow::setup_plugin_ui() {
 }
 
 void MainWindow::connect_plugin_feed() {
-    if (!m_reader || !m_plugin_engine) return;
+    if (!m_plugin_engine) return;
     // 插件帧流:不再直连 SerialReader::frame_ready(原始帧,早于解析);
-    // 改由 make_entry 在协议解析完成后喂"解析好的帧"(带帧序号/时间戳/topoEvent)
+    // 改由 EntryBuilder::build 在协议解析完成后喂"解析好的帧"(带帧序号/时间戳/topoEvent)
     // 插件请求的主界面跳帧:host.jumpToFrame(idx) → 定位帧列表对应行
     connect(m_plugin_engine, &LocalPluginEngine::host_jump_to_frame,
             this, &MainWindow::jump_packet_to_frame,
@@ -1531,113 +1165,9 @@ void MainWindow::on_choose_plugin_dir() {
                                    << PluginMarket::default_install_dir());
 }
 
-// ---- 自动化测试:回放结束后等插件线程排空,逐 tab 截图后退出 ----
-void MainWindow::run_plugin_autotest(const QString& plugins_dir,
-                                     const QString& bin,
-                                     const QString& shot_dir) {
-    qInfo() << "[autotest] start, bin=" << bin << "shots=" << shot_dir;
-    m_autotest_shots = shot_dir;
-    QDir().mkpath(m_autotest_shots);
-    // 等插件加载完成再开始回放
-    connect(m_plugin_engine, &LocalPluginEngine::load_finished, this,
-            [this, bin]() {
-                qInfo() << "[autotest] load_finished, starting import";
-                disconnect(m_plugin_engine, &LocalPluginEngine::load_finished,
-                           this, nullptr);
-                start_file_import(bin);
-                qInfo() << "[autotest] import started";
-                // 回放结束 → 轮询插件线程排空(只处理一次,finished 可能发多次)
-                QMetaObject::Connection* fconn = new QMetaObject::Connection();
-                *fconn = connect(m_reader, &SerialReader::finished, this,
-                                 [this, fconn]() {
-                    qInfo() << "[autotest] reader finished";
-                    disconnect(*fconn);
-                    delete fconn;
-                    QTimer* poll = new QTimer(this);
-                    poll->setInterval(500);
-                    int* waits = new int(0);
-                    connect(poll, &QTimer::timeout, this,
-                            [this, poll, waits]() {
-                                ++(*waits);
-                                // 首个 finished 可能来自 start_file_import 里 stop() 的旧会话;
-                                // 背压下回放不再瞬间读完,须等 reader 结束且在途帧全部交给 GUI
-                                const bool idle = m_plugin_engine->is_idle()
-                                    && !m_reader->is_running()
-                                    && m_reader->flow_credit()->in_flight() == 0;
-                                if (idle || *waits > 1200) {  // 排空或 10min 超时
-                                    poll->stop();
-                                    poll->deleteLater();
-                                    const int w = *waits;
-                                    delete waits;
-                                    qInfo() << "[autotest] idle, waits=" << w
-                                            << "tabs=" << m_plugin_tabs->count();
-                                    autotest_shoot_tabs();
-                                }
-                            });
-                    poll->start();
-                });
-            });
-    load_plugin_dirs(QStringList() << plugins_dir
-                                   << PluginMarket::default_install_dir());
-}
-
-/// @brief 自动化测试:逐 tab 截图(每个 tab 显示 1.5s 等面板刷新后再抓)
-void MainWindow::autotest_shoot_tabs() {
-    if (m_autotest_shooting) return;  // 只跑一次
-    m_autotest_shooting = true;
-    qInfo() << "[autotest] shoot start";
-    const int n = m_plugin_tabs->count();
-    QTimer* t = new QTimer(this);
-    t->setInterval(1500);
-    int* i = new int(-1);
-    bool* field_shot_done = new bool(false);  // 字段树截图是否已完成
-    connect(t, &QTimer::timeout, this, [this, i, n, t, field_shot_done]() {
-        qInfo() << "[autotest] shoot tick i=" << *i << "n=" << n;
-        // 先抓上一个 tab(已显示 1.5s,面板刷新完成)
-        if (*i >= 0 && *i < m_plugin_tabs->count()) {
-            QWidget* tab = m_plugin_tabs->widget(*i);
-            QString pid;
-            for (auto it = m_plugin_panels.begin();
-                 it != m_plugin_panels.end(); ++it) {
-                if (it.value() == tab) { pid = it.key(); break; }
-            }
-            tab->grab().save(QStringLiteral("%1/plugin_%2.png")
-                                 .arg(m_autotest_shots, pid));
-        }
-        ++(*i);
-        if (*i >= n) {
-            // 先选中一帧带 MSDU 的报文,让底部字段树/hex 有内容,下一拍再截 main.png
-            if (!*field_shot_done) {
-                *field_shot_done = true;
-                qint64 target = 0;
-                const qint64 total = m_model ? m_model->total_count() : 0;
-                for (qint64 f = 1; f <= total; ++f) {
-                    PacketEntry e;
-                    if (m_model->entry_at(int(f - 1), e)
-                        && e.msdu.present && !e.msdu.summary.isEmpty()) {
-                        target = f;
-                        break;
-                    }
-                }
-                if (target < 1) target = total;  // 兜底:最后一帧
-                jump_packet_to_frame(target);
-                qInfo() << "[autotest] select frame for field view:" << target;
-                return;
-            }
-            t->stop();
-            t->deleteLater();
-            delete i;
-            delete field_shot_done;
-            this->grab().save(QStringLiteral("%1/main.png").arg(m_autotest_shots));
-            qApp->quit();
-            return;
-        }
-        // 显示下一个 tab 并触发一次刷新
-        m_plugin_tabs->setCurrentIndex(*i);
-        QWidget* tab = m_plugin_tabs->widget(*i);
-        if (auto* tp = qobject_cast<TopoPluginPanel*>(tab)) tp->refresh_now();
-        else if (auto* rp = qobject_cast<ReplayPluginPanel*>(tab)) rp->refresh_now();
-        else if (auto* rep = qobject_cast<ReportPluginPanel*>(tab)) rep->generate_now();
-    });
-    t->start();
+QString MainWindow::plugin_id_of(const QWidget* panel) const {
+    for (auto it = m_plugin_panels.cbegin(); it != m_plugin_panels.cend(); ++it) {
+        if (it.value() == panel) return it.key();
+    }
+    return QString();
 }

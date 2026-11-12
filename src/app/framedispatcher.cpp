@@ -70,7 +70,8 @@ void DispatcherWorker::on_frame(const BplcFrame& frame) {
                      .arg(m_frame_count.load() + 1).arg(r.reject_reason));
     r.meta.seg_start = frame.meta.seg_start;
     r.meta.replay_time_tag = frame.meta.replay_time_tag;
-    emit parsed(r);
+    // 条目在解析线程预构建(字段移动 + 搜索文本 + 插件模板),GUI 线程只补序号/时间
+    emit parsed(prepare_entry(std::move(r)));
     // 不再忙等限速:Reader 侧的在途额度(FrameCredit,GUI 处理完解析结果才归还)
     // 把 Reader → 解析 → GUI 的积压限制在固定帧数内,错协议快解析也不会淹没 GUI。
     // 累计统计:每 5 万帧打一条进度,定位回灌卡顿在哪个环节
@@ -164,26 +165,27 @@ void FrameDispatcher::shutdown() {
     }
 }
 
-void FrameDispatcher::on_parsed(const ParseResult& r) {
+void FrameDispatcher::on_parsed(const PreparedEntryPtr& p) {
     if (m_credit) m_credit->release();   // GUI 已接手这一帧:归还背压额度
+    const PacketEntry& e = p->entry;
     m_total.fetch_add(1);
-    if (!r.accept) m_dropped.fetch_add(1);
+    if (!e.accepted) m_dropped.fetch_add(1);
 
     FrameStatistics::Key key = FrameStatistics::KEY_OTHER;
-    if (r.accept) {
-        bool rf = r.meta.is_rf;
-        switch (r.mpdu.frame_type) {
+    if (e.accepted) {
+        bool rf = e.meta.is_rf;
+        switch (e.mpdu.frame_type) {
             case 0: key = rf ? FrameStatistics::KEY_BEACON_HRF : FrameStatistics::KEY_BEACON_HPLC; break;
             case 1: key = rf ? FrameStatistics::KEY_SOF_HRF    : FrameStatistics::KEY_SOF_HPLC;    break;
             case 2: key = rf ? FrameStatistics::KEY_ACK_HRF    : FrameStatistics::KEY_ACK_HPLC;    break;
             case 3: key = rf ? FrameStatistics::KEY_COORD_HRF  : FrameStatistics::KEY_COORD_HPLC;  break;
         }
         m_stats.increment(key);
-        if (!r.msdu_body.isEmpty()) m_stats.increment(FrameStatistics::KEY_MSDU_COMPLETE);
+        if (!e.msdu_body.isEmpty()) m_stats.increment(FrameStatistics::KEY_MSDU_COMPLETE);
     } else {
         m_stats.increment(FrameStatistics::KEY_DROPPED);
     }
 
-    emit parsed(r);
+    emit parsed(p);
     emit stats_updated();
 }

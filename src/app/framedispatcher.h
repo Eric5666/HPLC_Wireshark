@@ -4,6 +4,7 @@
 #define BPLC_FRAMEDISPATCHER_H
 
 #include "iprotocolparser.h"
+#include "entrybuilder.h"
 #include "frame_credit.h"
 #include "statistics.h"
 #include <QObject>
@@ -27,7 +28,8 @@ public slots:
     void on_replay_finished();
 
 signals:
-    void parsed(const ParseResult& r);
+    /// @brief 一帧解析完成:条目已在解析线程预构建(共享指针投递,无逐字段拷贝)
+    void parsed(const PreparedEntryPtr& p);
     void stats_updated(qint64 total, qint64 dropped);
 
 private:
@@ -57,11 +59,12 @@ public:
     void shutdown();
 
 signals:
-    void parsed(const ParseResult& r);
+    /// @brief 转发解析线程预构建的条目(GUI 线程,统计与背压额度已处理)
+    void parsed(const PreparedEntryPtr& p);
     void stats_updated();
 
 private slots:
-    void on_parsed(const ParseResult& r);
+    void on_parsed(const PreparedEntryPtr& p);
 
 private:
     QThread*            m_thread;

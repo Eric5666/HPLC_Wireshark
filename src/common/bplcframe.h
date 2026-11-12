@@ -330,7 +330,7 @@ struct TopoEvent {
 
 /// @brief 送入解析器/插件的一帧
 /// @details SerialReader 只填充 meta/data/raw_wire 等原始字段;主程序
-///          MainWindow::make_entry 完成协议解析后补 decoded_* 与 topo_event,
+///          EntryBuilder(解析线程预构建 + GUI 补序号)完成协议解析后补 decoded_* 与 topo_event,
 ///          再喂给插件引擎 —— 插件拿到的永远是"解析好的帧"(单入口 parse)。
 struct BplcFrame {
     PhysicalMeta meta;            ///< 物理层元信息(由 SerialReader 填充部分)
@@ -451,7 +451,7 @@ struct PacketEntry {
     MsduInfo     beacon;       ///< BEACON 载荷区字段解析(仅 BEACON 帧)
     int          msdu_raw_base;///< MSDU body 在 raw_bytes 中的偏移;-1=不在本帧(跨帧重组)
     QByteArray   raw_bytes;    ///< 原始字节,用于 HexView 显示
-    QString      search_text;  ///< 可搜索全文缓存(小写;make_entry/反序列化时填充,过滤匹配用)
+    QString      search_text;  ///< 可搜索全文缓存(小写;EntryBuilder/反序列化时填充,过滤匹配用)
     QVector<DissectField> dissect_fields; ///< 插件通用字段树(内置解析为空;仅协议树视图消费,不落盘)
 
     PacketEntry()
@@ -459,10 +459,11 @@ struct PacketEntry {
           protocol(kProtocolGw2022), msdu_raw_base(-1) {}
 };
 
-/// @brief 生成一行的可搜索全文(小写),供过滤器快速匹配;缓存于 PacketEntry::search_text
-inline QString make_search_text(const PacketEntry& e) {
+/// @brief 生成可搜索全文中除帧序号外的部分(小写)
+/// @details 只依赖解析派生字段(accepted/reason/meta/mpdu/msdu),不依赖 GUI 线程
+///          才确定的帧序号,因此可在解析线程预先构建;完整文本见 make_search_text。
+inline QString make_search_text_tail(const PacketEntry& e) {
     QStringList parts;
-    parts << QString::number(e.index);
     if (!e.accepted) {
         parts << QStringLiteral("drop") << QStringLiteral("err");
         parts << e.reason.toLower();
@@ -524,6 +525,18 @@ inline QString make_search_text(const PacketEntry& e) {
         }
     }
     return parts.join(QLatin1Char(' '));
+}
+
+/// @brief 由帧序号与 make_search_text_tail 的结果拼出完整可搜索全文
+/// @details 与 make_search_text 逐字节一致(尾部恒非空,分隔空格恒存在);
+///          GUI 线程分配序号后只做这一次拼接,重活留在解析线程。
+inline QString join_search_text(int index, const QString& tail) {
+    return QString::number(index) + QLatin1Char(' ') + tail;
+}
+
+/// @brief 生成一行的可搜索全文(小写),供过滤器快速匹配;缓存于 PacketEntry::search_text
+inline QString make_search_text(const PacketEntry& e) {
+    return join_search_text(e.index, make_search_text_tail(e));
 }
 
 /// 南网 CCO 作为发起者/回应者的管理消息类型(值取自 nw_2026_msdu_parser.h:76/78/79;
