@@ -868,17 +868,9 @@ bool PluginMarket::plugin_dir_enabled(const QString& plugin_dir) {
 }
 
 QString PluginMarket::current_platform() {
-#if defined(Q_OS_WIN)
-    return QStringLiteral("windows-x86_64");
-#elif defined(Q_OS_MACOS)
-#if defined(Q_PROCESSOR_ARM_64)
-    return QStringLiteral("macos-arm64");
-#else
-    return QStringLiteral("macos-x86_64");
-#endif
-#else
-    return QStringLiteral("linux-x86_64");
-#endif
+    // 与 plugin.json 按平台 abi 的解析共用同一实现(按编译目标架构区分
+    // x86_64 / arm64,如 windows-arm64 / linux-arm64)
+    return plugin_host_platform();
 }
 
 bool PluginMarket::version_platform_ok(const MarketVersion& v) {

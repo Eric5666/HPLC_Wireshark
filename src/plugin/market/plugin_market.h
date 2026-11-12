@@ -147,7 +147,7 @@ public:
     static int compare_version(const QString& a, const QString& b);
     /// @brief 当前宿主版本是否满足 min_app_version
     static bool app_version_ok(const QString& min_app_version);
-    /// @brief 当前运行平台标识,如 linux-x86_64 / windows-x86_64
+    /// @brief 当前运行平台标识,如 linux-x86_64 / linux-arm64 / windows-x86_64 / windows-arm64(见 plugin_host_platform())
     static QString current_platform();
     /// @brief 该版本是否可在当前平台安装(platforms 为空=全平台)
     static bool version_platform_ok(const MarketVersion& v);

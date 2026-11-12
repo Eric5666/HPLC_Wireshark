@@ -248,6 +248,76 @@ jobs:
             dist/BPLC_STA_Monitor_v*_linux_x86_64.tar.gz
             dist/BPLC_STA_Monitor_v*_linux_x86_64_symbols.tar.gz
 
+  # 更新清单 sha256:内置更新器(src/updater)要求 update.json 每个平台项带
+  # "sha256"(安装包 SHA-256,64 位小写 hex),缺失或不匹配时拒绝打开安装包。
+  # 两个平台都把安装包传进 Release 后,本 job 从 Release 下回真实 asset 计算
+  # sha256,用 scripts/update_json_sha256.py 写进 update.json(同时改
+  # latest-version / download-url),把 update.json + SHA256SUMS.txt 作为
+  # Release asset 发布并写进 job summary。
+  # 客户端读的是 main 分支根目录的 update.json(手工维护),本 job 不自动推 main:
+  # 发版后把 Release 里的 update.json 提交到仓库根即可(README「发布与更新流程」)。
+  release-manifest:
+    if: github.event_name == 'push'
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: update_json_sha256 自测
+        shell: bash
+        run: python3 unit_test/ci/update-json-sha256/test_update_json_sha256.py
+
+      - name: 下载 Release 安装包
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          mkdir -p rel
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir rel \
+            --pattern "BPLC_STA_Monitor_Setup_v${V}.exe" \
+            --pattern "BPLC_STA_Monitor_v${V}_linux_x86_64.tar.gz"
+          ls -la rel
+
+      - name: 计算 sha256 并写入 update.json
+        shell: bash
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          python3 scripts/update_json_sha256.py \
+            --manifest update.json --out rel/update.json \
+            --version "$V" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            --sums rel/SHA256SUMS.txt \
+            "windows=rel/BPLC_STA_Monitor_Setup_v${V}.exe" \
+            "linux=rel/BPLC_STA_Monitor_v${V}_linux_x86_64.tar.gz"
+          {
+            echo "### update.json(含 sha256,提交到仓库根)"
+            echo '```json'
+            cat rel/update.json
+            echo '```'
+            echo "### SHA256SUMS.txt"
+            echo '```'
+            cat rel/SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 传 update.json + SHA256SUMS.txt 到 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            rel/update.json rel/SHA256SUMS.txt
+
+      - name: 上传 update.json 产物
+        uses: actions/upload-artifact@v6
+        with:
+          name: update-manifest
+          path: |
+            rel/update.json
+            rel/SHA256SUMS.txt
+
   app-config-matrix:
     runs-on: ubuntu-24.04
     steps:

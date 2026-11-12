@@ -393,7 +393,14 @@ dist/BPLC_STA_Monitor_Setup_v1.3.0.exe /S /D=C:\my\dir    # 静默装到指定�
 4. **改 `update.json`**(仓库根,提交推送):
    `latest-version` 抬高新版本号,`download-url` 指向 release asset 地址
    (形如 `https://github.com/<owner>/<repo>/releases/download/<tag>/<文件名>.exe`),
-   `sha256` 填该安装包的 `sha256sum`(必填:内置下载器缺少或不匹配时拒绝打开安装包)
+   `sha256` 填该安装包的 `sha256sum`(必填:内置下载器缺少或不匹配时拒绝打开安装包)。
+   - tag 触发的 CI(`.github/workflows/build.yml` 的 `release-manifest` job)会从
+     Release 下回 Windows 安装包与 Linux tar.gz,自动算好 sha256 并改好上述三项,
+     生成的 `update.json` 与 `SHA256SUMS.txt` 作为 Release asset 发布(job summary
+     里也有全文)。把这份 `update.json` 原样提交到仓库根即可(CI 不自动推 main)。
+   - 手工发布时用同一脚本:
+     `python3 scripts/update_json_sha256.py --version <新版本> --base-url https://github.com/<owner>/<repo>/releases/download/<tag> windows=dist/BPLC_STA_Monitor_Setup_v<新版本>.exe linux=dist/BPLC_STA_Monitor_v<新版本>_linux_x86_64.tar.gz`
+     (不给 `--base-url` 时要求现有 `download-url` 已指向同名文件,防止算错包)
 5. 用户端:程序内 `帮助 → 检查更新` → 发现新版本 → 下载安装包 → 运行
    即覆盖安装(自动关闭旧进程,完成后即可用新版本)
 

@@ -37,7 +37,7 @@ mkdir -p build
 "$MOC" "$R/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp
 # 仅 Linux/CI 需要 EGL/GL(Windows 无此库),按 libEGL.so 是否存在决定
 EGL_LIBS=""
-for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /usr/local/lib; do
+for d in "/usr/lib/$(uname -m)-linux-gnu" /usr/lib64 /usr/lib /usr/local/lib; do
     if [ -e "$d/libEGL.so" ]; then EGL_LIBS="-lEGL -lGL"; break; fi
 done
 

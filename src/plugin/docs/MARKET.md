@@ -57,7 +57,13 @@ Entry point: **Plugins → Plugin marketplace** menu in the main window.
   this URL, then to the plain description.
 - `updated_at`: per-version update date (ISO), shown as 更新时间/Updated.
 - `platforms`: optional list of platform IDs this version supports
-  (`linux-x86_64`, `windows-x86_64`, `macos-arm64`, `macos-x86_64`).
+  (`linux-x86_64`, `linux-arm64`, `windows-x86_64`, `windows-arm64`,
+  `macos-arm64`, `macos-x86_64`). The ID is `<os>-<arch>` of the host
+  **build** (`plugin_host_platform()` in `plugin_api/plugin_manifest.h`):
+  arch is `x86_64` or `arm64` (other architectures fall back to
+  `QSysInfo::buildCpuArchitecture()`), so an x64 build running under
+  emulation on Windows on ARM still reports `windows-x86_64`. The same
+  key selects the per-platform `abi` entry below.
   Absent or empty = all platforms (script plugins). The client only
   offers/installs the newest version compatible with the running
   platform, shows the platform list in the detail panel, and hides
@@ -166,7 +172,8 @@ string (single-platform package) or per-platform (multi-platform package):
 
     "abi": {
         "windows-x86_64": "qt6-mingw-x64",
-        "linux-x86_64": "qt6-gcc-x64"
+        "linux-x86_64": "qt6-gcc-x64",
+        "linux-arm64": "qt6-gcc-arm64"
     }
 
 The host computes its own ABI at startup as `qt<major>-<compiler>-<arch>`
