@@ -31,7 +31,6 @@
 #include <QNetworkReply>
 
 #include "Downloader.h"
-#include "update_integrity.h"
 
 // ===== 本地修改(相对上游):长 changelog 在更新弹窗中裁剪显示 =====
 #include "i18n.h"
@@ -62,11 +61,6 @@ namespace {
 struct I18nRegUpdater {
     I18nRegUpdater() {
         trl::register_en("完整更新说明见仓库 Releases 页面", "See the repository Releases page for full update notes");
-        trl::register_en("更新清单未提供安装包 SHA-256,无法在应用内校验安装。已打开发布页,请手动下载并安装。",
-                         "The update manifest has no SHA-256 for the installer, so it cannot be verified in-app. The release page has been opened; please download and install it manually.");
-        trl::register_en("更新清单未提供安装包 SHA-256,且无法确定发布页。请前往仓库 Releases 页面手动下载更新。",
-                         "The update manifest has no SHA-256 for the installer and no release page could be determined. Please download the update manually from the repository Releases page.");
-        trl::register_en("手动更新", "Manual Update");
     }
 };
 const I18nRegUpdater g_i18n_reg_updater;
@@ -192,17 +186,6 @@ QString Updater::downloadUrl() const
               QStringLiteral("https://raw.githubusercontent.com/"))))
     return m_downloadPrefix + m_downloadUrl;
   return m_downloadUrl;
-}
-
-/**
- * @brief Returns the SHA-256 (lowercase hex) of the installer package as
- *        declared by the "sha256" key of the update definitions file
- *        (local extension). Empty when the manifest does not provide it;
- *        the built-in downloader then refuses to open the package.
- */
-QString Updater::downloadSha256() const
-{
-  return m_downloadSha256;
 }
 
 /**
@@ -540,10 +523,8 @@ void Updater::onReply(QNetworkReply* reply)
   m_changelog     = platform.value("changelog").toString();
   m_downloadUrl   = platform.value("download-url").toString();
   m_latestVersion = platform.value("latest-version").toString();
-  // Local extension: installer integrity. "sha256" is optional in the
-  // manifest format (older clients ignore it), but the built-in downloader
-  // refuses to open a package whose hash is missing or does not match.
-  m_downloadSha256 = platform.value("sha256").toString().trimmed().toLower();
+  // 本地修改:安装包不做 SHA-256 校验(清单里若仍带 "sha256" 字段一律忽略);
+  // 校验值只随 Release 发布 SHA256SUMS.txt 供用户手动核对
   if (platform.contains("mandatory-update"))
     m_mandatoryUpdate = platform.value("mandatory-update").toBool();
 
@@ -589,24 +570,10 @@ void Updater::setUpdateAvailable(const bool available)
       if (!openUrl().isEmpty())
         QDesktopServices::openUrl(QUrl(openUrl()));
 
-      // 本地扩展:清单缺/错 sha256 时不走内置下载器(它会拒装),
-      // 也不直接打开未校验的安装包;改为打开发布页让用户手动下载
-      else if (downloaderEnabled() && !update_sha256_is_valid(m_downloadSha256)) {
-        const QString page = update_release_page_url(downloadUrl());
-        if (!page.isEmpty()) QDesktopServices::openUrl(QUrl(page));
-        QMessageBox::information(
-            nullptr, trl::L("手动更新"),
-            page.isEmpty()
-                ? trl::L("更新清单未提供安装包 SHA-256,且无法确定发布页。请前往仓库 Releases 页面手动下载更新。")
-                : trl::L("更新清单未提供安装包 SHA-256,无法在应用内校验安装。已打开发布页,请手动下载并安装。"));
-        if (m_mandatoryUpdate) QApplication::quit();
-      }
-
       else if (downloaderEnabled()) {
         m_downloader->setUrlId(url());
         m_downloader->setFileName(downloadUrl().split("/").last());
         m_downloader->setMandatoryUpdate(m_mandatoryUpdate);
-        m_downloader->setExpectedSha256(m_downloadSha256);
         auto download_url = QUrl(downloadUrl());
         download_url.setUserName(m_downloadUserName);
         download_url.setPassword(m_downloadPassword);

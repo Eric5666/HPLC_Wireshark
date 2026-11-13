@@ -26,7 +26,6 @@
 
 #include <QApplication>
 #include <QAuthenticator>
-#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -47,7 +46,7 @@
 static const QString PARTIAL_DOWN(".part");
 
 namespace {
-// 中→英注册(文件级,L3:更新包校验/大小上限的错误文案随界面语言切换)
+// 中→英注册(文件级,L3:更新包大小上限的错误文案随界面语言切换)
 struct I18nRegDownloader {
     I18nRegDownloader() {
         trl::register_en("更新包超出大小上限（%1 MB）",
@@ -58,12 +57,6 @@ struct I18nRegDownloader {
                          "Update Error");
         trl::register_en("找不到已下载的更新包",
                          "Cannot Find the Downloaded Update");
-        trl::register_en("更新清单未提供该安装包的有效 SHA-256，拒绝打开未校验的安装程序。请从官方发布页手动下载更新。",
-                         "The Update Manifest Does Not Provide a Valid SHA-256 for This Package; Refusing to Open an Unverified Installer. Please Download the Update Manually From the Official Release Page.");
-        trl::register_en("无法读取已下载的更新包。",
-                         "Cannot Read the Downloaded Update Package.");
-        trl::register_en("SHA-256 不匹配：已下载的更新包与更新清单不符，已删除。",
-                         "SHA-256 Mismatch: The Downloaded Update Package Does Not Match the Update Manifest and Has Been Deleted.");
     }
 };
 const I18nRegDownloader g_i18n_reg_downloader;
@@ -272,21 +265,6 @@ void Downloader::finished()
   QFile::rename(m_downloadDir.filePath(m_fileName + PARTIAL_DOWN),
                 m_downloadDir.filePath(m_fileName));
 
-  // Local extension: verify the package against the manifest's "sha256"
-  // before anything may open it. Missing or mismatching hash => the file is
-  // deleted and the install flow is not started.
-  QString verifyError;
-  if (!verifyDownload(&verifyError)) {
-    QFile::remove(m_downloadDir.filePath(m_fileName));
-    m_reply->deleteLater();
-    m_reply = nullptr;
-    m_ui->stopButton->setText(tr("Close"));
-    m_ui->downloadLabel->setText(trl::L("更新包已拒收"));
-    m_ui->timeLabel->setText(verifyError);
-    QMessageBox::critical(this, trl::L("更新错误"), verifyError, QMessageBox::Close);
-    return;
-  }
-
   // Notify application
   emit downloadFinished(m_url, m_downloadDir.filePath(m_fileName));
 
@@ -304,10 +282,7 @@ void Downloader::finished()
  */
 void Downloader::openDownload()
 {
-  QString verifyError;
-  if (!m_fileName.isEmpty() && !verifyDownload(&verifyError))
-    QMessageBox::critical(this, trl::L("更新错误"), verifyError, QMessageBox::Close);
-  else if (!m_fileName.isEmpty())
+  if (!m_fileName.isEmpty())
     QDesktopServices::openUrl(QUrl::fromLocalFile(m_downloadDir.filePath(m_fileName)));
   else
     QMessageBox::critical(
@@ -646,42 +621,3 @@ void Downloader::setUseCustomInstallProcedures(const bool custom)
 #if QSU_INCLUDE_MOC
 #  include "moc_Downloader.cpp"
 #endif
-
-/**
- * @brief Sets the expected SHA-256 (hex) of the package to be downloaded
- *        (local extension, from the "sha256" key of the update manifest).
- */
-void Downloader::setExpectedSha256(const QString& sha256)
-{
-  m_expectedSha256 = sha256.trimmed().toLower();
-}
-
-/**
- * @brief Verifies the downloaded package against the expected SHA-256.
- *
- * Local extension: returns @c false (with a user-facing reason) when the
- * manifest did not provide a well-formed hash, the file cannot be read, or
- * the digest differs. Unverified packages are never opened.
- */
-bool Downloader::verifyDownload(QString* error) const
-{
-  static const QRegularExpression hexRe(QStringLiteral("^[0-9a-f]{64}$"));
-  if (!hexRe.match(m_expectedSha256).hasMatch()) {
-    if (error)
-      *error = trl::L("更新清单未提供该安装包的有效 SHA-256，拒绝打开未校验的安装程序。请从官方发布页手动下载更新。");
-    return false;
-  }
-  QFile file(m_downloadDir.filePath(m_fileName));
-  QCryptographicHash hash(QCryptographicHash::Sha256);
-  if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file)) {
-    if (error)
-      *error = trl::L("无法读取已下载的更新包。");
-    return false;
-  }
-  if (QString::fromLatin1(hash.result().toHex()) != m_expectedSha256) {
-    if (error)
-      *error = trl::L("SHA-256 不匹配：已下载的更新包与更新清单不符，已删除。");
-    return false;
-  }
-  return true;
-}

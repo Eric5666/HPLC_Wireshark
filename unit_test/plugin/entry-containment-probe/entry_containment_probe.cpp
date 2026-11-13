@@ -2,7 +2,6 @@
 /// @brief 回归探针:
 ///  1) 插件 manifest 的 entry 必须落在插件目录内(canonical 包含检查),
 ///     ../、绝对路径、越界符号链接一律拒绝;Lua/JS/native 后端加载时再查一次
-///  2) 更新清单缺 sha256 → 不走内置下载器,回退到 GitHub 发布页
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
@@ -12,7 +11,6 @@
 #include "js_backend.h"
 #include "lua_backend.h"
 #include "native_backend.h"
-#include "update_integrity.h"
 
 static int g_fails = 0;
 static void check(const char* name, bool ok) {
@@ -151,21 +149,6 @@ int main(int argc, char** argv) {
                                                       err.contains(QStringLiteral("outside")));
     }
 #endif
-
-    // --- 更新清单 sha256 回退
-    check("sha256: empty invalid", !update_sha256_is_valid(QString()));
-    check("sha256: 64 lower hex valid", update_sha256_is_valid(QString(64, QLatin1Char('a'))));
-    check("sha256: uppercase invalid", !update_sha256_is_valid(QString(64, QLatin1Char('A'))));
-    check("release page: github download url",
-          update_release_page_url(QStringLiteral(
-              "https://github.com/aron566/HPLC_Wireshark/releases/download/v2.0.1/BPLC_STA_Monitor_Setup_v2.0.1.exe"))
-              == QStringLiteral("https://github.com/aron566/HPLC_Wireshark/releases/tag/v2.0.1"));
-    check("release page: mirror-prefixed url",
-          update_release_page_url(QStringLiteral(
-              "https://gh-proxy.example/https://github.com/aron566/HPLC_Wireshark/releases/download/v2.0.1/x.tar.gz"))
-              == QStringLiteral("https://github.com/aron566/HPLC_Wireshark/releases/tag/v2.0.1"));
-    check("release page: unknown host -> empty",
-          update_release_page_url(QStringLiteral("https://your-host/pkg.exe")).isEmpty());
 
     std::printf("RESULT: %s (%d failures)\n", g_fails ? "FAIL" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;

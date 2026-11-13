@@ -65,7 +65,6 @@ public slots:
   void setUserAgentString(const QString& agent);
   void setUseCustomInstallProcedures(const bool custom);
   void setMandatoryUpdate(const bool mandatory_update);
-  void setExpectedSha256(const QString& sha256);
 
 private slots:
   void finished();
@@ -81,7 +80,6 @@ private slots:
 
 private:
   qreal round(const qreal& input);
-  bool verifyDownload(QString* error) const;
 
 private:
   QString m_url;
@@ -92,7 +90,6 @@ private:
   QNetworkReply* m_reply;
   QString m_userAgentString;
 
-  QString m_expectedSha256;  ///< 本地扩展:安装包期望 SHA-256(来自 update.json "sha256")
   qint64 m_savedBytes = 0;   ///< 本地扩展:已写入部分文件的字节数(大小上限)
   bool m_sizeExceeded = false; ///< 本地扩展:因超过大小上限而中止
   void abortOversize();      ///< 本地扩展:超过 kMaxDownloadBytes 时中止下载

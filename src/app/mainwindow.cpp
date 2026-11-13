@@ -404,8 +404,8 @@ void MainWindow::build_ui() {
     m_btn_update->setVisible(false);
     menuBar()->setCornerWidget(m_btn_update, Qt::TopRightCorner);
     connect(m_btn_update, &QToolButton::clicked, this, [this]() {
-        // 不用浏览器直接打开下载链接(绕过 sha256 校验):重新检查一次更新,
-        // 由更新器弹窗,确认后走内置下载器(大小上限 + sha256 校验后才打开安装包)
+        // 不用浏览器直接打开下载链接:重新检查一次更新,
+        // 由更新器弹窗,确认后走内置下载器(安装包大小上限等保护照常生效)
         check_for_updates(false);
     });
 }

@@ -53,7 +53,6 @@ public:
   QString changelog() const;
   QString moduleName() const;
   QString downloadUrl() const;
-  QString downloadSha256() const;
   void setDownloadPrefix(const QString& prefix);
   QString platformKey() const;
   QString moduleVersion() const;
@@ -108,7 +107,6 @@ private:
   QString m_changelog;
   QString m_moduleName;
   QString m_downloadUrl;
-  QString m_downloadSha256;  ///< 本地扩展:update.json 平台项 "sha256"(安装包 SHA-256,小写 hex)
   QString m_downloadPrefix;
   QString m_moduleVersion;
   QString m_latestVersion;
