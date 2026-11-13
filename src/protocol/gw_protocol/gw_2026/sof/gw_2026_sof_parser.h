@@ -23,15 +23,14 @@ namespace gw_2026_sof {
 ///                  字节9 bit4-7 为载荷PB大小(表19)定 PB 大小、字节11 bit4-7 为 MCS,
 ///                  字节10-11 bit0/字节12 bit0-3 为保留;载波走表7(帧子类型/TF/调制
 ///                  方式与参数,链路标识符在 MAC 帧头 byte15)
-/// @param crc_candidate_body [out,可选] 单站点帧重组后的完整体流,**不论 PB 块 CRC**
-///                  (用户 2026-11 裁决,与南网同口径:「PB 块 CRC 失败但 MSDU CRC32 正确,
-///                  MSDU 也要解析」)。仅当其 MSDU CRC32 三态不是 N-A 时调用方才可采用
-///                  (OK ⇒ 原样解析;FAIL ⇒ msdu_crc_gate 只留证据);N-A 时必须回退
-///                  `complete_msdu_body` 的保守门。多站点(OFDMA/TDA)帧不填。
+/// @param msdu_span_clean [out,optional] 首个 MSDU span 是否完全避开 PB CRC
+///                  失败块(国网口径,seq 序)。体流交付不依赖它(只要求重组完整);
+///                  调用方仅在 MSDU CRC32 不可用时拿它作 PB 回退(见
+///                  msdu_crc_allows_learning)。传 nullptr 则不回填。
 /// @return 空字符串 = 成功;非空 = 错误文案(调用方拒收该帧)
 QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
                  QByteArray& complete_msdu_body, quint8 band = 0xFF,
-                 bool is_rf = false, QByteArray* crc_candidate_body = nullptr);
+                 bool is_rf = false, bool* msdu_span_clean = nullptr);
 
 /// @brief 本站 MSDU span 是否避开全部 CRC 失败块(用户 2026-10-29 定,NW 同款
 /// 多块补定在 GW 的落点:多站点 OFDMA/TDA 逐站判定;单站点已由 assemble 的

@@ -37,8 +37,7 @@ namespace gw_2022_sof {
 
 QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
                  QByteArray& complete_msdu_body, quint8 band, bool is_rf,
-                 QByteArray* crc_candidate_body) {
-    if (crc_candidate_body) crc_candidate_body->clear();
+                 bool* msdu_span_clean) {
     const quint8* p = reinterpret_cast<const quint8*>(body.constData());
 
     // FCH 业务字段(相对 FCH 起点)
@@ -101,15 +100,17 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
     if (!res.blocks.isEmpty()) info.pb_head = res.blocks.first().head_byte;
     // 帧级 CRC 口径:全部声明块到齐 + CRC 全过 + 序列号重排成功(缺块/越界/冲突→false)
     info.pb_crc_ok = res.all_crc_ok && !res.truncated && res.reassembly_ok;
-    // 仅交付完整重组且首个 MSDU span 完全避开坏 CRC 块的体流；
+    // 体流交付只要求序列号重组完整(缺块/越界/冲突仍不交付):
+    // 首个 MSDU span 是否避开坏 CRC 块不再是交付门——MSDU CRC32 才是拓扑学习
+    // 的最终判据,有效 MSDU CRC 可覆盖 PB CRC 失败(见 msdu_crc_allows_learning);
+    // span 是否干净经出参透传调用方,仅在 MSDU CRC 不可用时作 PB 回退。
     // pb_crc_oks 保留原始逐块结果，帧仍会因坏块在 UI 标红。
-    // 口径必须用**国网**(SpanLayout::Gw):南网公式在国网头上两向都错。
-    if (pb_asm::body_parseable_with_good_msdu_span(
-            res, pb_size - 4, pb_asm::SpanLayout::Gw))
+    // span 口径必须用**国网**(SpanLayout::Gw):南网公式在国网头上两向都错。
+    if (msdu_span_clean)
+        *msdu_span_clean = pb_asm::msdu_span_avoids_bad_blocks(
+            res.msdu_body, res.blocks, pb_size - 4, pb_asm::SpanLayout::Gw);
+    if (pb_asm::body_parseable(res))
         complete_msdu_body = res.msdu_body;
-    // 用户 2026-11 裁决(与南网 nw_2021/nw_2026 同口径):PB 块 CRC 不再是 MSDU 解析的
-    // 前置门 —— 体流另行交给调用方,由 MSDU CRC32 三态决定是否采用(见 gw_20xx_parser)。
-    if (crc_candidate_body) *crc_candidate_body = res.msdu_body;
     return QString();
 }
 

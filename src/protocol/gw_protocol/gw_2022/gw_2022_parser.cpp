@@ -16,8 +16,8 @@
 #include "gw_2022_coord_parser.h"
 #include "common/fieldtools.h"
 #include "common/bcd.h"
-#include "crc.h"
 #include "common/msdu_crc_state.h"
+#include "crc.h"
 #include "QsLog.h"
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -166,26 +166,19 @@ GW_2022_Parser::Result GW_2022_Parser::parse_inner(const BplcFrame& in, MsduStat
 
     if (ft == GW_2022_FrameType::SOF) {
         // SOF:FCH 字段 + 多 PB 重组(sof 模块)
-        QByteArray crc_candidate;
+        bool msdu_span_clean = false;
         err = gw_2022_sof::assemble(r.payload_for_log, r.mpdu, msdu, r.msdu_body,
                                     r.meta.is_rf ? 0xFF : (quint8)r.meta.channel,
-                                    r.meta.is_rf, &crc_candidate);
+                                    r.meta.is_rf, &msdu_span_clean);
         if (!err.isEmpty()) { r.reject_reason = err; r.accept = false; return r; }
-        // 用户 2026-11 裁决(与南网同口径):FC CRC 通过即解析;PB 块 CRC 失败不阻断 MSDU ——
-        // MSDU CRC32 正确 ⇒ 照常解析(行仍因 PB 坏块标红);MSDU CRC32 FAIL ⇒ msdu_crc_gate
-        // 只留证据节点(不产学习对/拓扑);MSDU CRC32 缺失(N-A)⇒ 仍走 assemble 的保守门
-        // (重组完整 + 首个 MSDU span 避开坏块),门不过则与旧行为一致:不解析。
-        // GW_2022_MsduParser::parse 末尾已统一 msdu_crc_gate。
-        if (r.msdu_body.isEmpty() && !crc_candidate.isEmpty()) {
-            const MsduInfo cand = GW_2022_MsduParser::parse(crc_candidate);
-            if (msdu_crc_state(cand) != MsduCrcState::NotAvailable) {
-                r.msdu_body = crc_candidate;
-                r.msdu = cand;
-                r.msdu_raw_base = (r.mpdu.pb_num == 1) ? 17 : -1;
-            }
-        } else if (!r.msdu_body.isEmpty()) {
-            // MSDU 重组完整:解析 MAC 层字段
+        // MSDU 重组完整:解析 MAC 层字段
+        if (!r.msdu_body.isEmpty()) {
             r.msdu = GW_2022_MsduParser::parse(r.msdu_body);
+            // MSDU CRC32 是拓扑学习的最终判据:有效 MSDU CRC 可覆盖 PB CRC 失败;
+            // 仅当 MSDU CRC 不可用且首个 MSDU span 落在坏块上时,才剥离学习字段
+            // (解析与展示保留;FAIL 仍走 parse 内 msdu_crc_gate 降级)。
+            if (msdu_crc_state(r.msdu) == MsduCrcState::NotAvailable && !msdu_span_clean)
+                r.msdu = msdu_crc_strip_learning(r.msdu);
             // MSDU body 起点在 payload_for_log 中的偏移:FCH 16B + 1B pb_head = 17。
             // 仅当单块(整条 MSDU 连续位于本帧 17..)时才能把字段映射到 raw 高亮;
             // 多块重组时各 pb_body 在 raw 中被 pb_head/CRC 隔断,不连续,置 -1。
