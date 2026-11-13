@@ -161,7 +161,7 @@ def gather_body():
     return bytes(b)
 
 
-def discover_body(msdu_type=2):
+def discover_body(msdu_type=2, tamper_icv=False, truncate_icv=0):
     # single-hop header: version 1 (byte0 low 4b), type 2 (carrier) or 0
     # (wireless; HDC 1.0 simple-head table 12 has no carrier type), len 11b
     disc = bytearray()
@@ -178,7 +178,15 @@ def discover_body(msdu_type=2):
     hdr[0] = 0x01
     hdr[1] = msdu_type
     set_bits(hdr, 2, 0, 11, len(disc))
-    return bytes(hdr) + bytes(disc)
+    # 单跳帧尾 4B ICV(CRC32):与 crc.h::crc32_le 同语义(zlib.crc32,末 4B 小端),覆盖 MSDU
+    # 数据载荷(disc)、不含 4B 简头(HDC2.0 §5.1.1.6/§5.2.5.2:每个 MAC 帧尾部都有 ICV,无单跳例外)。
+    # 用户 2026-11 裁决:简头也要验证 ICV ⇒ Ok(正确)/Fail(篡改)/N-A(截断)三态。
+    icv = struct.pack("<I", zlib.crc32(bytes(disc)) & 0xFFFFFFFF)
+    if tamper_icv:
+        icv = bytes([icv[0] ^ 0x01]) + icv[1:]   # 翻 1 bit ⇒ FAIL
+    if truncate_icv > 0:
+        icv = icv[:4 - truncate_icv]             # 截断 N 字节 ⇒ N/A
+    return bytes(hdr) + bytes(disc) + icv
 
 
 def app_msdu(dst_tei, dst_mac):
@@ -265,15 +273,18 @@ def main():
         # MSDU CRC 覆盖 PB CRC(用户 2026-11-13 定):PB CRC24 错但 MSDU CRC32
         # 有效时仍学习;MSDU 无 CRC32(N/A)时才用 PB span 回退。
         ("G4-2026-badpbcrc", flip_pb_crc(data_sof(assoc, 5))),
-        # N/A 档:单跳简头 MSDU 在 MSDU 解析器里提前返回,从不产生 MSDU CRC32
-        # 节点(故为 NotAvailable);span 由简头算(4+len+4)。G6 与 G3 同构,是
-        # N/A-clean 的显式对照;G5 的 span 落在坏块上,应不学但解析保留。
+        # 单跳简头 ICV 三态(用户 2026-11 裁决:简头也要验证 ICV):
+        # G3/G5/G6/G9/G10 正确 ICV ⇒ Ok(学习);G5/G9 的 PB CRC 错但 ICV 有效仍学。
         ("G5-2026-na-dirty", flip_pb_crc(data_sof(discover_body(), 1, src_tei=9))),
         ("G6-2026-na-clean", data_sof(discover_body(), 1, src_tei=9)),
         ("G7-2022", data_sof_2022(assoc, 5)),
         ("G8-2022-badpbcrc", flip_pb_crc(data_sof_2022(assoc, 5))),
         ("G9-2022-na-dirty", flip_pb_crc(data_sof_2022(discover_body(0), 1, src_tei=9))),
         ("G10-2022-na-clean", data_sof_2022(discover_body(0), 1, src_tei=9)),
+        # 篡改 ICV ⇒ Fail(摘要清空、只留 CRC 证据、不学)。N/A(ICV 字节截断)不在整链路
+        # 里测——PB 块体固定 132B 填充会把截断掩盖成 4B 伪 ICV,改由 gw-icv-probe 直测 MSDU body。
+        ("G11-2026-icv-fail", data_sof(discover_body(tamper_icv=True), 1, src_tei=9)),
+        ("G12-2022-icv-fail", data_sof_2022(discover_body(0, tamper_icv=True), 1, src_tei=9)),
     ]
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "crafted.bin"), "wb") as f:
         for name, mpdu in frames:
@@ -281,7 +292,7 @@ def main():
             f.write(struct.pack("<I", len(body)))
             f.write(body)
             print(f"{name}: mpdu={len(mpdu)}B")
-    print("wrote crafted.bin, 13 frames")
+    print("wrote crafted.bin, 15 frames")
 
 
 if __name__ == "__main__":

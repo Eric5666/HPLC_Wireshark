@@ -23,7 +23,11 @@ enum class MsduCrcState {
 /// @brief 递归扫描字段树(含所有层级 children),统计 MSDU CRC32 节点的 OK/FAIL
 inline void msdu_crc_scan(const QVector<MsduFieldNode>& nodes, bool& seen_ok, bool& seen_fail) {
     for (const MsduFieldNode& n : nodes) {
-        if (n.name == QLatin1String("MSDU CRC32")) {
+        // 信标载荷 CRC32 节点名与 MSDU 不同:国网 "BeaconCRC32 [32b]"、南网 "BPCS [32b]",
+        // 语义相同(载荷 CRC32),同一三态口径;任一 FAIL ⇒ Fail,否则任一 OK ⇒ Ok。
+        if (n.name == QLatin1String("MSDU CRC32")
+            || n.name == QLatin1String("BeaconCRC32 [32b]")
+            || n.name == QLatin1String("BPCS [32b]")) {
             if (n.value.contains(QLatin1String("FAIL"))) seen_fail = true;
             else if (n.value.contains(QLatin1String("OK"))) seen_ok = true;
         }
@@ -101,6 +105,7 @@ inline MsduInfo msdu_crc_fail_evidence(const MsduInfo& in) {
     out.business_id = 0xFF;
     out.app_packet_type = 0xFF;
     out.trans_direction_flag = 0xFF;
+    out.cascade_break_len = -1;
     return out;
 }
 
@@ -144,6 +149,16 @@ inline bool msdu_crc_allows_learning(const MsduInfo& msdu, bool pb_fallback_ok) 
         || (state == MsduCrcState::NotAvailable && pb_fallback_ok);
 }
 
+/// @brief 信标树 PB CRC24 失败扫描(递归;信标载荷区 PB 块只记树节点,不进 mpdu.pb_crc_oks)
+inline bool beacon_pb_crc_failed(const QVector<MsduFieldNode>& nodes) {
+    for (const MsduFieldNode& n : nodes) {
+        if (n.name == QLatin1String("PB CRC24")
+            && n.value.contains(QLatin1String("FAIL"))) return true;
+        if (beacon_pb_crc_failed(n.children)) return true;
+    }
+    return false;
+}
+
 /// @brief 整行"CRC 失败标红"判据(UI 与探针共用,避免判据漂移)
 /// @details 用户 2026-11 裁决:「DROP 只有在 fc crc 就失败时标记,否则应先解析,存在 CRC
 ///          失败即标记红色」「MSDU CRC32 FAIL 也标红(与 PB 同等待遇)」。
@@ -151,13 +166,20 @@ inline bool msdu_crc_allows_learning(const MsduInfo& msdu, bool pb_fallback_ok) 
 ///           1. FCH(FC) CRC24 校验过且失败;
 ///           2. 任一 PB 块 CRC24 失败;
 ///           3. 已尝试组装且帧级未通过(含截断;合法 0 块帧 pb_size=0 不进此条);
-///           4. MSDU 帧尾 CRC32 失败。
+///           4. MSDU 帧尾 CRC32 失败;
+///           5. 信标载荷 CRC32(BPCS)失败;
+///           6. 信标 PB 块 CRC24 失败(信标 PB 失败只标红、不阻断学习,与 MSDU CRC 覆盖
+///              PB CRC 同口径)。
 inline bool frame_crc_red(const PacketEntry& e) {
     if (e.mpdu.fch_crc_checked && !e.mpdu.fch_crc_ok) return true;
     for (bool ok : e.mpdu.pb_crc_oks)
         if (!ok) return true;
     if (e.mpdu.pb_size > 8 && e.mpdu.pb_num > 0 && !e.mpdu.pb_crc_ok) return true;
     if (e.msdu.present && msdu_crc_state(e.msdu) == MsduCrcState::Fail) return true;
+    // BEACON:载荷 CRC32(BPCS)失败标红;PB CRC24 失败也标红。载荷 CRC32 失败时的
+    // 学习阻断由 update_tei_mac 另行负责(见 packetlistmodel.cpp)。
+    if (e.beacon.present && msdu_crc_state(e.beacon) == MsduCrcState::Fail) return true;
+    if (e.beacon.present && beacon_pb_crc_failed(e.beacon.tree)) return true;
     return false;
 }
 
