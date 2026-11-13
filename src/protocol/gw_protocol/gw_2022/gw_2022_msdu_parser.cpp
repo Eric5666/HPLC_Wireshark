@@ -1097,8 +1097,34 @@ MsduInfo GW_2022_MsduParser::parse(const QByteArray& body) {
         } else {
             out.summary = trl::L("单跳 MSDU 类型 %1").arg(msdu_type);
         }
+        // ---- 单跳帧尾 4B ICV(CRC32)校验(HDC1.0:一个 MAC 帧由 MAC 帧头、MSDU 与完整性校验值组成,
+        //      规约无单跳例外)----
+        // 与标准 MSDU_BASE 路径同口径:MSDU 数据区(msdu_len 字节)之后 4B,计算覆盖 msdu_len 字节
+        // (crc32_le 遍历 len-4 字节,末 4B 是 CRC 自身);msdu_len<=0 或 ICV 字节不足时不产生节点(N-A)。
+        if (msdu_len > 0) {
+            const int crc_off = 4 + msdu_len;
+            out.total_len = crc_off + 4;
+            if (msdu_len > 0 && crc_off + 4 <= body.size()) {
+                quint32 stored = (quint8)body[crc_off]
+                    | ((quint32)(quint8)body[crc_off + 1] << 8)
+                    | ((quint32)(quint8)body[crc_off + 2] << 16)
+                    | ((quint32)(quint8)body[crc_off + 3] << 24);
+                quint32 calc = crc32_le(reinterpret_cast<const quint8*>(msdu_body.constData()),
+                                        msdu_len + 4);
+                MsduFieldNode crc;
+                crc.name = QStringLiteral("MSDU CRC32");
+                crc.value = QStringLiteral("0x%1 %2")
+                    .arg(stored, 8, 16, QChar('0'))
+                    .arg(stored == calc ? QStringLiteral("OK") : QStringLiteral("FAIL"));
+                if (stored != calc)
+                    pa::warn("gw_2022:crc_fail", QStringLiteral("MSDU CRC32 stored=0x%1 calc=0x%2").arg(stored,8,16,QChar('0')).arg(calc,8,16,QChar('0')));
+                crc.rel_start = crc_off;
+                crc.rel_len   = 4;
+                out.tree.append(crc);
+            }
+        }
         out.present = true;
-        return out;
+        return msdu_crc_gate(out);
     }
 
     // ---- 标准 MSDU_BASE(16B 头, MACAddrFlag=1 时 28B)----
