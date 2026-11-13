@@ -289,6 +289,27 @@ jobs:
           bash build.sh
           ./build/gw_icv_probe
 
+      - name: GW/NW beacon load CRC32 regression (gw-beacon-crc-probe)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)"  "$QT_ROOT/plugins"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          # 信标载荷 CRC32(BPCS)与 PB CRC24 三态:GW 走完整解析器,NW 直测
+          # parse_beacon;载荷 CRC 失败标红不学,PB CRC 坏只标红仍学。探针有 FAIL 即 exit 1。
+          cd unit_test/protocol-gw/gw-beacon-crc-probe
+          bash build.sh
+          ./build/gw_beacon_crc_probe
+
       - name: H1 get_bits bounds-check regression (h1-getbits-probe)
         env:
           QT_QPA_PLATFORM: offscreen
