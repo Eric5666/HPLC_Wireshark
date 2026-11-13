@@ -1026,12 +1026,17 @@ bool PacketListModel::update_tei_mac(const PacketEntry& e) {
     if (!e.accepted) return false;
     const quint32 nid = e.mpdu.net_id;
     bool changed = false;
-    // BEACON 帧:CCO 的 MAC(TEI=1),供 COORD 等 CCO 发出(src_tei 未解析),用 NID 查表
-    if (e.mpdu.frame_type == 0 && e.mpdu.beacon_cco_mac)
+    // BEACON 帧:CCO 的 MAC(TEI=1),供 COORD 等 CCO 发出(src_tei 未解析),用 NID 查表。
+    // 信标载荷 CRC32(BPCS)失败时整帧载荷不可信,CCO MAC 与条目学习对一并阻断
+    // (只标红不学;摘要仍保留"信标载荷 CRC32:失败"以明示原因,不按 MSDU FAIL
+    // 清空——该摘要本身就是失败通知,不存在误报解析成功的问题)。
+    // PB CRC24 失败只标红(见 frame_crc_red),仍可学(与 MSDU CRC 覆盖 PB CRC 同口径)。
+    const bool beacon_crc_ok = msdu_crc_state(e.beacon) != MsduCrcState::Fail;
+    if (e.mpdu.frame_type == 0 && e.mpdu.beacon_cco_mac && beacon_crc_ok)
         changed |= learn_tei_mac(nid, 1, e.mpdu.beacon_cco_mac);
     // 信标管理信息条目(站点能力/精简站点)携带的 TEI→SourceMAC 学习对
     for (const TeiMacPair& p : e.beacon.tei_mac_pairs)
-        if (p.tei != 0 && p.mac) changed |= learn_tei_mac(nid, p.tei, p.mac);
+        if (beacon_crc_ok && p.tei != 0 && p.mac) changed |= learn_tei_mac(nid, p.tei, p.mac);
     // 管理帧(发现列表等)携带的 TEI→MAC 学习对
     for (const TeiMacPair& p : e.msdu.tei_mac_pairs)
         if (p.tei != 0 && p.mac) changed |= learn_tei_mac(nid, p.tei, p.mac);
