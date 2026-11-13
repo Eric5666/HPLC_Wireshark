@@ -23,6 +23,7 @@ struct PreparedEntry {
     QString     search_tail;        ///< make_search_text_tail(entry):不含帧序号的搜索文本
     qint64      display_delta_us = -1; ///< 解析器给出的显示 Delta(µs);-1=插件解析器未算
     BplcFrame   plugin_frame;       ///< 插件喂帧模板(decoded_index/decoded_epoch_ms 待补)
+    quint64     credit_gen = 0;     ///< 源帧的背压额度代号(GUI 归还额度时原样交回)
 };
 using PreparedEntryPtr = QSharedPointer<PreparedEntry>;
 Q_DECLARE_METATYPE(PreparedEntryPtr)

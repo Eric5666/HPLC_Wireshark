@@ -1,4 +1,4 @@
-# 帧流背压探针(M7):FrameCredit 在途上限、中止不死锁、reset/disable 解除阻塞;
+# 帧流背压探针(M7):FrameCredit 在途上限、中止不死锁、reset/disable 解除阻塞、按代号会话隔离;
 # 以及 ReaderWorker 回放在消费者慢时被限流、stop 能打断阻塞的 Reader
 QT       += core serialport
 QT       -= gui

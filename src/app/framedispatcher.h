@@ -23,7 +23,8 @@ public:
     void set_flow_credit(std::shared_ptr<FrameCredit> c) { m_credit = std::move(c); }
 
 public slots:
-    void on_frame(const BplcFrame& frame);
+    /// @param credit_gen 帧的背压额度代号(随 frame_ready 透传),解析完/跳过时按此归还
+    void on_frame(const BplcFrame& frame, quint64 credit_gen);
     /// @brief 回放/采集结束(经队列投递,晚于所有 frame_ready):输出解析异常汇总
     void on_replay_finished();
 

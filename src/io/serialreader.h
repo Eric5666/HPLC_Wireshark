@@ -68,7 +68,8 @@ public slots:
     void stop_reading();
 
 signals:
-    void frame_ready(BplcFrame frame);
+    /// @param credit_gen 该帧背压额度所属代号(FrameCredit;0=未占额度),消费者归还时原样交回
+    void frame_ready(BplcFrame frame, quint64 credit_gen);
     void status_message(QString msg);
     void error_occurred(QString err);
     void finished();
@@ -138,14 +139,15 @@ public:
 signals:
     void request_start(ReaderConfig cfg, quint64 session);
     void request_stop();
-    void frame_ready(BplcFrame frame);
+    /// @param credit_gen 该帧背压额度所属代号(FrameCredit;0=未占额度),消费者归还时原样交回
+    void frame_ready(BplcFrame frame, quint64 credit_gen);
     void status_message(QString msg);
     void error_occurred(QString err);
     void progress_percent(int percent);
     void finished();   ///< 采集/回放结束(worker 完成)
 
 private slots:
-    void on_frame(BplcFrame f);
+    void on_frame(BplcFrame f, quint64 credit_gen);
     void on_status(QString s);
     void on_error(QString e);
     void on_progress(int p);

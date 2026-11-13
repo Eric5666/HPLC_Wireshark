@@ -31,9 +31,9 @@ void DispatcherWorker::on_replay_finished() {
     pa::summarize();
 }
 
-void DispatcherWorker::on_frame(const BplcFrame& frame) {
+void DispatcherWorker::on_frame(const BplcFrame& frame, quint64 credit_gen) {
     if (m_stopped.load()) {          // 已停止:立即返回,快速清空积压帧
-        if (m_credit) m_credit->release();
+        if (m_credit) m_credit->release(credit_gen);
         return;
     }
     QElapsedTimer t; t.start();
@@ -72,7 +72,9 @@ void DispatcherWorker::on_frame(const BplcFrame& frame) {
     r.meta.seg_start = frame.meta.seg_start;
     r.meta.replay_time_tag = frame.meta.replay_time_tag;
     // 条目在解析线程预构建(字段移动 + 搜索文本 + 插件模板),GUI 线程只补序号/时间
-    emit parsed(prepare_entry(std::move(r)));
+    PreparedEntryPtr prepared = prepare_entry(std::move(r));
+    prepared->credit_gen = credit_gen;   // 额度代号透传到 GUI 归还处
+    emit parsed(prepared);
     // 不再忙等限速:Reader 侧的在途额度(FrameCredit,GUI 处理完解析结果才归还)
     // 把 Reader → 解析 → GUI 的积压限制在固定帧数内,错协议快解析也不会淹没 GUI。
     // 累计统计:每 5 万帧打一条进度,定位回灌卡顿在哪个环节
@@ -122,8 +124,8 @@ FrameDispatcher::~FrameDispatcher() {
 
 void FrameDispatcher::connect_source(QObject* source) {
     if (!m_worker) return;  // 构造时无可用解析器(见构造):不接信号,帧自然不流入
-    connect(source, SIGNAL(frame_ready(BplcFrame)),
-            m_worker, SLOT(on_frame(BplcFrame)),
+    connect(source, SIGNAL(frame_ready(BplcFrame,quint64)),
+            m_worker, SLOT(on_frame(BplcFrame,quint64)),
             Qt::QueuedConnection);
     // 回放/采集结束信号同样排队投递:worker 按 FIFO 先解析完积压帧再汇总,
     // 避免回放线程早于解析线程汇总导致计数不全
@@ -171,7 +173,8 @@ void FrameDispatcher::shutdown() {
 }
 
 void FrameDispatcher::on_parsed(const PreparedEntryPtr& p) {
-    if (m_credit) m_credit->release();   // GUI 已接手这一帧:归还背压额度
+    // GUI 已接手这一帧:按帧所属代号归还背压额度(旧会话迟到的结果自动作废)
+    if (m_credit) m_credit->release(p->credit_gen);
     const PacketEntry& e = p->entry;
     m_total.fetch_add(1);
     if (!e.accepted) m_dropped.fetch_add(1);

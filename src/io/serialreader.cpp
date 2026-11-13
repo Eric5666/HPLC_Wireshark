@@ -204,18 +204,23 @@ int ReaderWorker::last_bcd_tag_offset(const QByteArray& buf) {
 }
 
 bool ReaderWorker::emit_frame(const BplcFrame& frame) {
-    if (m_credit) {
-        if (m_cfg.mode == ReaderMode::SerialPort) {
-            // 实时串口绝不阻塞读取:在此等待会让驱动/QSerialPort 缓冲溢出而静默丢字节。
-            // 只记在途数,不等待(串口速率本身有上限,无需背压)
-            if (aborted()) return false;
-            m_credit->acquire_nowait();
-        } else if (!m_credit->acquire([this]() { return aborted(); })) {
-            // 文件回放背压:在途帧已满时在此等待消费者;stop() 置中止标志后 50 ms 内放弃
-            return false;
-        }
+    if (!m_credit) {
+        emit frame_ready(frame, FrameCredit::kNoGeneration);
+        return true;
     }
-    emit frame_ready(frame);
+    quint64 gen = FrameCredit::kNoGeneration;
+    if (m_cfg.mode == ReaderMode::SerialPort) {
+        // 实时串口绝不阻塞读取:在此等待会让驱动/QSerialPort 缓冲溢出而静默丢字节。
+        // 只记在途数,不等待(串口速率本身有上限,无需背压)
+        if (aborted()) return false;
+        gen = m_credit->acquire_nowait();
+    } else if (!m_credit->acquire([this]() { return aborted(); }, &gen)) {
+        // 文件回放背压:在途帧已满时在此等待消费者;stop() 置中止标志后 50 ms 内放弃
+        return false;
+    }
+    // 额度代号随帧信号透传(不改 BplcFrame 布局,免动插件 ABI 指纹):消费者按代号
+    // 归还,新会话 reset 后旧会话迟到的归还不会扣减新会话的在途计数
+    emit frame_ready(frame, gen);
     return true;
 }
 
@@ -678,10 +683,13 @@ SerialReader::~SerialReader() {
 }
 
 bool SerialReader::start(const ReaderConfig& cfg) {
-    m_credit->reset();   // 新会话:上一会话未归还的额度作废
     // GUI 线程分配会话号:旧会话立即失效(回放循环/背压等待随即退出),
     // 之后若紧跟 stop(),worker 再处理本次 start 时会直接返回
-    emit request_start(cfg, m_worker->begin_session());
+    const quint64 session = m_worker->begin_session();
+    // 新会话:额度换代,上一会话未归还/迟到的 release 一律作废。必须在 begin_session
+    // 之后:否则 reset 唤醒的旧回放循环尚未见到中止,会抢到新一代额度
+    m_credit->reset();
+    emit request_start(cfg, session);
     return true;
 }
 
@@ -696,7 +704,7 @@ bool SerialReader::is_running() const {
     return m_worker && m_worker->is_active();
 }
 
-void SerialReader::on_frame(BplcFrame f) { emit frame_ready(f); }
+void SerialReader::on_frame(BplcFrame f, quint64 credit_gen) { emit frame_ready(f, credit_gen); }
 void SerialReader::on_status(QString s) { emit status_message(s); }
 void SerialReader::on_error(QString e)  { emit error_occurred(e); }
 void SerialReader::on_progress(int p)   { emit progress_percent(p); }
