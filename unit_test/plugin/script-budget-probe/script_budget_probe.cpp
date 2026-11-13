@@ -66,6 +66,15 @@ function parse(frame)
   if m == 3 then
     while true do pcall(coroutine.wrap(function() while true do end end)) end
   end
+  -- 4/5:结果表带死循环 __index/__len。宿主若用 lua_getfield/luaL_len 读结果,
+  -- 元方法在 pcall 外跑到指令预算上限 → Lua panic → SIGABRT(回归用例)
+  local spin = function() while true do end end
+  if m == 4 then return setmetatable({}, {__index = spin}) end
+  if m == 5 then
+    return {accept = true,
+            mpdu = setmetatable({}, {__index = spin}),
+            fields = setmetatable({}, {__index = spin, __len = spin})}
+  end
   return {accept = false, rejectReason = "alive"}
 end
 )LUA";
@@ -93,6 +102,27 @@ static void test_lua(const QString& root) {
     r = call_parse(b, 0, &err, &ms);
     check("lua: plugin still usable after overrun (budget reset per call)",
           r.reject_reason == QStringLiteral("alive") && err.isEmpty());
+    // 结果表 __index 死循环:宿主只做 raw 读取,不触发元方法,不再 panic/abort
+    r = call_parse(b, 4, &err, &ms);
+    std::printf("  __index-loop result read in %lld ms: accept=%d reason=%s\n", ms, int(r.accept),
+                qPrintable(r.reject_reason));
+    check("lua: result table __index loop does not abort host (raw reads)",
+          !r.accept && r.reject_reason == QStringLiteral("rejected by plugin") && ms < 30000);
+    r = call_parse(b, 5, &err, &ms);
+    check("lua: nested mpdu/fields __index/__len loops ignored (raw reads)",
+          r.accept && err.isEmpty() && r.msdu.tree.isEmpty() && ms < 30000);
+    r = call_parse(b, 0, &err, &ms);
+    check("lua: plugin still usable after metamethod-trap results",
+          r.reject_reason == QStringLiteral("alive") && err.isEmpty());
+    // get_info() 返回带死循环 __index 的代理表:初始化失败而非 abort
+    const PluginManifest m3 = read_plugin_manifest(make_plugin(
+        root, QStringLiteral("lua-info-trap"), "lua", "main.lua",
+        "function get_info() return setmetatable({}, {__index = function() while true do end end}) end\n"
+        "function parse(f) return {accept=false} end\n"));
+    LuaBackend b3;
+    const bool ok3 = b3.initialize(m3, &err);
+    check("lua: get_info() __index loop fails init instead of aborting",
+          !ok3 && err.contains(QStringLiteral("protocolId")));
 
     const PluginManifest m2 = read_plugin_manifest(make_plugin(
         root, QStringLiteral("lua-toplevel"), "lua", "main.lua",

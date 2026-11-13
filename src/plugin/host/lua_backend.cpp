@@ -8,6 +8,10 @@
 #include <QImage>
 #include <QPainter>
 
+#include <csetjmp>
+#include <cstdio>
+#include <cstring>
+
 #include "plugin_env.h"
 #include "script_painter.h"
 
@@ -61,6 +65,25 @@ int guarded_pcall(lua_State* L, int nargs, int nresults) {
     if (LuaBudget* b = budget_of(L)) b->used = 0;
     lua_sethook(L, budget_hook, LUA_MASKCOUNT, kLuaHookStep);
     return lua_pcall(L, nargs, nresults, 0);
+}
+// ---- Lua panic 兜底:未受保护的错误(不在任何 pcall 内)默认 abort() 整个宿主进程。
+// 所有入口都经 LuaBackend::run_protected 布置跳转点,panic 处理函数 longjmp 回去,
+// 本插件状态标记为不可用,宿主继续运行。Lua 以 C 编译(错误本身就是 longjmp)。
+thread_local std::jmp_buf* t_panic_jmp = nullptr;
+thread_local char t_panic_msg[256] = {0};
+int lua_panic_handler(lua_State* L) {
+    const char* msg = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : "non-string error object";
+    std::strncpy(t_panic_msg, msg ? msg : "", sizeof(t_panic_msg) - 1);
+    t_panic_msg[sizeof(t_panic_msg) - 1] = 0;
+    if (t_panic_jmp) std::longjmp(*t_panic_jmp, 1);
+    std::fprintf(stderr, "Lua panic outside a protected host call: %s\n", t_panic_msg);
+    return 0;  // 没有跳转点(不应发生):Lua 随后 abort()
+}
+/// @brief 原始取字段(lua_rawget,不触发 __index 等元方法),值压栈,返回类型
+int raw_getfield(lua_State* L, int idx, const char* key) {
+    idx = lua_absindex(L, idx);
+    lua_pushstring(L, key);
+    return lua_rawget(L, idx);
 }
 // QByteArray → Lua 数组表(1-based),留在栈顶
 void push_byte_table(lua_State* L, const QByteArray& b) {
@@ -484,6 +507,13 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
     m_budget->main = m_lua;
     *static_cast<LuaBudget**>(lua_getextraspace(m_lua)) = m_budget.get();
     lua_sethook(m_lua, budget_hook, LUA_MASKCOUNT, kLuaHookStep);
+    lua_atpanic(m_lua, lua_panic_handler);   // 未受保护的错误不再 abort() 宿主
+    bool ok = false;
+    if (!run_protected([&] { ok = initialize_impl(m, err); }, err)) return false;
+    return ok;
+}
+
+bool LuaBackend::initialize_impl(const PluginManifest& m, QString* err) {
     m_plugin_dir = m.dir_path;
     open_sandboxed_libs(m_lua, m_plugin_dir);   // 受限标准库(不再 luaL_openlibs)
 
@@ -607,7 +637,12 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
 }
 
 void LuaBackend::shutdown() {
-    if (m_lua) { lua_close(m_lua); m_lua = nullptr; }
+    if (m_lua) {
+        // panic 之后状态机不保证一致(nCcalls 等未复位),宁可泄漏也不在其上再跑 lua_close
+        if (!m_panicked) lua_close(m_lua);
+        m_lua = nullptr;
+    }
+    m_panicked = false;
     m_budget.reset();
     m_has_graphics = false;
 }
@@ -624,7 +659,7 @@ QSize LuaBackend::graphics_preferred_size() const {
     return QSize(400, 300);
 }
 
-QImage LuaBackend::render_graphics(int w, int h, QString* err) {
+QImage LuaBackend::render_graphics_impl(int w, int h, QString* err) {
     if (!m_has_graphics) {
         *err = QStringLiteral("no graphics");
         return QImage();
@@ -656,7 +691,7 @@ QImage LuaBackend::render_graphics(int w, int h, QString* err) {
     return img;
 }
 
-bool LuaBackend::handle_graphics_event(const GraphicsEvent& e, QString* err) {
+bool LuaBackend::handle_graphics_event_impl(const GraphicsEvent& e, QString* err) {
     if (!m_has_graphics) return false;
     lua_getglobal(m_lua, "on_event");
     if (!lua_isfunction(m_lua, -1)) {
@@ -680,7 +715,7 @@ bool LuaBackend::handle_graphics_event(const GraphicsEvent& e, QString* err) {
 
 QString LuaBackend::table_str(const char* key, const QString& d) {
     QString r = d;
-    if (lua_getfield(m_lua, -1, key) == LUA_TSTRING)
+    if (raw_getfield(m_lua, -1, key) == LUA_TSTRING)
         r = QString::fromUtf8(lua_tostring(m_lua, -1));
     lua_pop(m_lua, 1);
     return r;
@@ -688,7 +723,8 @@ QString LuaBackend::table_str(const char* key, const QString& d) {
 
 quint64 LuaBackend::table_uint(const char* key, quint64 d) {
     quint64 r = d;
-    if (lua_isinteger(m_lua, lua_getfield(m_lua, -1, key)))
+    raw_getfield(m_lua, -1, key);
+    if (lua_isinteger(m_lua, -1))
         r = static_cast<quint64>(lua_tointeger(m_lua, -1));
     else if (lua_isnumber(m_lua, -1))
         r = static_cast<quint64>(lua_tonumber(m_lua, -1));
@@ -701,9 +737,9 @@ bool LuaBackend::convert_fields(QVector<MsduFieldNode>* out, QString* err) {
         *err = QStringLiteral("fields must be a table");
         return false;
     }
-    const lua_Integer n = luaL_len(m_lua, -1);
+    const lua_Integer n = static_cast<lua_Integer>(lua_rawlen(m_lua, -1));
     for (lua_Integer i = 1; i <= n; ++i) {
-        lua_geti(m_lua, -1, i);  // field 表
+        lua_rawgeti(m_lua, -1, i);  // field 表
         if (!lua_istable(m_lua, -1)) {
             *err = QStringLiteral("field #%1 must be a table").arg(i);
             lua_pop(m_lua, 1);
@@ -713,16 +749,16 @@ bool LuaBackend::convert_fields(QVector<MsduFieldNode>* out, QString* err) {
         node.name = table_str("name");
         node.value = table_str("value");
         // relStart/relLen 可选
-        lua_getfield(m_lua, -1, "relStart");
+        raw_getfield(m_lua, -1, "relStart");
         node.rel_start = lua_isinteger(m_lua, -1)
             ? static_cast<int>(lua_tointeger(m_lua, -1)) : -1;
         lua_pop(m_lua, 1);
-        lua_getfield(m_lua, -1, "relLen");
+        raw_getfield(m_lua, -1, "relLen");
         node.rel_len = lua_isinteger(m_lua, -1)
             ? static_cast<int>(lua_tointeger(m_lua, -1)) : 0;
         lua_pop(m_lua, 1);
         // children 可选(递归)
-        if (lua_getfield(m_lua, -1, "children") == LUA_TTABLE) {
+        if (raw_getfield(m_lua, -1, "children") == LUA_TTABLE) {
             if (!convert_fields(&node.children, err)) {
                 lua_pop(m_lua, 2);  // children + field
                 return false;
@@ -735,7 +771,7 @@ bool LuaBackend::convert_fields(QVector<MsduFieldNode>* out, QString* err) {
     return true;
 }
 
-ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
+ParseResult LuaBackend::parse_impl(const BplcFrame& frame, MsduState& msdu,
                               const ParseFilter& filter, QString* err) {
     Q_UNUSED(msdu);   // Phase2:Lua 插件不支持跨帧重组
     Q_UNUSED(filter);
@@ -811,7 +847,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
         return r;
     }
 
-    lua_getfield(m_lua, -1, "accept");
+    raw_getfield(m_lua, -1, "accept");
     r.accept = lua_toboolean(m_lua, -1);
     lua_pop(m_lua, 1);
     if (!r.accept) {
@@ -822,7 +858,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
     }
 
     // mpdu 可选
-    if (lua_getfield(m_lua, -1, "mpdu") == LUA_TTABLE) {
+    if (raw_getfield(m_lua, -1, "mpdu") == LUA_TTABLE) {
         r.mpdu.frame_type = static_cast<quint8>(table_uint("frameType"));
         r.mpdu.src_tei = static_cast<quint16>(table_uint("srcTei"));
         r.mpdu.dst_tei = static_cast<quint16>(table_uint("dstTei"));
@@ -834,7 +870,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
 
     r.msdu.present = true;
     r.msdu.summary = table_str("summary");
-    if (lua_getfield(m_lua, -1, "fields") == LUA_TTABLE) {
+    if (raw_getfield(m_lua, -1, "fields") == LUA_TTABLE) {
         if (!convert_fields(&r.msdu.tree, err)) {
             lua_pop(m_lua, 2);  // fields + result
             r.accept = false; r.reject_reason = *err;
@@ -847,7 +883,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
     return r;
 }
 
-QString LuaBackend::call_text_function(const char* name, QString* err) {
+QString LuaBackend::call_text_function_impl(const char* name, QString* err) {
     lua_getglobal(m_lua, name);
     if (!lua_isfunction(m_lua, -1)) {
         lua_pop(m_lua, 1);
@@ -868,7 +904,7 @@ QString LuaBackend::call_text_function(const char* name, QString* err) {
     return s;
 }
 
-void LuaBackend::notify_frame_selected(qint64 frameIndex, bool force_history) {
+void LuaBackend::notify_frame_selected_impl(qint64 frameIndex, bool force_history) {
     lua_getglobal(m_lua, "on_frame_selected");
     if (!lua_isfunction(m_lua, -1)) {
         lua_pop(m_lua, 1);
@@ -880,4 +916,67 @@ void LuaBackend::notify_frame_selected(qint64 frameIndex, bool force_history) {
         qWarning() << "LuaBackend::notify_frame_selected:"
                    << pop_lua_error(m_lua);
     }
+}
+
+// ---- 受保护入口:布置 panic 跳转点 ----
+bool LuaBackend::run_protected(const std::function<void()>& body, QString* err) {
+    if (!m_lua || m_panicked) {
+        if (err) *err = m_panicked ? QStringLiteral("Lua plugin disabled after an unrecoverable Lua panic")
+                                   : QStringLiteral("Lua plugin is not initialized");
+        return false;
+    }
+    std::jmp_buf jb;
+    std::jmp_buf* const prev = t_panic_jmp;
+    if (setjmp(jb) == 0) {
+        t_panic_jmp = &jb;
+        body();
+        t_panic_jmp = prev;
+        return true;
+    }
+    // panic 处理函数 longjmp 回到这里;body 中尚未析构的局部对象被跳过(仅泄漏)
+    t_panic_jmp = prev;
+    m_panicked = true;
+    const QString msg = QString::fromUtf8(t_panic_msg);
+    qWarning() << "LuaBackend: Lua panic, plugin disabled:" << msg;
+    if (err) *err = QStringLiteral("Lua panic: %1").arg(msg);
+    return false;
+}
+
+ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
+                              const ParseFilter& filter, QString* err) {
+    ParseResult r;
+    if (!run_protected([&] { r = parse_impl(frame, msdu, filter, err); }, err)) {
+        r = ParseResult();
+        r.meta = frame.meta;
+        r.raw_wire = frame.raw_wire;
+        r.arrival_us = frame.arrival_us;
+        r.payload_for_log = frame.data;
+        r.accept = false;
+        r.reject_reason = err ? *err : QStringLiteral("Lua panic");
+    }
+    return r;
+}
+
+QImage LuaBackend::render_graphics(int w, int h, QString* err) {
+    QImage img;
+    if (!run_protected([&] { img = render_graphics_impl(w, h, err); }, err)) return QImage();
+    return img;
+}
+
+bool LuaBackend::handle_graphics_event(const GraphicsEvent& e, QString* err) {
+    bool redraw = false;
+    if (!run_protected([&] { redraw = handle_graphics_event_impl(e, err); }, err)) return false;
+    return redraw;
+}
+
+QString LuaBackend::call_text_function(const char* name, QString* err) {
+    QString s;
+    if (!run_protected([&] { s = call_text_function_impl(name, err); }, err)) return QString();
+    return s;
+}
+
+void LuaBackend::notify_frame_selected(qint64 frameIndex, bool force_history) {
+    QString err;
+    if (!run_protected([&] { notify_frame_selected_impl(frameIndex, force_history); }, &err))
+        qWarning() << "LuaBackend::notify_frame_selected:" << err;
 }

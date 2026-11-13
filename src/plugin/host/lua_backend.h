@@ -40,6 +40,7 @@
 
 #include "plugin_backend.h"
 
+#include <functional>
 #include <memory>
 
 struct lua_State;
@@ -72,6 +73,17 @@ public:
     void notify_frame_selected(qint64 frameIndex, bool force_history) override;
 
 private:
+    /// @brief 在 panic 跳转点保护下执行 body;发生 Lua panic 时返回 false、
+    ///        标记本插件不可用(之后所有入口直接报错),宿主进程不 abort
+    bool run_protected(const std::function<void()>& body, QString* err);
+    bool initialize_impl(const PluginManifest& m, QString* err);
+    ParseResult parse_impl(const BplcFrame& frame, MsduState& msdu,
+                           const ParseFilter& filter, QString* err);
+    QImage render_graphics_impl(int w, int h, QString* err);
+    bool handle_graphics_event_impl(const GraphicsEvent& e, QString* err);
+    QString call_text_function_impl(const char* name, QString* err);
+    void notify_frame_selected_impl(qint64 frameIndex, bool force_history);
+
     /// @brief Lua fields 表(数组) → MsduFieldNode 树(递归)。表在栈顶
     bool convert_fields(QVector<MsduFieldNode>* out, QString* err);
     /// @brief 取表字段的字符串/整数(字段不存在给缺省)
@@ -81,6 +93,7 @@ private:
     lua_State* m_lua = nullptr;
     std::unique_ptr<LuaBudget> m_budget;  ///< 每次调用的指令预算(count hook 读写)
     bool m_has_graphics = false;
+    bool m_panicked = false;  ///< 发生过 Lua panic:状态不可再用
     QString m_plugin_dir;  ///< 插件目录(设置/环境变量用)
     QString m_protocol_id;
     QString m_display_name;
