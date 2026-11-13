@@ -36,6 +36,8 @@ struct TopoFramePage {
     quint64 request_id = 0;
     qint64 offset = 0;
     qint64 total = 0;
+    bool ok = true;          ///< false:查询出错(items 为空,error 为原因),不是"没有数据"
+    QString error;
     QVector<TopoFrameInput> items;
 };
 Q_DECLARE_METATYPE(TopoFramePage)
@@ -45,6 +47,8 @@ struct TopoAnomalyPage {
     quint32 nid = 0;
     qint64 offset = 0;
     qint64 total = 0;
+    bool ok = true;          ///< false:查询出错(items 为空,error 为原因),不是"没有数据"
+    QString error;
     QVector<TopoAnomaly> items;
 };
 Q_DECLARE_METATYPE(TopoAnomalyPage)
@@ -113,6 +117,8 @@ private:
     qint64 m_last_applied_frame = -1;
     bool m_store_failed = false;
     bool m_store_error_reported = false;
+    QString m_last_insert_error;
+    bool m_frame_store_failing = false;   ///< 当前处于连续入库失败中(只报一次)
     QString m_store_error_message;
 };
 
