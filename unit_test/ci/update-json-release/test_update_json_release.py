@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""Tests for scripts/update_json_sha256.py (stdlib unittest, no Qt needed).
+"""Tests for scripts/update_json_release.py (stdlib unittest, no Qt needed).
 
-Run: python3 unit_test/ci/update-json-sha256/test_update_json_sha256.py
+Run: python3 unit_test/ci/update-json-release/test_update_json_release.py
 """
-import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
 import unittest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-SCRIPT = os.path.join(REPO, "scripts", "update_json_sha256.py")
-HEX64 = re.compile(r"^[0-9a-f]{64}$")   # same rule as Downloader::verifyDownload
+SCRIPT = os.path.join(REPO, "scripts", "update_json_release.py")
 
 
 def run(*args, cwd):
@@ -22,7 +19,7 @@ def run(*args, cwd):
                           capture_output=True, text=True)
 
 
-class UpdateJsonSha256Test(unittest.TestCase):
+class UpdateJsonReleaseTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.d = self.tmp.name
@@ -46,31 +43,35 @@ class UpdateJsonSha256Test(unittest.TestCase):
         with open(self.manifest, encoding="utf-8") as f:
             return json.load(f)
 
-    def test_patches_sha_url_version(self):
+    def test_patches_url_version_no_sha(self):
         base = "https://github.com/aron566/HPLC_Wireshark/releases/download/v9.9.9"
-        sums = os.path.join(self.d, "SHA256SUMS.txt")
         r = run("--manifest", self.manifest, "--version", "9.9.9", "--base-url", base,
-                "--sums", sums, f"windows={self.win}", f"linux={self.lin}", cwd=self.d)
+                f"windows={self.win}", f"linux={self.lin}", cwd=self.d)
         self.assertEqual(r.returncode, 0, r.stderr)
         m = self.load()["updates"]
         for key, path in (("windows", self.win), ("linux", self.lin)):
-            with open(path, "rb") as f:
-                digest = hashlib.sha256(f.read()).hexdigest()
-            self.assertRegex(m[key]["sha256"], HEX64)
-            self.assertEqual(m[key]["sha256"], digest)
+            self.assertNotIn("sha256", m[key])
             self.assertEqual(m[key]["download-url"], base + "/" + os.path.basename(path))
             self.assertEqual(m[key]["latest-version"], "9.9.9")
             # untouched fields survive
             self.assertEqual(m[key]["changelog"], self.orig["updates"][key]["changelog"])
-            with open(sums, encoding="utf-8") as f:
-                self.assertIn(f"{digest}  {os.path.basename(path)}", f.read())
+
+    def test_drops_stale_sha256(self):
+        doc = self.load()
+        doc["updates"]["linux"]["sha256"] = "0" * 64
+        with open(self.manifest, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False)
+        r = run("--manifest", self.manifest, "--base-url", "https://x/y",
+                f"linux={self.lin}", cwd=self.d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("sha256", self.load()["updates"]["linux"])
 
     def test_rejects_url_pointing_elsewhere(self):
         # without --base-url the existing URL (v2.0.1 asset) does not match
         r = run("--manifest", self.manifest, f"windows={self.win}", cwd=self.d)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("does not point at", r.stderr)
-        self.assertNotIn("sha256", self.load()["updates"]["windows"])
+        self.assertEqual(self.load(), self.orig)
 
     def test_missing_package_fails(self):
         r = run("--manifest", self.manifest, "--base-url", "https://x/y",
