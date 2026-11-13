@@ -37,19 +37,19 @@ QT=C:/Qt/6.11.2/mingw_64 ./build.sh          # Windows
 | 聚合帧乱序 `seq 1,0` | 重排后 `cascade[0]='A'(seq0)`、`cascade[1]='B'(seq1)` |
 | 聚合帧坏块 | 翻转 seq=1 块 CRC → 两条 cascade 候选均保留；CRC32 不可用时回退门仅接受未跨坏块的 'A' |
 | GW2022/GW2026 乱序 4 块 | 解析器经 `assemble()` 输出体 272B、体序 `0 1 2 3`、`pb_crc_ok` |
-| GW2022/GW2026 单站坏 CRC | 坏块与首 MSDU span 相交时不交付解析；坏块在 span 后时仍交付首 MSDU；CRC 状态保留以供标红 |
-| GW2022/GW2026 乱序到达 + 坏 CRC | `seq1` 坏块不污染 `seq0` 首 span；`seq0` 坏块阻止交付；逐块 CRC 仍按到达序回填 |
+| GW2022/GW2026 单站坏 CRC | 体流一律交付（重组完整）；坏块与首 MSDU span 相交时 `span_clean=false`，在 span 后时 `span_clean=true`；CRC 状态保留以供标红 |
+| GW2022/GW2026 乱序到达 + 坏 CRC | `seq1` 坏块不污染 `seq0` 首 span（`span_clean=true`）；`seq0` 坏块使 `span_clean=false`；体流一律交付；逐块 CRC 仍按到达序回填 |
 
 > 国网用例的体流一律按**国网头布局**构造：简头 = 体[0] 低 nibble `0x01`、长度在体[2..3]
 > 低 11bit；标准头 = 长度在体[8..9] 低 11bit、体[11] bit3 控制 16/28B。
 > 早前版本误用南网布局（体[0]=`0x04` + 16bit LE 长度）造体流，与国网 span 门口径不一致，
 > 错口径也照样全 PASS；口径回归用例见 `unit_test/protocol-common/pb-batch2-probe` ⑫。
-| GW2022/GW2026 后续 MSDU 坏块边界 | 后续跨度坏块不阻止首 MSDU 交付；首 MSDU 跨坏块时整条体流拒交，即使后续 MSDU 在好块 |
+| GW2022/GW2026 后续 MSDU 坏块边界 | 后续跨度坏块不影响首 span（`span_clean=true`）；首 MSDU 跨坏块时体流仍交付（重组完整），`span_clean=false` 供 N/A 回退 |
 | 跨帧污染回归 | 无 END 帧之后紧跟完整帧（同一 `MsduState`）仍正常重组 272B |
 
 ## 说明
 
-- GW2022/GW2026 顶层对每个重组体流只调用一次 MSDU 解析器；解析器按首个 MSDU 头声明长度切片，不会继续遍历后续 MSDU。坏块若与这个 span 相交，当前完整体流整体不交付；不会出现同一调用中“后续 MSDU 继续解析”的路径。
+- GW2022/GW2026 顶层对每个重组体流只调用一次 MSDU 解析器；解析器按首个 MSDU 头声明长度切片，不会继续遍历后续 MSDU。交付口径（用户 2026-11-13 定）：体流交付只要求序列号重组完整，首 MSDU span 是否避开坏块不再是交付门——`span_clean` 经出参透传调用方，仅在 MSDU CRC32 不可用时作 PB 回退；学习取舍由解析器按 MSDU CRC 三态决定（见 `msdu_crc_allows_learning` / `msdu_crc_strip_learning`）。
 
 - 单帧多块重组的帧内状态**不再挂在会话级 `MsduState`** 上；`MsduState` 参数仅为签名兼容，
   函数内 `Q_UNUSED`。旧实现下「无 END 帧 → 后续正常帧整帧被废」的跨帧污染已消除。

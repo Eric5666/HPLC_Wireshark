@@ -137,13 +137,19 @@ NW_2021 载波 SOF（TMI=3 → 136B，块 = PB头4B 表133 + 体 + 保留 1B + C
 
 | 用例 | 构造 | 期望 |
 |---|---|---|
-| `A` | 简头 len=60 → span 68；坏块在块 1 | **解析**（136B） |
-| `A'` | 同上但坏块换成块 0 | 不解析 |
-| `B` | 标准头 len=60 → span 80 > 68 | 不解析 |
-| `B'` | 标准头 len=20 → span 40 ≤ 68 | **解析**（136B） |
-| `C` | 28B 头 + len=40 → span 72 > 68 | 不解析 |
+| `A` | 简头 len=60 → span 68；坏块在块 1 | 交付（136B），`span_clean=true` |
+| `A'` | 同上但坏块换成块 0 | 交付（136B），`span_clean=false` |
+| `B` | 标准头 len=60 → span 80 > 68 | 交付（136B），`span_clean=false` |
+| `B'` | 标准头 len=20 → span 40 ≤ 68 | 交付（136B），`span_clean=true` |
+| `C` | 28B 头 + len=40 → span 72 > 68 | 交付（136B），`span_clean=false` |
 
-GW2026（4 条，含 28B 头）与 GW2022（4 条）各一份，共 9 条断言。
+GW2026（5 条，含 28B 头）与 GW2022（4 条）各一份，共 9 条断言。
+
+> 交付口径（用户 2026-11-13 定，已改）：assemble 只要求序列号重组完整就交付体流，
+> span 是否干净不再是交付门——`span_clean` 经出参透传调用方，仅在 MSDU CRC32
+> 不可用时作 PB 回退；学习取舍由解析器按 MSDU CRC 三态决定（见
+> `msdu_crc_allows_learning` / `msdu_crc_strip_learning`）。旧表里的“不解析”
+> 是旧交付语义，已随本次改动废止。
 
 > 实现已收口到 `pb_asm::msdu_span_avoids_bad_blocks(body, crc_oks, block_body_len,
 > SpanLayout{Nw,Gw})`；3 参版本是南网口径的兼容入口，注释里写明「国网禁用」。

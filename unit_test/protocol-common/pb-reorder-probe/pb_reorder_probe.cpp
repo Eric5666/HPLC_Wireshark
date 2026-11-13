@@ -382,19 +382,24 @@ static void test_single_bad_crc_span_gate() {
         p[16 + bad_block * pb_size + pb_size - 1] ^= 0x01;
         return f;
     };
-    const auto run_case = [&](bool gw2026, int bad_block, bool expect_delivery,
+    const auto run_case = [&](bool gw2026, int bad_block, bool expect_span_clean,
                               const char* label) {
         MpduInfo info; MsduState msdu; QByteArray complete;
+        bool span_clean = false;
         const QByteArray f = make_frame(gw2026, bad_block);
         const QString err = gw2026
-            ? gw_2026_sof::assemble(f, info, msdu, complete, 0, false)
-            : gw_2022_sof::assemble(f, info, msdu, complete, 0, false);
+            ? gw_2026_sof::assemble(f, info, msdu, complete, 0, false, &span_clean)
+            : gw_2022_sof::assemble(f, info, msdu, complete, 0, false, &span_clean);
         check(QString("%1: assemble succeeds").arg(label).toUtf8().constData(), err.isEmpty());
         check(QString("%1: bad CRC still marks frame").arg(label).toUtf8().constData(),
               !info.pb_crc_ok && info.pb_crc_oks.size() == 2
               && !info.pb_crc_oks[bad_block]);
-        check(QString("%1: delivery follows good-span gate").arg(label).toUtf8().constData(),
-              expect_delivery ? complete.size() == 2 * body_len : complete.isEmpty());
+        // 交付口径(用户 2026-11-13 定):重组完整即交付体流,span 是否干净只经
+        // 出参透传(MSDU CRC 不可用时才作 PB 回退),不再是交付门。
+        check(QString("%1: delivery no longer gated by span").arg(label).toUtf8().constData(),
+              complete.size() == 2 * body_len);
+        check(QString("%1: span_clean follows span/bad-block").arg(label).toUtf8().constData(),
+              span_clean == expect_span_clean);
     };
     run_case(false, 0, false, "gw22: bad CRC intersects MSDU");
     run_case(false, 1, true,  "gw22: bad CRC after MSDU span");
@@ -425,19 +430,24 @@ static void test_out_of_order_bad_crc_span() {
         return f;
     };
     const auto run_case = [&](bool gw2026, int bad_arrival, int msdu_len,
-                              bool expect_delivery, const char* label) {
+                              bool expect_span_clean, const char* label) {
         MpduInfo info; MsduState msdu; QByteArray complete;
+        bool span_clean = false;
         const QByteArray f = make_frame(gw2026, bad_arrival, msdu_len);
         const QString err = gw2026
-            ? gw_2026_sof::assemble(f, info, msdu, complete, 0, false)
-            : gw_2022_sof::assemble(f, info, msdu, complete, 0, false);
+            ? gw_2026_sof::assemble(f, info, msdu, complete, 0, false, &span_clean)
+            : gw_2022_sof::assemble(f, info, msdu, complete, 0, false, &span_clean);
         check(QString("%1: assemble succeeds").arg(label).toUtf8().constData(), err.isEmpty());
         check(QString("%1: CRC result stays in arrival order").arg(label).toUtf8().constData(),
               info.pb_crc_oks.size() == 2
               && !info.pb_crc_oks[bad_arrival]
               && info.pb_crc_oks[1 - bad_arrival]);
-        check(QString("%1: gate follows seq-order span").arg(label).toUtf8().constData(),
-              expect_delivery ? complete.size() == 2 * body_len : complete.isEmpty());
+        // 交付口径(用户 2026-11-13 定):重组完整即交付体流;span_clean 仍按
+        // seq 序(非到达序)判定——坏块在 seq 前段/后段不再决定交付与否,只决定回退。
+        check(QString("%1: delivery no longer gated by span").arg(label).toUtf8().constData(),
+              complete.size() == 2 * body_len);
+        check(QString("%1: span_clean follows seq-order span").arg(label).toUtf8().constData(),
+              span_clean == expect_span_clean);
     };
     run_case(false, 0, 8,  true,  "gw22: seq1 bad, seq0 span good");
     run_case(false, 0, 68, false, "gw22: bad seq1 intersects span");
@@ -447,8 +457,8 @@ static void test_out_of_order_bad_crc_span() {
     run_case(true,  1, 8,  false, "gw26: seq0 span bad");
 }
 
-// 首 MSDU span 门的多 MSDU 边界：坏块只落在后续 MSDU 时仍交付首条；
-// 首 MSDU 自身跨坏块则整条重组流拒交，即使更后面的 MSDU 位于好块。
+// 首 MSDU span 门的多 MSDU 边界：坏块只落在后续 MSDU 时首条 span 干净；
+// 首 MSDU 自身跨坏块时体流仍交付(重组完整),span_clean=false 供 N/A 回退。
 static void test_multiple_msdu_bad_crc_boundary() {
     const int pb_size = 72;
     const int body_len = pb_size - 1 - 3;
@@ -482,21 +492,24 @@ static void test_multiple_msdu_bad_crc_boundary() {
         p[16 + bad_arrival * pb_size + pb_size - 1] ^= 0x01;
 
         MpduInfo info; MsduState msdu; QByteArray complete;
+        bool span_clean = false;
         const QString err = gw2026
-            ? gw_2026_sof::assemble(f, info, msdu, complete, 0, false)
-            : gw_2022_sof::assemble(f, info, msdu, complete, 0, false);
+            ? gw_2026_sof::assemble(f, info, msdu, complete, 0, false, &span_clean)
+            : gw_2022_sof::assemble(f, info, msdu, complete, 0, false, &span_clean);
         check(QString("%1: assemble succeeds").arg(label).toUtf8().constData(), err.isEmpty());
         check(QString("%1: bad block remains marked").arg(label).toUtf8().constData(),
               info.pb_crc_oks.size() == n && !info.pb_crc_oks[bad_arrival]
               && !info.pb_crc_ok);
+        // 交付口径(用户 2026-11-13 定):首 MSDU 跨坏块也不再整条拒交,体流一律
+        // 交付(重组完整);span_clean 只反映首 span 是否干净,供 N/A 回退。
         check(QString("%1: first-span policy").arg(label).toUtf8().constData(),
-              first_crosses_bad ? complete.isEmpty()
-                                : complete.size() == n * body_len);
+              complete.size() == n * body_len
+              && span_clean == !first_crosses_bad);
     };
     run_case(false, false, "gw22: later MSDU crosses bad block");
-    run_case(false, true,  "gw22: first bad, later good MSDU discarded");
+    run_case(false, true,  "gw22: first bad, later good MSDU delivered (span dirty)");
     run_case(true,  false, "gw26: later MSDU crosses bad block");
-    run_case(true,  true,  "gw26: first bad, later good MSDU discarded");
+    run_case(true,  true,  "gw26: first bad, later good MSDU delivered (span dirty)");
 }
 
 int main(int argc, char** argv) {
