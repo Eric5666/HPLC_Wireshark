@@ -818,19 +818,33 @@ int main(int argc, char** argv) {
         CHECK("store-fail: successful clear makes history replay available again",
               resets == 1 && hist_ok && errors.size() == 1);
 
-        // 2) 清库失败:整体回滚,保留内存,不发 reset
+        // 2) 清库失败:内存实时状态仍随帧序号重置,历史标记不可用;此后帧序号从 1 重来,
+        //    不得把每一帧都当乱序帧触发全量回放(回放风暴)
         const bool trig2 = side_exec(QStringLiteral(
             "CREATE TRIGGER block_delete BEFORE DELETE ON topo_frames BEGIN SELECT RAISE(ABORT,'injected delete failure'); END;"));
         errors.clear(); resets = 0;
         worker.clear();
+        CHECK("store-fail: failed clear is reported and still resets the live view",
+              trig2 && resets == 1 && errors.size() == 1
+              && errors.value(0).contains(QStringLiteral("clear topology store")));
+        hist_failed = false;
+        QObject::connect(&worker, &TopoReplayWorker::history_failed, &app,
+            [&](quint64 id, qint64, qint64, bool, const QString&) { if (id == 7302) hist_failed = true; }, Qt::DirectConnection);
+        worker.request_history(7302, 1, 1001, true);
+        CHECK("store-fail: history is unavailable after a failed clear", hist_failed);
+        const int changes_before_restart = live_changes;
+        for (int i = 1; i <= 8; ++i)
+            worker.submit_frame(association_frame_for(i, quint16(10 + i), kMac + 0x100 + quint64(i)));
+        CHECK("store-fail: frames after a failed clear do not trigger replay",
+              resets == 1 && live_changes >= changes_before_restart + 8 && errors.size() == 1);
+        side_exec(QStringLiteral("DROP TRIGGER block_delete"));
+        worker.clear();
+        worker.submit_frame(association_frame(1, kMac));
+        worker.submit_frame(association_frame_for(2, 6, kMac + 1));
         frame_page_seen = false;
         worker.request_frame_page(1, 0, 50);
-        CHECK("store-fail: failed clear keeps memory and does not reset live view",
-              trig2 && resets == 0 && errors.size() == 1
-              && errors.value(0).contains(QStringLiteral("clear topology store")));
-        CHECK("store-fail: failed clear rolls back (frames still stored)",
-              frame_page_seen && frame_page.ok && frame_page.total == 2);
-        side_exec(QStringLiteral("DROP TRIGGER block_delete"));
+        CHECK("store-fail: store recovers after the next successful clear",
+              resets == 2 && frame_page_seen && frame_page.ok && frame_page.total == 2);
 
         // 3) 分页查询出错:ok=false + error,不是空结果
         const bool dropped = side_exec(QStringLiteral("DROP TABLE topo_anomalies"));

@@ -165,7 +165,8 @@ bool TopoReplayWorker::decode_frame(const QByteArray& bytes, TopoFrameInput& fra
 }
 
 bool TopoReplayWorker::insert_frame(const TopoFrameInput& frame) {
-    if (!open_store()) return false;
+    // 历史已标记不可用(入库失败/清库失败)时不再往库里追加帧,等成功清库后恢复
+    if (m_store_failed || !open_store()) return false;
     const QByteArray blob = encode_frame(frame);
     if (blob.isEmpty()) {
         report_store_error(QStringLiteral("Could not encode topology frame %1").arg(frame.frame_index));
@@ -569,18 +570,26 @@ bool TopoReplayWorker::clear_store() {
 }
 
 void TopoReplayWorker::clear() {
-    // 清库失败时保留内存状态(与库内历史一致),不发 live_states_reset
+    // 调用方(MainWindow::on_clear)清空后帧序号从 1 重新开始。清库失败时若保留
+    // m_last_applied_frame,此后每帧都被当作乱序帧触发全量回放,打满 worker。
+    // 因此无论清库成败,内存实时状态都随之重置;清库失败时库内仍是旧帧,与新的
+    // 帧序号不再一致,历史回放标记为不可用(rebuild/回放均被挡住,不会回放风暴),
+    // 直到下次清库成功才恢复。
     const bool store_open = m_db.isOpen();
-    if (!clear_store()) return;
-    if (store_open) {
+    const bool cleared = clear_store();
+    m_live_states.clear();
+    m_checkpoints.clear();
+    m_last_applied_frame = -1;
+    if (!cleared) {
+        m_store_failed = true;
+        m_store_error_message = QStringLiteral("Topology history is unavailable because clearing the replay store failed");
+        m_store_error_reported = true;   // clear_store 已上报具体原因
+    } else if (store_open) {
         // 库已清空、实时状态随之重置,两者重新一致:此前入库失败造成的"历史不可用"到此为止
         m_store_failed = false;
         m_store_error_reported = false;
         m_store_error_message.clear();
     }
-    m_live_states.clear();
-    m_checkpoints.clear();
-    m_last_applied_frame = -1;
     emit live_states_reset(m_live_states);
 }
 
