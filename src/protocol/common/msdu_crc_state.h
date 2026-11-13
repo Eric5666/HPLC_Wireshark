@@ -101,6 +101,7 @@ inline MsduInfo msdu_crc_fail_evidence(const MsduInfo& in) {
     out.business_id = 0xFF;
     out.app_packet_type = 0xFF;
     out.trans_direction_flag = 0xFF;
+    out.cascade_break_len = -1;
     return out;
 }
 
