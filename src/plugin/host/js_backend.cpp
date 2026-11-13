@@ -171,7 +171,11 @@ bool JsBackend::initialize(const PluginManifest& m, QString* err) {
         *err = QStringLiteral("api_version mismatch");
         return false;
     }
-    const QString js_path = QDir(m.dir_path).filePath(m.entry);
+    const QString js_path = plugin_contained_entry_path(m.dir_path, m.runtime, m.entry);
+    if (js_path.isEmpty()) {
+        *err = QStringLiteral("entry outside plugin dir: %1").arg(m.entry);
+        return false;
+    }
     QFile f(js_path);
     if (!f.open(QIODevice::ReadOnly)) {
         *err = QStringLiteral("cannot open %1").arg(m.entry);

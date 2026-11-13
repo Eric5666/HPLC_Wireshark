@@ -487,7 +487,12 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
     m_plugin_dir = m.dir_path;
     open_sandboxed_libs(m_lua, m_plugin_dir);   // 受限标准库(不再 luaL_openlibs)
 
-    const QString lua_path = QDir(m.dir_path).filePath(m.entry);
+    // 加载时再做一次包含检查(防 manifest 校验后入口被替换为越界符号链接)
+    const QString lua_path = plugin_contained_entry_path(m.dir_path, m.runtime, m.entry);
+    if (lua_path.isEmpty()) {
+        *err = QStringLiteral("entry outside plugin dir: %1").arg(m.entry);
+        return false;
+    }
     const QByteArray path_utf8 = lua_path.toUtf8();
     if (luaL_loadfilex(m_lua, path_utf8.constData(), "t") != LUA_OK) {  // 只收文本(拒字节码)
         *err = QStringLiteral("load %1: %2").arg(m.entry, pop_lua_error(m_lua));

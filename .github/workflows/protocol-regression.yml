@@ -379,6 +379,11 @@ jobs:
           (cd build/script-budget \
             && qmake ../../unit_test/plugin/script-budget-probe/script_budget_probe.pro \
             && make -j2 && ./script_budget_probe)
+          # 插件入口 canonical 包含检查 + 更新清单缺 sha256 回退
+          mkdir -p build/entry-containment
+          (cd build/entry-containment \
+            && qmake ../../unit_test/plugin/entry-containment-probe/entry_containment_probe.pro \
+            && make -j2 && ./entry_containment_probe)
           # L8:盘块反序列化计数/深度/截断边界
           mkdir -p build/serialize-bounds
           (cd build/serialize-bounds \

@@ -20,6 +20,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -194,6 +195,38 @@ inline QString plugin_resolve_native_entry(const QString& plugin_dir,
 #endif
 }
 
+/// @brief 插件入口路径解析 + 目录包含检查(三种 runtime 共用)
+/// @details 先做词法检查(拒绝空、绝对路径、盘符/':'、'\\'、NUL、'..' 段),
+///          再按 canonical 路径(解析符号链接)确认入口是插件目录内的普通文件。
+///          任何一步不通过返回空串;调用方据此拒绝加载。
+inline QString plugin_contained_entry_path(const QString& plugin_dir,
+                                           const QString& runtime,
+                                           const QString& entry) {
+    const QString e = entry.trimmed();
+    if (e.isEmpty() || e.contains(QChar(0)) || e.contains(QLatin1Char('\\')) ||
+        e.contains(QLatin1Char(':')) || e.startsWith(QLatin1Char('/')) ||
+        QDir::isAbsolutePath(e))
+        return {};
+    for (const QString& part : e.split(QLatin1Char('/')))
+        if (part == QStringLiteral("..")) return {};
+    const QString candidate = (runtime == QStringLiteral("native"))
+                                  ? plugin_resolve_native_entry(plugin_dir, e)
+                                  : QDir(plugin_dir).filePath(e);
+    const QString dir_canon = QFileInfo(plugin_dir).canonicalFilePath();
+    const QFileInfo fi(candidate);
+    const QString file_canon = fi.canonicalFilePath();   // 不存在时为空
+    if (dir_canon.isEmpty() || file_canon.isEmpty() || !fi.isFile()) return {};
+#ifdef Q_OS_WIN
+    const Qt::CaseSensitivity cs = Qt::CaseInsensitive;
+#else
+    const Qt::CaseSensitivity cs = Qt::CaseSensitive;
+#endif
+    const QString prefix = dir_canon.endsWith(QLatin1Char('/')) ? dir_canon
+                                                                : dir_canon + QLatin1Char('/');
+    if (!file_canon.startsWith(prefix, cs)) return {};
+    return file_canon;
+}
+
 /// @brief 插件名(= 安装目录名)白名单:[A-Za-z0-9][A-Za-z0-9._-]{0,63}
 /// @details 名字会被拼成安装目录并在覆盖安装/卸载时整目录删除,
 ///          必须是单级目录名:不含 '/' '\\' ':',不能是 "." / ".."(首字符须为字母数字)。
@@ -290,13 +323,11 @@ inline PluginManifest read_plugin_manifest(const QString& plugin_dir) {
     if (m.entry.isEmpty())        { m.error = QStringLiteral("missing 'entry'"); return m; }
     if (m.api_version <= 0)       { m.error = QStringLiteral("missing/invalid 'api_version'"); return m; }
     if (m.protocol_id.isEmpty())  { m.error = QStringLiteral("missing 'protocol_id'"); return m; }
-    // native 插件允许 entry 为裸库名(按平台解析);脚本插件 entry 必须为确切文件名
-    const QString entry_path =
-        (m.runtime == QStringLiteral("native"))
-            ? plugin_resolve_native_entry(plugin_dir, m.entry)
-            : QDir(plugin_dir).filePath(m.entry);
-    if (!QFile::exists(entry_path)) {
-        m.error = QStringLiteral("entry file not found: %1").arg(m.entry);
+    // native 插件允许 entry 为裸库名(按平台解析);脚本插件 entry 必须为确切文件名。
+    // 入口必须是插件目录内的文件(canonical 包含检查,拒绝 ../、绝对路径、越界符号链接)
+    const QString entry_path = plugin_contained_entry_path(plugin_dir, m.runtime, m.entry);
+    if (entry_path.isEmpty()) {
+        m.error = QStringLiteral("entry file not found or outside plugin dir: %1").arg(m.entry);
         return m;
     }
     m.valid = true;
