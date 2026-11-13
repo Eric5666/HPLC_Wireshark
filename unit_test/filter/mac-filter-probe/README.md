@@ -21,3 +21,15 @@ MAC 过滤特性已合入 main（合并提交 `12d1cbc`，分支
 合入前 main（`39e6e42`）源码为 28/47（19 项 MAC 展开断言失败，
 属预期内缺特性，非探针缺陷）；若今后对 main 再有失败，
 先查特性实现而非探针。
+
+## 第 9 节：剥离后的 MSDU 不得学习映射
+
+`msdu_crc_strip_learning()`（MSDU CRC32 不可用且首个 MSDU span
+命中坏 PB CRC 块时用）曾只清发送方 TEI/MAC，漏清目的方，
+`PacketListModel::update_tei_mac()` 仍会从目的方学走全局映射。
+第 9 节用真实路径验证（`append` → `update_tei_mac`，断言走
+`make_export_snapshot().tei_mac` 映射表快照，而非只查 MsduInfo 字段）：
+9a 剥离后源/目的/学习对一律不得进映射表；9b 对照组不剥离时三者
+都应学到（反向验证，9a 不是恒假断言）。6 项，合计 **53/53**。
+反向验证：只回退 `msdu_crc_state.h` 的修复、探针不动时，
+9a 的目的方断言恰好失败（`RESULT: 1 failures`），其余全过。

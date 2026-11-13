@@ -105,10 +105,12 @@ inline MsduInfo msdu_crc_fail_evidence(const MsduInfo& in) {
 }
 
 /// @brief 剥离拓扑学习用字段(MSDU CRC32 不可用且 PB 回退也不成立时采用)。
-/// @details 保留解析与展示(present/summary/字段树/显示用标量原样),只清掉
+/// @details 保留解析与展示(present/summary/字段树原样),只清掉
 ///          会进拓扑学习的数据:拓扑事件(首事件与后续事件)、TEI↔MAC 学习对、
-///          原始源/目的、发送方 TEI/MAC(TopoState 按发送方建身份基线、判重启、
-///          复活离线节点)与重启次数(TopoState 按帧 restart_count 采样)。
+///          原始源/目的、发送方与目的方 TEI/MAC 与重启次数(TopoState 按发送方建身份基线、判重启、
+///          复活离线节点;PacketListModel::update_tei_mac 另从目的方 TEI/MAC 学习全局映射,
+///          故目的方也必须清——只清发送方仍会漏学。目的方 MAC 清掉后,Orig Dst 列改走映射表
+///          回查(csv_lookup_mac),与 MSDU CRC32 FAIL 降级同款)。
 ///          与多站路径 msdu_crc_allows_learning 返回 false 时"不 merge 学习"
 ///          语义对齐。MSDU CRC32 FAIL 仍走 msdu_crc_gate 降级,不走这里;
 ///          Ok 时原样保留,学习不受影响。
@@ -121,6 +123,8 @@ inline MsduInfo msdu_crc_strip_learning(const MsduInfo& in) {
     out.orig_dsts.clear();
     out.msdu_src_tei = -1;
     out.msdu_src_mac = 0;
+    out.msdu_dst_tei = -1;
+    out.msdu_dst_mac = 0;
     out.restart_count = kRestartCountInvalid;
     return out;
 }
