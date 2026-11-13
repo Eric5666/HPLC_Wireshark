@@ -670,7 +670,11 @@ SerialReader::~SerialReader() {
     // 因此可以无超时等待;旧实现 wait(2000) 超时后析构仍在运行的 QThread 会 qFatal
     stop();
     m_thread->quit();
-    m_thread->wait();
+    if (!m_thread->wait(5000)) {
+        // 有界首等:超时只告警不放弃(强杀/析构仍在跑的 QThread 都更糟),随后继续等到退出
+        qWarning() << "SerialReader: thread still running after 5000 ms, waiting for it to finish";
+        m_thread->wait();
+    }
 }
 
 bool SerialReader::start(const ReaderConfig& cfg) {

@@ -7,6 +7,7 @@
 #include "QsLog.h"
 
 #include <QElapsedTimer>
+#include <QDebug>
 
 namespace {
 /// @brief 协议变体 → 短名(异常日志 key 前缀,与各 parser 硬编码一致)
@@ -111,7 +112,11 @@ FrameDispatcher::~FrameDispatcher() {
         // 插件解析受 IPC 超时约束),因此无超时等待是有界的。
         if (m_worker) m_worker->request_stop();
         m_thread->quit();
-        m_thread->wait();
+        if (!m_thread->wait(5000)) {
+            // 有界首等:超时只告警不放弃(强杀/析构仍在跑的 QThread 都更糟),随后继续等到退出
+            qWarning() << "FrameDispatcher: thread still running after 5000 ms, waiting for it to finish";
+            m_thread->wait();
+        }
     }
 }
 

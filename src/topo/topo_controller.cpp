@@ -1,5 +1,6 @@
 #include "topo_controller.h"
 #include <QMetaObject>
+#include <QDebug>
 
 TopoController::TopoController(QObject* parent) : QObject(parent) {
     qRegisterMetaType<TopoFrameInput>("TopoFrameInput");
@@ -30,7 +31,11 @@ TopoController::~TopoController() {
     if (m_thread.isRunning()) {
         if (m_worker) QMetaObject::invokeMethod(m_worker, "shutdown", Qt::BlockingQueuedConnection);
         m_thread.quit();
-        m_thread.wait();
+        if (!m_thread.wait(5000)) {
+            // 有界首等:超时只告警不放弃(强杀/析构仍在跑的 QThread 都更糟),随后继续等到退出
+            qWarning() << "TopoController: thread still running after 5000 ms, waiting for it to finish";
+            m_thread.wait();
+        }
         m_worker = nullptr;
     }
 }

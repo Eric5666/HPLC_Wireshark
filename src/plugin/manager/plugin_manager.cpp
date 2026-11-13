@@ -5,6 +5,7 @@
 
 #include <QCoreApplication>
 #include <QDataStream>
+#include <QDebug>
 #include <QDateTime>
 #include <QDeadlineTimer>
 #include <QDir>
@@ -93,7 +94,11 @@ void PluginManager::stop_ipc_thread() {
     // 此处 ctx 已无子对象。线程停稳后再从本线程删 ctx(此时它的线程
     // 不再处理事件,删除安全,其残留的排队调用一并丢弃)。
     m_ipc_thread->quit();
-    m_ipc_thread->wait();
+    if (!m_ipc_thread->wait(5000)) {
+        // 有界首等:超时只告警不放弃(强杀/析构仍在跑的 QThread 都更糟),随后继续等到退出
+        qWarning() << "PluginManager IPC: thread still running after 5000 ms, waiting for it to finish";
+        m_ipc_thread->wait();
+    }
     delete m_ipc_ctx;
     m_ipc_ctx = nullptr;
     delete m_ipc_thread;
