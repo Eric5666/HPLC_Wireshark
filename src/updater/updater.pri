@@ -34,6 +34,7 @@ HEADERS += \
     $$PWD/include/QSimpleUpdater.h \
     $$PWD/Updater.h \
     $$PWD/Downloader.h \
+    $$PWD/update_integrity.h \
     $$PWD/AuthenticateDialog.h
 
 FORMS += \

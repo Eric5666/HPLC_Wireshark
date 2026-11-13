@@ -31,6 +31,7 @@
 #include <QNetworkReply>
 
 #include "Downloader.h"
+#include "update_integrity.h"
 
 // ===== 本地修改(相对上游):长 changelog 在更新弹窗中裁剪显示 =====
 #include "i18n.h"
@@ -55,11 +56,17 @@ QString clipped_changelog(const QString& html, int limit = 100) {
 }
 }  // namespace
 
+
 namespace {
 /// i18n 注册(本 TU 概要文本)
 struct I18nRegUpdater {
     I18nRegUpdater() {
         trl::register_en("完整更新说明见仓库 Releases 页面", "See the repository Releases page for full update notes");
+        trl::register_en("更新清单未提供安装包 SHA-256,无法在应用内校验安装。已打开发布页,请手动下载并安装。",
+                         "The update manifest has no SHA-256 for the installer, so it cannot be verified in-app. The release page has been opened; please download and install it manually.");
+        trl::register_en("更新清单未提供安装包 SHA-256,且无法确定发布页。请前往仓库 Releases 页面手动下载更新。",
+                         "The update manifest has no SHA-256 for the installer and no release page could be determined. Please download the update manually from the repository Releases page.");
+        trl::register_en("手动更新", "Manual Update");
     }
 };
 const I18nRegUpdater g_i18n_reg_updater;
@@ -581,6 +588,19 @@ void Updater::setUpdateAvailable(const bool available)
     if (box.exec() == QMessageBox::Yes) {
       if (!openUrl().isEmpty())
         QDesktopServices::openUrl(QUrl(openUrl()));
+
+      // 本地扩展:清单缺/错 sha256 时不走内置下载器(它会拒装),
+      // 也不直接打开未校验的安装包;改为打开发布页让用户手动下载
+      else if (downloaderEnabled() && !update_sha256_is_valid(m_downloadSha256)) {
+        const QString page = update_release_page_url(downloadUrl());
+        if (!page.isEmpty()) QDesktopServices::openUrl(QUrl(page));
+        QMessageBox::information(
+            nullptr, trl::L("手动更新"),
+            page.isEmpty()
+                ? trl::L("更新清单未提供安装包 SHA-256,且无法确定发布页。请前往仓库 Releases 页面手动下载更新。")
+                : trl::L("更新清单未提供安装包 SHA-256,无法在应用内校验安装。已打开发布页,请手动下载并安装。"));
+        if (m_mandatoryUpdate) QApplication::quit();
+      }
 
       else if (downloaderEnabled()) {
         m_downloader->setUrlId(url());
