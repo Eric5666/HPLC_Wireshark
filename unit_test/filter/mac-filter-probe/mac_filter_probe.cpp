@@ -9,6 +9,7 @@
 // 模式匹配:模式字节序列在 MAC 任意字节偏移处出现即命中(前缀/中间/后缀);
 // 完整 6 组仅偏移 0,即精确匹配。
 #include "packetlistmodel.h"
+#include "common/msdu_crc_state.h"
 #include <QCoreApplication>
 #include <cstdio>
 
@@ -120,6 +121,50 @@ int main(int argc, char** argv) {
     t("regress", "beacon", mk(9, 0, 0, "hello"), true);
     t("regress", "beacon", mk(9, 0, 1, "hello"), false);
     t("regress", "", mk(9, 0, 1, "hello"), true);
+
+    // 9. 剥离后的 MSDU 不得再学习映射(P1:msdu_crc_strip_learning 曾漏清目的方)
+    //    真实路径:append -> update_tei_mac,断言用映射表快照而非 MsduInfo 字段。
+    //    用独立 NID 99 与新 TEI,避免与上文 l1/l2 的映射互相干扰。
+    {
+        auto mk_stripped = [&]() {
+            PacketEntry e;
+            e.accepted = true;
+            e.mpdu.net_id = 99;
+            e.msdu.present = true;
+            e.msdu.simple_head = false;
+            e.msdu.msdu_src_tei = 21;
+            e.msdu.msdu_src_mac = mac6(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
+            e.msdu.msdu_dst_tei = 22;
+            e.msdu.msdu_dst_mac = mac6(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
+            e.msdu.tei_mac_pairs.append({23, mac6(0x01, 0x02, 0x03, 0x04, 0x05, 0x06)});
+            e.msdu.topo_event.kind = TopoEventKind::AssocCnf;
+            e.msdu.topo_event.nodes.append({21, e.msdu.msdu_src_mac});
+            return e;
+        };
+        auto has_mapping = [](const PacketListModel& m, quint32 nid, quint16 tei) {
+            const auto snap = m.make_export_snapshot();
+            const auto it = snap.tei_mac.find(nid);
+            return it != snap.tei_mac.end() && it.value().contains(tei);
+        };
+        // 9a. 剥离后 append:源/目的/学习对一律不得进映射表
+        {
+            PacketListModel m2;
+            PacketEntry e = mk_stripped();
+            e.msdu = msdu_crc_strip_learning(e.msdu);
+            m2.append_packets(QVector<PacketEntry>{e});
+            CHECK(!has_mapping(m2, 99, 21), "strip-no-learn | src TEI 21 must not be learned");
+            CHECK(!has_mapping(m2, 99, 22), "strip-no-learn | dst TEI 22 must not be learned");
+            CHECK(!has_mapping(m2, 99, 23), "strip-no-learn | pair TEI 23 must not be learned");
+        }
+        // 9b. 对照:不剥离时三者都应学到(反向验证,9a 不是恒假断言)
+        {
+            PacketListModel m3;
+            m3.append_packets(QVector<PacketEntry>{mk_stripped()});
+            CHECK(has_mapping(m3, 99, 21), "strip-control | src TEI 21 learned without strip");
+            CHECK(has_mapping(m3, 99, 22), "strip-control | dst TEI 22 learned without strip");
+            CHECK(has_mapping(m3, 99, 23), "strip-control | pair TEI 23 learned without strip");
+        }
+    }
 
     printf("RESULT: %d failures\n", g_fail);
     return g_fail ? 1 : 0;

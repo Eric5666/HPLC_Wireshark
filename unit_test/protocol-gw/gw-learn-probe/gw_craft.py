@@ -108,6 +108,33 @@ def data_sof(msdu, dst_tei, src_tei=1):
     return bytes(f) + pb
 
 
+def data_sof_2022(msdu, dst_tei, src_tei=1):
+    """HDC 1.0 DATA SOF (TMI=2 -> PB 136, 1 block; version bits = 0)."""
+    f = bytearray(16)
+    set_bits(f, 0, 0, 3, 1)       # SOF
+    set_bits(f, 1, 0, 16, 0x1234) # NID (24-bit 0x001234, byte3 = 0)
+    set_bits(f, 4, 0, 12, src_tei)
+    set_bits(f, 5, 4, 12, dst_tei)
+    set_bits(f, 8, 0, 12, 0x200)  # frame length
+    set_bits(f, 9, 4, 4, 1)       # pb_num_field = 1
+    set_bits(f, 11, 4, 4, 2)      # TMI = 2 -> 136B
+    # byte 12 bits 4-7 = version 0 (HDC 1.0), bits 0-3 tmi_ext = 0
+    store_crc24(f, 0, 16)
+    pb = build_pb_block(0xC0, msdu, 136)
+    return bytes(f) + pb
+
+
+def flip_pb_crc(frame):
+    """Flip 1 bit in the stored PB CRC24 (last byte of the single PB block).
+
+    PB body bytes (incl. the MSDU) are untouched, so a valid MSDU CRC32
+    stays valid -- the frame only differs in PB CRC outcome.
+    """
+    f = bytearray(frame)
+    f[-1] ^= 0x01
+    return bytes(f)
+
+
 def assoc_cnf_body(sta_tei, sta_mac):
     b = bytearray(41)
     b[0:6] = mac_bytes(sta_mac)
@@ -134,8 +161,9 @@ def gather_body():
     return bytes(b)
 
 
-def discover_body():
-    # single-hop header: version 1 (byte0 low 4b), type 2 (carrier), len 11b
+def discover_body(msdu_type=2):
+    # single-hop header: version 1 (byte0 low 4b), type 2 (carrier) or 0
+    # (wireless; HDC 1.0 simple-head table 12 has no carrier type), len 11b
     disc = bytearray()
     disc += mac_bytes(0xAABBCCDDEE09)  # sender MAC
     disc.append(1)  # seq
@@ -148,7 +176,7 @@ def discover_body():
     disc += ie
     hdr = bytearray(4)
     hdr[0] = 0x01
-    hdr[1] = 2
+    hdr[1] = msdu_type
     set_bits(hdr, 2, 0, 11, len(disc))
     return bytes(hdr) + bytes(disc)
 
@@ -219,6 +247,8 @@ def tda_frame():
 
 
 def main():
+    assoc = msdu_base(1, 5, CCO_MAC, 0xAABBCCDDEE05, 0,
+                      b"\x01\x00\x00\x00" + assoc_cnf_body(5, 0xAABBCCDDEE05))
     frames = [
         ("G0-long", data_sof(msdu_base(1, 5, CCO_MAC, 0xAABBCCDDEE05, 0,
                                         b"\x01\x00\x00\x00" +
@@ -232,6 +262,18 @@ def main():
         ("G3", data_sof(discover_body(), 1, src_tei=9)),
         ("G2-ofdma", ofdma_frame()),
         ("G2-tda", tda_frame()),
+        # MSDU CRC 覆盖 PB CRC(用户 2026-11-13 定):PB CRC24 错但 MSDU CRC32
+        # 有效时仍学习;MSDU 无 CRC32(N/A)时才用 PB span 回退。
+        ("G4-2026-badpbcrc", flip_pb_crc(data_sof(assoc, 5))),
+        # N/A 档:单跳简头 MSDU 在 MSDU 解析器里提前返回,从不产生 MSDU CRC32
+        # 节点(故为 NotAvailable);span 由简头算(4+len+4)。G6 与 G3 同构,是
+        # N/A-clean 的显式对照;G5 的 span 落在坏块上,应不学但解析保留。
+        ("G5-2026-na-dirty", flip_pb_crc(data_sof(discover_body(), 1, src_tei=9))),
+        ("G6-2026-na-clean", data_sof(discover_body(), 1, src_tei=9)),
+        ("G7-2022", data_sof_2022(assoc, 5)),
+        ("G8-2022-badpbcrc", flip_pb_crc(data_sof_2022(assoc, 5))),
+        ("G9-2022-na-dirty", flip_pb_crc(data_sof_2022(discover_body(0), 1, src_tei=9))),
+        ("G10-2022-na-clean", data_sof_2022(discover_body(0), 1, src_tei=9)),
     ]
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "crafted.bin"), "wb") as f:
         for name, mpdu in frames:
@@ -239,7 +281,7 @@ def main():
             f.write(struct.pack("<I", len(body)))
             f.write(body)
             print(f"{name}: mpdu={len(mpdu)}B")
-    print("wrote crafted.bin, 6 frames")
+    print("wrote crafted.bin, 13 frames")
 
 
 if __name__ == "__main__":

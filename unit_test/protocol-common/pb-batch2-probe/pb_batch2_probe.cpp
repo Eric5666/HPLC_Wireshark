@@ -657,71 +657,95 @@ static void test_gw_span_caliber() {
         b[11] = char(flag28 ? 0x08 : 0x00);
         return b;
     };
+    // 交付口径(用户 2026-11-13 定):assemble 只要求序列号重组完整就交付体流,
+    // 首个 MSDU span 是否避开坏块不再是交付门——span 是否干净经出参透传调用方,
+    // 仅在 MSDU CRC32 不可用时作 PB 回退(见 msdu_crc_allows_learning)。
+    // 故本节断言两层:体流一律交付(重组完整),span_clean 按 span/坏块位置分档。
     {   // GW2026
         QByteArray out;
         MpduInfo info;
         MsduState msdu;
-        // A. 简头 len=60 → span 4+60+4=68,正好落在块0(68B)内,坏块在块1 → 必须解析
+        bool span_clean = false;
+        // A. 简头 len=60 → span 4+60+4=68,正好落在块0(68B)内,坏块在块1 → 交付且 span 干净
         out.clear();
         info = MpduInfo();
+        span_clean = false;
         gw_2026_sof::assemble(gw_single_2blk_2026(simple(60), false, simple(0), true),
-                              info, msdu, out, 0, false);
-        check("gw-span26/A simple-head span 68 in good blk0 -> parsed",
-              out.size() == 136 && info.pb_crc_oks.size() == 2 && !info.pb_crc_ok);
-        // A'. 同上但坏块换成块0 → span 68 > 0 → 必须不解析
+                              info, msdu, out, 0, false, &span_clean);
+        check("gw-span26/A simple-head span 68 in good blk0 -> delivered, span clean",
+              out.size() == 136 && span_clean
+              && info.pb_crc_oks.size() == 2 && !info.pb_crc_ok);
+        // A'. 同上但坏块换成块0 → span 68 > 0 → 交付但 span 不干净
         out.clear();
         info = MpduInfo();
+        span_clean = false;
         gw_2026_sof::assemble(gw_single_2blk_2026(simple(60), true, simple(0), false),
-                              info, msdu, out, 0, false);
-        check("gw-span26/A' simple-head span into bad blk0 -> not parsed", out.isEmpty());
-        // B. 标准头 len=60 → span 16+60+4=80 > 68 → 跨入坏块1 → 必须不解析
+                              info, msdu, out, 0, false, &span_clean);
+        check("gw-span26/A' simple-head span into bad blk0 -> delivered, span dirty",
+              out.size() == 136 && !span_clean);
+        // B. 标准头 len=60 → span 16+60+4=80 > 68 → 跨入坏块1 → 交付但 span 不干净
         out.clear();
         info = MpduInfo();
+        span_clean = false;
         gw_2026_sof::assemble(gw_single_2blk_2026(std_hdr(60, false), false,
                                                   std_hdr(0, false), true),
-                              info, msdu, out, 0, false);
-        check("gw-span26/B std-head span 80 into bad blk1 -> not parsed", out.isEmpty());
-        // B'. 标准头 len=20 → span 40 ≤ 68 → 落在块0 → 必须解析
+                              info, msdu, out, 0, false, &span_clean);
+        check("gw-span26/B std-head span 80 into bad blk1 -> delivered, span dirty",
+              out.size() == 136 && !span_clean);
+        // B'. 标准头 len=20 → span 40 ≤ 68 → 落在块0 → 交付且 span 干净
         out.clear();
         info = MpduInfo();
+        span_clean = false;
         gw_2026_sof::assemble(gw_single_2blk_2026(std_hdr(20, false), false,
                                                   std_hdr(0, false), true),
-                              info, msdu, out, 0, false);
-        check("gw-span26/B' std-head span 40 in good blk0 -> parsed", out.size() == 136);
-        // C. 28B 头 + len=40 → span 28+40+4=72 > 68 → 跨入坏块1 → 不解析
+                              info, msdu, out, 0, false, &span_clean);
+        check("gw-span26/B' std-head span 40 in good blk0 -> delivered, span clean",
+              out.size() == 136 && span_clean);
+        // C. 28B 头 + len=40 → span 28+40+4=72 > 68 → 跨入坏块1 → 交付但 span 不干净
         out.clear();
         info = MpduInfo();
+        span_clean = false;
         gw_2026_sof::assemble(gw_single_2blk_2026(std_hdr(40, true), false,
                                                   std_hdr(0, true), true),
-                              info, msdu, out, 0, false);
-        check("gw-span26/C std-head28 span 72 into bad blk1 -> not parsed", out.isEmpty());
+                              info, msdu, out, 0, false, &span_clean);
+        check("gw-span26/C std-head28 span 72 into bad blk1 -> delivered, span dirty",
+              out.size() == 136 && !span_clean);
     }
     {   // GW2022(同款口径)
         QByteArray out;
         MpduInfo info;
         MsduState msdu;
+        bool span_clean = false;
         out.clear();
         info = MpduInfo();
+        span_clean = false;
         gw_2022_sof::assemble(gw_single_2blk_2022(simple(60), false, simple(0), true),
-                              info, msdu, out, 0, false);
-        check("gw-span22/A simple-head span 68 in good blk0 -> parsed", out.size() == 136);
+                              info, msdu, out, 0, false, &span_clean);
+        check("gw-span22/A simple-head span 68 in good blk0 -> delivered, span clean",
+              out.size() == 136 && span_clean);
         out.clear();
         info = MpduInfo();
+        span_clean = false;
         gw_2022_sof::assemble(gw_single_2blk_2022(simple(60), true, simple(0), false),
-                              info, msdu, out, 0, false);
-        check("gw-span22/A' simple-head span into bad blk0 -> not parsed", out.isEmpty());
+                              info, msdu, out, 0, false, &span_clean);
+        check("gw-span22/A' simple-head span into bad blk0 -> delivered, span dirty",
+              out.size() == 136 && !span_clean);
         out.clear();
         info = MpduInfo();
+        span_clean = false;
         gw_2022_sof::assemble(gw_single_2blk_2022(std_hdr(60, false), false,
                                                   std_hdr(0, false), true),
-                              info, msdu, out, 0, false);
-        check("gw-span22/B std-head span 80 into bad blk1 -> not parsed", out.isEmpty());
+                              info, msdu, out, 0, false, &span_clean);
+        check("gw-span22/B std-head span 80 into bad blk1 -> delivered, span dirty",
+              out.size() == 136 && !span_clean);
         out.clear();
         info = MpduInfo();
+        span_clean = false;
         gw_2022_sof::assemble(gw_single_2blk_2022(std_hdr(20, false), false,
                                                   std_hdr(0, false), true),
-                              info, msdu, out, 0, false);
-        check("gw-span22/B' std-head span 40 in good blk0 -> parsed", out.size() == 136);
+                              info, msdu, out, 0, false, &span_clean);
+        check("gw-span22/B' std-head span 40 in good blk0 -> delivered, span clean",
+              out.size() == 136 && span_clean);
     }
 }
 

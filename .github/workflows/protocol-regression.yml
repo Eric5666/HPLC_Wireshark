@@ -223,13 +223,34 @@ jobs:
               fail=1
             fi
           }
-          expect "total=6 accepted=6 msdu_pairs=13"
-          expect "ofdma_tda_stations=4 gather=1 assoc_cnf=2 discover=1"
+          expect "total=13 accepted=13 msdu_pairs=15"
+          expect "ofdma_tda_stations=4 gather=1 assoc_cnf=5 discover=5"
           # README 里说的"洞":短 MSDU 头的 AssocCnf 也必须学到站点 5
           if grep -F "FRAME 2 " build/learn_report.txt | grep -qF "pairs=[5:aa:bb:cc:dd:ee:05]"; then
             echo "  ok: FRAME 2 pairs=[5:..05] 短头 AssocCnf 的洞已补"
           else
             echo "::error::FRAME 2 未学到 5:aa:bb:cc:dd:ee:05(短头 AssocCnf 学习回退)"
+            fail=1
+          fi
+          # MSDU CRC 覆盖 PB CRC:坏 PB CRC 但 MSDU CRC 有效 ⇒ 仍学(FRAME 7);
+          # N/A 时 span 脏不学(FRAME 8)、干净学(FRAME 9)。
+          if grep -F "FRAME 7 " build/learn_report.txt | grep -qF "pairs=[5:aa:bb:cc:dd:ee:05]" \
+             && grep -F "FRAME 7 " build/learn_report.txt | grep -qF "topo=AssocCnf"; then
+            echo "  ok: FRAME 7 坏 PB CRC 但 MSDU CRC 有效仍学"
+          else
+            echo "::error::FRAME 7 未学到 5:aa:bb:cc:dd:ee:05(MSDU CRC 覆盖失效)"
+            fail=1
+          fi
+          if grep -F "FRAME 8 " build/learn_report.txt | grep -qF "pairs=[-]"; then
+            echo "  ok: FRAME 8 N/A 且 span 脏不学"
+          else
+            echo "::error::FRAME 8 学到了(应 N/A+脏 span 不学)"
+            fail=1
+          fi
+          if grep -F "FRAME 9 " build/learn_report.txt | grep -qF "pairs=[9:aa:bb:cc:dd:ee:09]"; then
+            echo "  ok: FRAME 9 N/A 且 span 干净照常学"
+          else
+            echo "::error::FRAME 9 未学到 9:aa:bb:cc:dd:ee:09(N/A+干净 span 应学)"
             fail=1
           fi
           [ "$fail" = "0" ] || exit 1
