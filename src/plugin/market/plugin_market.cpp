@@ -5,6 +5,7 @@
 #include "plugin_market.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -54,6 +55,8 @@ struct I18nRegPluginMarket {
                          "Version %1 Does Not Support This Platform (%2)");
         trl::register_en("需要主程序版本 >= %1（当前 %2）",
                          "Requires App Version >= %1 (Current %2)");
+        trl::register_en("插件列表中 %1 %2 没有有效的 SHA-256，拒绝安装未校验的安装包",
+                         "Feed Entry for %1 %2 Has No Valid SHA-256; Refusing to Install an Unverified Package");
         trl::register_en("正在下载 %1",
                          "Downloading %1");
         trl::register_en("安装包超出大小上限",
@@ -62,6 +65,8 @@ struct I18nRegPluginMarket {
                          "Cannot Create a Temporary Directory");
         trl::register_en("写入临时文件失败",
                          "Writing the Temporary File Failed");
+        trl::register_en("SHA-256 不匹配，安装包已拒收",
+                         "SHA-256 Mismatch, Package Rejected");
         trl::register_en("安装包名称不匹配：%1",
                          "Package Name Mismatch: %1");
         trl::register_en("已安装 %1 %2",
@@ -331,6 +336,7 @@ QList<MarketPlugin> PluginMarket::parse_feed(const QByteArray& json,
             MarketVersion v;
             v.version = vo.value(QStringLiteral("version")).toString();
             v.url = vo.value(QStringLiteral("url")).toString();
+            v.sha256 = vo.value(QStringLiteral("sha256")).toString().toLower();
             v.size = qint64(vo.value(QStringLiteral("size")).toDouble());
             v.min_app_version =
                 vo.value(QStringLiteral("min_app_version")).toString();
@@ -390,15 +396,25 @@ void PluginMarket::install_market_plugin(const MarketPlugin& plugin,
             plugin.name);
         return;
     }
+    // 完整性:市场包必须带 sha256(64 位 hex),缺失/格式错一律拒装,不再静默跳过校验
+    if (!is_sha256_hex(v.sha256)) {
+        emit install_finished(
+            false,
+            trl::L("插件列表中 %1 %2 没有有效的 SHA-256，拒绝安装未校验的安装包")
+                .arg(plugin.name, v.version),
+            plugin.name);
+        return;
+    }
     InstallContext ctx;
     ctx.name = plugin.name;
+    ctx.sha256 = v.sha256;
     ctx.source = plugin.source.isEmpty() ? default_feed_url() : plugin.source;
     ctx.updated_at = v.updated_at;
     const QString package_url = resolve_market_url(v.url, plugin.mirror_prefix);
     emit install_progress(trl::L("正在下载 %1").arg(package_url));
     QNetworkReply* rep = m_nam->get(QNetworkRequest(QUrl(package_url)));
     netcap::cap_reply_size(rep, netcap::kMaxPluginPackageBytes);
-    // 安装上下文按值捕获:另一个安装同时进行也不会改写本请求的名字/来源
+    // 安装上下文按值捕获:另一个安装同时进行也不会改写本请求的名字/sha256
     connect(rep, &QNetworkReply::finished, this, [this, rep, ctx]() {
         rep->deleteLater();
         if (netcap::size_exceeded(rep)) {
@@ -439,7 +455,7 @@ void PluginMarket::install_from_file(const QString& zip_path) {
     ctx.source = QStringLiteral("file");
     ctx.updated_at =
         QFileInfo(zip_path).lastModified().toUTC().toString(Qt::ISODate);
-    // 先解包读清单拿到插件名(离线包无 feed)
+    // 先解包读清单拿到插件名(离线包无 feed,不做 sha256 校验)
     QTemporaryDir tmp;
     if (!tmp.isValid()) {
         emit install_finished(false, trl::L("无法创建临时目录"), QString());
@@ -463,6 +479,16 @@ void PluginMarket::install_from_file(const QString& zip_path) {
 void PluginMarket::finish_install_from_zip(const QString& zip_path,
                                            const InstallContext& ctx) {
     const QString& name = ctx.name;
+    const QString& expected_sha256 = ctx.sha256;
+    // 市场安装已在 install_market_plugin 保证 expected_sha256 非空;
+    // 仅离线安装(install_from_file,用户自选本地包)不带 sha256
+    if (!expected_sha256.isEmpty() &&
+        !verify_sha256(zip_path, expected_sha256)) {
+        emit install_finished(false,
+                              trl::L("SHA-256 不匹配，安装包已拒收"),
+                              name);
+        return;
+    }
     QTemporaryDir tmp;
     if (!tmp.isValid()) {
         emit install_finished(false, trl::L("无法创建临时目录"), name);
@@ -663,6 +689,26 @@ const MarketVersion* PluginMarket::update_for(
         return nullptr;
     }
     return nullptr;
+}
+
+bool PluginMarket::is_sha256_hex(const QString& s) {
+    if (s.size() != 64) return false;
+    for (const QChar c : s) {
+        const bool hex = (c >= QLatin1Char('0') && c <= QLatin1Char('9')) ||
+                         (c >= QLatin1Char('a') && c <= QLatin1Char('f')) ||
+                         (c >= QLatin1Char('A') && c <= QLatin1Char('F'));
+        if (!hex) return false;
+    }
+    return true;
+}
+
+bool PluginMarket::verify_sha256(const QString& file_path,
+                                 const QString& expected_hex) {
+    QFile f(file_path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QCryptographicHash h(QCryptographicHash::Sha256);
+    if (!h.addData(&f)) return false;
+    return h.result().toHex() == expected_hex.toLower().toLatin1();
 }
 
 QString PluginMarket::safe_extract_path(const QString& dest_dir,
