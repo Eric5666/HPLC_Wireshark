@@ -223,7 +223,7 @@ jobs:
               fail=1
             fi
           }
-          expect "total=13 accepted=13 msdu_pairs=15"
+          expect "total=15 accepted=15 msdu_pairs=16"
           expect "ofdma_tda_stations=4 gather=1 assoc_cnf=5 discover=5"
           # README 里说的"洞":短 MSDU 头的 AssocCnf 也必须学到站点 5
           if grep -F "FRAME 2 " build/learn_report.txt | grep -qF "pairs=[5:aa:bb:cc:dd:ee:05]"; then
@@ -233,7 +233,8 @@ jobs:
             fail=1
           fi
           # MSDU CRC 覆盖 PB CRC:坏 PB CRC 但 MSDU CRC 有效 ⇒ 仍学(FRAME 7);
-          # N/A 时 span 脏不学(FRAME 8)、干净学(FRAME 9)。
+          # 单跳简头 ICV 三态(用户 2026-11 裁决:简头也要验证 ICV):
+          # FRAME 8/9 = 正确 ICV ⇒ Ok 仍学;FRAME 14/15 = 篡改 ICV ⇒ Fail(摘要清空、不学)。
           if grep -F "FRAME 7 " build/learn_report.txt | grep -qF "pairs=[5:aa:bb:cc:dd:ee:05]" \
              && grep -F "FRAME 7 " build/learn_report.txt | grep -qF "topo=AssocCnf"; then
             echo "  ok: FRAME 7 坏 PB CRC 但 MSDU CRC 有效仍学"
@@ -241,19 +242,52 @@ jobs:
             echo "::error::FRAME 7 未学到 5:aa:bb:cc:dd:ee:05(MSDU CRC 覆盖失效)"
             fail=1
           fi
-          if grep -F "FRAME 8 " build/learn_report.txt | grep -qF "pairs=[-]"; then
-            echo "  ok: FRAME 8 N/A 且 span 脏不学"
+          if grep -F "FRAME 8 " build/learn_report.txt | grep -qF "pairs=[9:aa:bb:cc:dd:ee:09]"; then
+            echo "  ok: FRAME 8 单跳 ICV 有效 + 坏 PB CRC 仍学"
           else
-            echo "::error::FRAME 8 学到了(应 N/A+脏 span 不学)"
+            echo "::error::FRAME 8 未学到 9:..09(单跳 ICV 有效应学)"
             fail=1
           fi
           if grep -F "FRAME 9 " build/learn_report.txt | grep -qF "pairs=[9:aa:bb:cc:dd:ee:09]"; then
-            echo "  ok: FRAME 9 N/A 且 span 干净照常学"
+            echo "  ok: FRAME 9 单跳 ICV 有效照常学"
           else
-            echo "::error::FRAME 9 未学到 9:aa:bb:cc:dd:ee:09(N/A+干净 span 应学)"
+            echo "::error::FRAME 9 未学到 9:aa:bb:cc:dd:ee:09(单跳 ICV 有效应学)"
+            fail=1
+          fi
+          if grep -F "FRAME 14 " build/learn_report.txt | grep -qF "sum=[] pairs=[-]"; then
+            echo "  ok: FRAME 14 单跳 ICV 篡改 ⇒ 摘要清空不学"
+          else
+            echo "::error::FRAME 14 学到了(应 ICV 篡改 ⇒ Fail 不学)"
+            fail=1
+          fi
+          if grep -F "FRAME 15 " build/learn_report.txt | grep -qF "sum=[] pairs=[-]"; then
+            echo "  ok: FRAME 15 单跳 ICV 篡改 ⇒ 摘要清空不学"
+          else
+            echo "::error::FRAME 15 学到了(应 ICV 篡改 ⇒ Fail 不学)"
             fail=1
           fi
           [ "$fail" = "0" ] || exit 1
+
+      - name: GW single-hop 4B-header ICV regression (gw-icv-probe)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)"  "$QT_ROOT/plugins"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          # 直接测 MSDU 解析器(不经过 SOF/PB 整链路):4B 单跳简头 + 标准 16B 头 ×
+          # Ok/Fail/N-A 三态,表驱动跑 gw_2026/gw_2022。探针有 FAIL 即 exit 1。
+          cd unit_test/protocol-gw/gw-icv-probe
+          bash build.sh
+          ./build/gw_icv_probe
 
       - name: H1 get_bits bounds-check regression (h1-getbits-probe)
         env:
