@@ -410,7 +410,6 @@ Manifest format:
     "windows": {
       "latest-version": "1.3.0",
       "download-url": "https://example.com/BPLC_STA_Monitor_Setup_v1.3.0.exe",
-      "sha256": "<SHA-256 of the installer, 64 lowercase hex chars>",
       "changelog": "Release notes",
       "mandatory-update": false
     }
@@ -418,7 +417,7 @@ Manifest format:
 }
 ```
 
-`sha256` is the SHA-256 of the installer (`sha256sum <installer>`). The built-in downloader verifies it before opening the package and **refuses (and deletes the download) when `sha256` is missing or does not match**; download the release manually in that case. Older clients ignore the field, so the manifest stays backward compatible.
+The built-in downloader downloads and opens the installer directly; it does not verify a SHA-256 (a `sha256` key in an older manifest is ignored). To check integrity yourself, download `SHA256SUMS.txt` from the GitHub Release page next to the installer and run `sha256sum -c SHA256SUMS.txt --ignore-missing` (on Windows, compare against `certutil -hashfile <installer> SHA256`).
 
 The changelog string may contain `<br/>`.
 

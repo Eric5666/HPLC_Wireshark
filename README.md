@@ -392,15 +392,17 @@ dist/BPLC_STA_Monitor_Setup_v1.3.0.exe /S /D=C:\my\dir    # 静默装到指定�
    上传安装包为 release asset
 4. **改 `update.json`**(仓库根,提交推送):
    `latest-version` 抬高新版本号,`download-url` 指向 release asset 地址
-   (形如 `https://github.com/<owner>/<repo>/releases/download/<tag>/<文件名>.exe`),
-   `sha256` 填该安装包的 `sha256sum`(必填:内置下载器缺少或不匹配时拒绝打开安装包)。
+   (形如 `https://github.com/<owner>/<repo>/releases/download/<tag>/<文件名>.exe`)。
+   内置更新器不校验安装包 SHA-256,清单无需(也不应再)带 `sha256` 字段(旧字段会被忽略)。
    - tag 触发的 CI(`.github/workflows/build.yml` 的 `release-manifest` job)会从
-     Release 下回 Windows 安装包与 Linux tar.gz,自动算好 sha256 并改好上述三项,
-     生成的 `update.json` 与 `SHA256SUMS.txt` 作为 Release asset 发布(job summary
-     里也有全文)。把这份 `update.json` 原样提交到仓库根即可(CI 不自动推 main)。
+     Release 下回全部产物,改好上述两项生成 `update.json`,并对每个 Release asset
+     (Windows 安装包/符号包、Linux tar.gz/符号包、`update.json`)生成 `sha256sum` 格式的
+     `SHA256SUMS.txt`,两者作为 Release asset 发布(job summary 里也有全文)。
+     把这份 `update.json` 原样提交到仓库根即可(CI 不自动推 main)。
    - 手工发布时用同一脚本:
-     `python3 scripts/update_json_sha256.py --version <新版本> --base-url https://github.com/<owner>/<repo>/releases/download/<tag> windows=dist/BPLC_STA_Monitor_Setup_v<新版本>.exe linux=dist/BPLC_STA_Monitor_v<新版本>_linux_x86_64.tar.gz`
-     (不给 `--base-url` 时要求现有 `download-url` 已指向同名文件,防止算错包)
+     `python3 scripts/update_json_release.py --version <新版本> --base-url https://github.com/<owner>/<repo>/releases/download/<tag> windows=dist/BPLC_STA_Monitor_Setup_v<新版本>.exe linux=dist/BPLC_STA_Monitor_v<新版本>_linux_x86_64.tar.gz`
+     (不给 `--base-url` 时要求现有 `download-url` 已指向同名文件,防止指错包);
+     校验和用 `cd dist && sha256sum <各 asset> > SHA256SUMS.txt` 生成并一并上传。
 5. 用户端:程序内 `帮助 → 检查更新` → 发现新版本 → 下载安装包 → 运行
    即覆盖安装(自动关闭旧进程,完成后即可用新版本)
 
@@ -414,7 +416,6 @@ dist/BPLC_STA_Monitor_Setup_v1.3.0.exe /S /D=C:\my\dir    # 静默装到指定�
     "windows": {
       "latest-version": "1.3.0",
       "download-url": "https://example.com/BPLC_STA_Monitor.exe",
-      "sha256": "<安装包 sha256sum,64 位小写 hex>",
       "changelog": "修复 xxx",
       "mandatory-update": false
     }
@@ -422,7 +423,9 @@ dist/BPLC_STA_Monitor_Setup_v1.3.0.exe /S /D=C:\my\dir    # 静默装到指定�
 }
 ```
 
-程序发现远端版本高于本地版本即弹窗询问下载。
+程序发现远端版本高于本地版本即弹窗询问下载;确认后内置下载器直接下载并打开安装包
+(不做 SHA-256 校验)。如需核对完整性,到 Release 下载页取 `SHA256SUMS.txt` 后
+`sha256sum -c SHA256SUMS.txt --ignore-missing` 手动比对。
 
 ## 目录结构
 
