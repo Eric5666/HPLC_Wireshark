@@ -1305,6 +1305,7 @@ struct I18nRegMainWindow {
         trl::register_en("回放文件 (*.bin)", "Replay files (*.bin)");
         trl::register_en("CSV 表格 (*.csv)", "CSV table (*.csv)");
         trl::register_en("[错误] ", "[Error] ");
+        trl::register_en("历史拓扑回放失败: ", "Failed to replay topology history: ");
         trl::register_en("  显示过滤器:", "  Display Filter:");
         trl::register_en("字节视图(十六进制,左偏移 + 中间 hex + 右侧 ASCII + RAW DATA):",
                          "Byte view (hex, left offset + middle hex + right ASCII + RAW DATA):");
