@@ -41,7 +41,6 @@ Entry point: **Plugins → Plugin marketplace** menu in the main window.
     "versions": [{
       "version": "1.1.0",
       "url": "https://.../js-topo-1.1.0.zip",
-      "sha256": "<hex>",
       "size": 2400,
       "min_app_version": "1.3.0",
       "updated_at": "2026-10-02",
@@ -56,6 +55,8 @@ Entry point: **Plugins → Plugin marketplace** menu in the main window.
   `<plugin-dir>/README.md` shipped inside the package, then falls back to
   this URL, then to the plain description.
 - `updated_at`: per-version update date (ISO), shown as 更新时间/Updated.
+- `sha256`: no longer used. The app does not verify package SHA-256; a
+  `sha256` key left in an older feed is parsed past and ignored.
 - `platforms`: optional list of platform IDs this version supports
   (`linux-x86_64`, `linux-arm64`, `windows-x86_64`, `windows-arm64`,
   `macos-arm64`, `macos-x86_64`). The ID is `<os>-<arch>` of the host
@@ -126,16 +127,12 @@ plugin.json   # manifest, see plugin_api/plugin_manifest.h
 
 ## Install flow
 
-1. Market install: the feed version entry **must** carry `sha256` (64 hex
-   chars); entries without a valid `sha256` are refused before download.
-   Download zip → verify **sha256** against the feed value
-   (mismatch = rejected) → unzip to temp dir → validate `plugin.json`
+1. Market install: download zip (size-capped) → unzip to temp dir → validate `plugin.json`
    (manifest + entry file must exist) → check `min_app_version` against the
    running app version → check `platforms` against the running platform
    → copy to the install dir.
-2. Offline install (`Install from file...`): same chain minus sha256
-   (no feed to compare against) — manifest validity and entry-file
-   existence are still enforced.
+2. Offline install (`Install from file...`): same chain without the feed
+   checks — manifest validity and entry-file existence are still enforced.
 3. Zip-slip guard (`PluginMarket::safe_extract_path`): entries with absolute
    paths, drive letters (`C:/x`, `C:x`), UNC paths, backslashes or any `..`
    component are rejected, and the whole package is refused before anything
@@ -189,8 +186,8 @@ and need no `abi` field.
 
 ## Verification chain (current)
 
-- sha256 of the downloaded package vs the feed (market installs);
-  a feed entry without `sha256` is not installable.
+- Package size cap on download; zip-slip guard and unzip limits.
+- No SHA-256 verification of packages (removed; a feed `sha256` key is ignored).
 - Manifest + entry-file validation for every install.
 - `min_app_version` compatibility check before market installs.
 - `platforms` compatibility check before market installs.
@@ -247,7 +244,7 @@ trusted code).
 - `PluginMarket` lives on the GUI thread; downloads are async via
   `QNetworkAccessManager` (`feed_ready`/`feed_error`,
   `install_progress`/`install_finished`).
-- Static helpers (`parse_feed`, `verify_sha256`, `unzip_to_dir`,
+- Static helpers (`parse_feed`, `unzip_to_dir`,
   `compare_version`, `app_version_ok`) are unit-testable without a GUI.
 - The main window loads plugin dirs in order: CLI `--plugins-dir`
   (or `<app>/plugins`) first, then the market install dir. Same plugin

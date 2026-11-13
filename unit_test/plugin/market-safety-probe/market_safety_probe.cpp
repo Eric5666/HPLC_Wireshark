@@ -1,11 +1,10 @@
 /// @file market_safety_probe.cpp
 /// @brief 插件市场安全回归探针:插件名/安装目录路径穿越(H2)、zip 解包防护(H3)、
-///        市场安装强制 sha256(H4)
+///        市场安装不再要求 sha256(H4 已撤销:feed 的 sha256 字段忽略)
 /// @details 无外部输入:zip 包用 miniz 现场合成,安装目录为
 ///          <探针所在目录>/plugins(PluginMarket::default_install_dir),跑完清理。
 ///          预期输出 `RESULT: ALL PASS (0 failures)`,exit 0。
 #include <QCoreApplication>
-#include <QCryptographicHash>
 #include <QEventLoop>
 #include <QMap>
 #include <QTimer>
@@ -242,31 +241,13 @@ static void test_zip_limits(const QString& root) {
     }
 }
 
-// ── H4:市场安装必须带 sha256(缺失/格式错/不匹配一律拒装) ──
-static void test_market_sha256(const QString& root) {
+// ── 市场安装不做 SHA-256 校验:无 sha256 可装,feed 里遗留的 sha256 字段被忽略 ──
+static void test_market_no_sha256(const QString& root) {
     const QString zip = root + QStringLiteral("/mk.zip");
     make_zip(zip, {{"plugin.json", manifest_json("mk-plugin")}, {"x.js", "1"}});
-    QFile zf(zip);
-    const bool opened = zf.open(QIODevice::ReadOnly);
-    const QString good_sha =
-        opened ? QString::fromLatin1(QCryptographicHash::hash(zf.readAll(),
-                                                              QCryptographicHash::Sha256).toHex())
-               : QString();
-    zf.close();
-    check("sha256 hex: valid accepted", PluginMarket::is_sha256_hex(good_sha));
-    check("sha256 hex: empty/short/non-hex rejected",
-          !PluginMarket::is_sha256_hex(QString()) &&
-              !PluginMarket::is_sha256_hex(QStringLiteral("abc")) &&
-              !PluginMarket::is_sha256_hex(QString(64, QLatin1Char('g'))));
+    const QString url = QUrl::fromLocalFile(zip).toString();   // file://,不走镜像/网络
 
-    auto run = [&](const QString& sha, QString* err_out) {
-        MarketPlugin p;
-        p.name = QStringLiteral("mk-plugin");
-        MarketVersion v;
-        v.version = QStringLiteral("1.0.0");
-        v.url = QUrl::fromLocalFile(zip).toString();   // file://,不走镜像/网络
-        v.sha256 = sha;
-        p.versions.append(v);
+    auto run = [&](const MarketPlugin& p, QString* err_out) {
         PluginMarket mk;
         bool done = false, ok = false;
         QEventLoop loop;
@@ -283,34 +264,39 @@ static void test_market_sha256(const QString& root) {
         return ok;
     };
     QString err;
-    check("market: missing sha256 refused",
-          !run(QString(), &err) && err.contains(QStringLiteral("Has No Valid SHA-256")));
-    check("market: malformed sha256 refused", !run(QStringLiteral("deadbeef"), &err));
-    check("market: wrong sha256 refused",
-          !run(QString(64, QLatin1Char('0')), &err) && err.contains(QStringLiteral("SHA-256 Mismatch")));
-    trl::set_enabled(false);   // 中文界面:同一错误给中文文案(L3)
-    check("market: mismatch message localized (zh UI)",
-          !run(QString(64, QLatin1Char('0')), &err) && err.contains(QStringLiteral("SHA-256 不匹配")));
-    trl::set_enabled(true);
-    const bool good = run(good_sha, &err);
-    if (!good) std::printf("  err: %s\n", qPrintable(err));
-    check("market: correct sha256 installs", good);
+    {
+        MarketPlugin p;
+        p.name = QStringLiteral("mk-plugin");
+        MarketVersion v;
+        v.version = QStringLiteral("1.0.0");
+        v.url = url;
+        p.versions.append(v);
+        const bool ok = run(p, &err);
+        if (!ok) std::printf("  err: %s\n", qPrintable(err));
+        check("market: install without sha256 succeeds", ok);
+    }
+    {
+        // 旧 feed 仍带(错误的)sha256:解析后忽略,照常安装
+        const QByteArray feed = QStringLiteral(
+            "{\"plugins\":[{\"name\":\"mk-plugin\",\"versions\":[{\"version\":\"1.0.0\","
+            "\"url\":\"%1\",\"sha256\":\"%2\"}]}]}")
+            .arg(url, QString(64, QLatin1Char('0'))).toUtf8();
+        QString perr;
+        const QList<MarketPlugin> list = PluginMarket::parse_feed(feed, &perr);
+        const bool parsed = perr.isEmpty() && list.size() == 1;
+        const bool ok = parsed && run(list.first(), &err);
+        if (!ok) std::printf("  err: %s %s\n", qPrintable(perr), qPrintable(err));
+        check("market: legacy feed sha256 field ignored", ok);
+    }
 }
 
 // ── L6:并发安装上下文隔离 + unload_cb 推迟到拷贝前、失败时 reload_cb ──
-static QString sha_of(const QString& path) {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) return QString();
-    return QString::fromLatin1(QCryptographicHash::hash(f.readAll(), QCryptographicHash::Sha256).toHex());
-}
-
-static MarketPlugin market_entry(const QString& name, const QString& zip, const QString& sha) {
+static MarketPlugin market_entry(const QString& name, const QString& zip) {
     MarketPlugin p;
     p.name = name;
     MarketVersion v;
     v.version = QStringLiteral("1.0.0");
     v.url = QUrl::fromLocalFile(zip).toString();
-    v.sha256 = sha;
     p.versions.append(v);
     return p;
 }
@@ -332,9 +318,9 @@ static void test_install_context(const QString& root) {
                          if (!ok) std::printf("  err(%s): %s\n", qPrintable(name), qPrintable(e));
                          if (result.size() == 2) loop.quit();
                      });
-    // 两个安装同时在途:旧实现共享 m_pending_*,先完成的那个会拿后一个的名字/sha256
-    mk.install_market_plugin(market_entry(QStringLiteral("ctx-a"), za, sha_of(za)), 0);
-    mk.install_market_plugin(market_entry(QStringLiteral("ctx-b"), zb, sha_of(zb)), 0);
+    // 两个安装同时在途:旧实现共享 m_pending_*,先完成的那个会拿后一个的名字/来源
+    mk.install_market_plugin(market_entry(QStringLiteral("ctx-a"), za), 0);
+    mk.install_market_plugin(market_entry(QStringLiteral("ctx-b"), zb), 0);
     if (result.size() < 2) {
         QTimer::singleShot(10000, &loop, &QEventLoop::quit);
         loop.exec();
@@ -346,16 +332,16 @@ static void test_install_context(const QString& root) {
     check("concurrent installs: ctx-a meta.json written",
           meta.open(QIODevice::ReadOnly) && meta.readAll().contains("\"source\""));
 
-    // 校验失败(sha256 不符)不得卸载插件
+    // 部署前的校验失败(包内清单名与市场条目不符)不得卸载插件
     unloads = reloads = 0;
     bool fin = true;
     QObject::disconnect(&mk, &PluginMarket::install_finished, nullptr, nullptr);
     QObject::connect(&mk, &PluginMarket::install_finished,
                      [&](bool ok, const QString&, const QString&) { fin = ok; loop.quit(); });
-    mk.install_market_plugin(market_entry(QStringLiteral("ctx-a"), za, QString(64, QLatin1Char('0'))), 0);
+    mk.install_market_plugin(market_entry(QStringLiteral("ctx-a"), zb), 0);
     QTimer::singleShot(10000, &loop, &QEventLoop::quit);
     loop.exec();
-    check("bad sha256: refused without unloading plugins", !fin && unloads == 0 && reloads == 0);
+    check("name mismatch: refused without unloading plugins", !fin && unloads == 0 && reloads == 0);
 
 #ifndef Q_OS_WIN
     // 卸载后删旧版失败(目录不可写):必须 reload_cb 恢复加载
@@ -365,7 +351,7 @@ static void test_install_context(const QString& root) {
     QFile::setPermissions(locked, QFileDevice::ReadOwner | QFileDevice::ExeOwner);
     unloads = reloads = 0;
     fin = true;
-    mk.install_market_plugin(market_entry(QStringLiteral("ctx-a"), za, sha_of(za)), 0);
+    mk.install_market_plugin(market_entry(QStringLiteral("ctx-a"), za), 0);
     QTimer::singleShot(10000, &loop, &QEventLoop::quit);
     loop.exec();
     check("deploy failure after unload: reload_cb called",
@@ -393,7 +379,7 @@ int main(int argc, char** argv) {
     test_install_traversal(tmp.path());
     test_zip_entry_names(tmp.path());
     test_zip_limits(tmp.path());
-    test_market_sha256(tmp.path());
+    test_market_no_sha256(tmp.path());
     test_install_context(tmp.path());
     QDir(PluginMarket::default_install_dir()).removeRecursively();
     std::printf("\nRESULT: %s (%d failures)\n", g_fails ? "FAILURES" : "ALL PASS", g_fails);

@@ -471,7 +471,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           set -e
-          # 插件市场后端:feed 解析/版本/sha256/解包/安装/启停/卸载(夹具自生成,不依赖外部仓库)
+          # 插件市场后端:feed 解析/版本/解包/安装/启停/卸载(夹具自生成,不依赖外部仓库)
           mkdir -p build/market-test
           (cd build/market-test \
             && qmake ../../src/plugin/tests/market_test.pro CONFIG+=release CONFIG-=debug \

@@ -1,5 +1,5 @@
 /// @file market_test.cpp
-/// @brief 插件市场后端单元测试(feed 解析/版本比较/sha256/解包/安装/启停/卸载)
+/// @brief 插件市场后端单元测试(feed 解析/版本比较/解包/安装/启停/卸载)
 /// @details 用法(仓库根):
 ///   mkdir -p build/market && cd build/market
 ///   qmake ../../src/plugin/tests/market_test.pro && make
@@ -8,7 +8,6 @@
 ///   (不再依赖外部 BPLC_Plugin_Market 检出);设置 MARKET_JSON + MARKET_ZIP
 ///   两个环境变量时改用真实市场仓库的文件(内容须与下方断言一致)。
 #include <QCoreApplication>
-#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -57,12 +56,10 @@ bool write_fixture_zip(const QString& zip_path) {
 }
 
 QJsonObject fixture_version(const QString& ver, const QString& date,
-                            const QString& sha = QString(64, QLatin1Char('a')),
                             const QStringList& platforms = {},
                             const QString& abi = QString()) {
     QJsonObject v{{"version", ver},
                   {"url", "https://example.invalid/pkg-" + ver + ".zip"},
-                  {"sha256", sha},
                   {"size", 1024},
                   {"min_app_version", "1.0.0"},
                   {"updated_at", date}};
@@ -79,24 +76,24 @@ QJsonObject fixture_plugin(const QString& name, const QJsonArray& versions) {
         {"versions", versions}};
 }
 
-QByteArray build_fixture_feed(const QString& topo_sha) {
+QByteArray build_fixture_feed() {
     const QString plat = PluginMarket::current_platform();
     const QString abi = plugin_host_abi();
     QJsonArray topo{fixture_version("1.0.0", "2026-09-28"),
                     fixture_version("1.1.0", "2026-09-29"),
                     fixture_version("1.2.0", "2026-09-30"),
-                    fixture_version("1.3.0", "2026-10-02", topo_sha)};
+                    fixture_version("1.3.0", "2026-10-02")};
     QJsonArray other{fixture_version("1.0.0", "2026-09-28")};
     // native:1.3.0 只发 Windows 包;1.1.0 标注本平台 + 本机 host ABI
     QJsonArray cov{
-        fixture_version("1.0.0", "2026-09-20", QString(64, 'a'), {"windows-x86_64"}, "x"),
-        fixture_version("1.1.0", "2026-09-25", QString(64, 'a'), {plat}, abi),
-        fixture_version("1.2.0", "2026-09-27", QString(64, 'a'), {"windows-x86_64"}, "x"),
-        fixture_version("1.3.0", "2026-10-02", QString(64, 'a'), {"windows-x86_64"},
+        fixture_version("1.0.0", "2026-09-20", {"windows-x86_64"}, "x"),
+        fixture_version("1.1.0", "2026-09-25", {plat}, abi),
+        fixture_version("1.2.0", "2026-09-27", {"windows-x86_64"}, "x"),
+        fixture_version("1.3.0", "2026-10-02", {"windows-x86_64"},
                         "qt6-mingw-x64")};
     if (plat == QStringLiteral("windows-x86_64")) {
         // Windows 上让 1.3.0 本机可装(与原用例的平台分支一致)
-        cov[3] = fixture_version("1.3.0", "2026-10-02", QString(64, 'a'), {plat}, abi);
+        cov[3] = fixture_version("1.3.0", "2026-10-02", {plat}, abi);
     }
     QJsonArray plugins{fixture_plugin("js-topo", topo), fixture_plugin("lua-stats", other),
                        fixture_plugin("js-replay", other), fixture_plugin("cpp-coverage", cov)};
@@ -119,14 +116,10 @@ int main(int argc, char** argv) {
     if (fixture_feed) {
         zip_path = fixture_dir.filePath(QStringLiteral("js-topo-1.3.0.zip"));
         CHECK(write_fixture_zip(zip_path), "write fixture zip");
-        QFile zf(zip_path);
-        CHECK(zf.open(QIODevice::ReadOnly), "open fixture zip");
-        const QString sha = QString::fromLatin1(
-            QCryptographicHash::hash(zf.readAll(), QCryptographicHash::Sha256).toHex());
         feed_path = fixture_dir.filePath(QStringLiteral("market.json"));
         QFile jf(feed_path);
         CHECK(jf.open(QIODevice::WriteOnly) &&
-                  jf.write(build_fixture_feed(sha)) > 0,
+                  jf.write(build_fixture_feed()) > 0,
               "write fixture market.json");
     }
     QFile ff(feed_path);
@@ -240,13 +233,6 @@ int main(int argc, char** argv) {
     CHECK(PluginMarket::app_version_ok("1.3.0"), "app ver ok");
     CHECK(!PluginMarket::app_version_ok("9.9.9"), "app ver reject");
     CHECK(PluginMarket::app_version_ok(""), "app ver empty ok");
-
-    // sha256 校验:与 market.json 记录值比对(js-topo 最新版)
-    CHECK(PluginMarket::verify_sha256(zip_path, topo.latest()->sha256),
-          "sha256 match feed");
-    CHECK(!PluginMarket::verify_sha256(
-              zip_path, QString(64, QLatin1Char('0'))),
-          "sha256 mismatch detected");
 
     // 解包
     QTemporaryDir tmp;

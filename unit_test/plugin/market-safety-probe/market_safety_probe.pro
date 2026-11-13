@@ -1,4 +1,4 @@
-# 插件市场安全回归探针(H2 插件名路径穿越 / H3 zip 解包 / H4 sha256 强制)
+# 插件市场安全回归探针(H2 插件名路径穿越 / H3 zip 解包;市场安装不做 sha256 校验)
 QT += core network
 QT -= gui
 CONFIG += console c++17
