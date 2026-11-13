@@ -174,9 +174,9 @@ bool TopoReplayWorker::insert_frame(const TopoFrameInput& frame) {
     m_insert_query.bindValue(0, frame.frame_index);
     m_insert_query.bindValue(1, blob);
     if (!m_insert_query.exec()) {
-        // 单帧写入失败视为瞬时错误:不置 m_store_failed(否则此后历史回放永久不可用),
-        // 由 submit_frame 拒绝推进实时状态并上报
-        m_last_insert_error = m_insert_query.lastError().text();
+        // 入库失败:库内历史从此缺帧,历史回放标记为不可用(与 main 一致);
+        // report_store_error 只报一次,后续帧不再刷屏
+        report_db_error(QStringLiteral("insert topology frame"), m_insert_query.lastError().text());
         return false;
     }
     return true;
@@ -341,28 +341,17 @@ void TopoReplayWorker::maybe_checkpoint(qint64 frame_index) {
 
 void TopoReplayWorker::submit_frame(const TopoFrameInput& frame) {
     if (frame.net_id == 0 || frame.frame_index <= 0) return;
-    // 实时状态只由已入库的帧推进:入库失败的帧不应用,保证实时视图 = 可回放历史
-    m_last_insert_error.clear();
-    if (!insert_frame(frame)) {
-        if (m_last_insert_error.isEmpty())
-            m_last_insert_error = m_store_error_message.isEmpty()
-                ? QStringLiteral("replay store is unavailable") : m_store_error_message;
-        // 连续失败只报第一帧,避免每帧刷屏;恢复入库后再失败会重新报
-        if (!m_frame_store_failing)
-            emit worker_error(QStringLiteral("Topology frame %1 was not stored; live topology was not advanced: %2")
-                                  .arg(frame.frame_index).arg(m_last_insert_error));
-        m_frame_store_failing = true;
-        return;
-    }
-    m_frame_store_failing = false;
+    // 实时拓扑总是推进(与 main 一致);入库失败只影响历史回放,错误由 report_store_error 报一次
+    const bool stored = insert_frame(frame);
     if (frame.frame_index <= m_last_applied_frame) {
-        rebuild_live_from(frame.frame_index);
+        if (stored) rebuild_live_from(frame.frame_index);
+        else report_store_error(QStringLiteral("Cannot rebuild live topology after an out-of-order frame because the replay store is unavailable"));
         return;
     }
     QSet<quint32> changed;
-    apply_frame(frame, m_live_states, &changed, true);
+    apply_frame(frame, m_live_states, &changed, stored);
     m_last_applied_frame = frame.frame_index;
-    maybe_checkpoint(frame.frame_index);
+    if (stored) maybe_checkpoint(frame.frame_index);
     for (quint32 nid : changed) emit live_state_changed(nid, m_live_states.value(nid));
 }
 
@@ -581,7 +570,14 @@ bool TopoReplayWorker::clear_store() {
 
 void TopoReplayWorker::clear() {
     // 清库失败时保留内存状态(与库内历史一致),不发 live_states_reset
+    const bool store_open = m_db.isOpen();
     if (!clear_store()) return;
+    if (store_open) {
+        // 库已清空、实时状态随之重置,两者重新一致:此前入库失败造成的"历史不可用"到此为止
+        m_store_failed = false;
+        m_store_error_reported = false;
+        m_store_error_message.clear();
+    }
     m_live_states.clear();
     m_checkpoints.clear();
     m_last_applied_frame = -1;

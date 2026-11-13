@@ -117,8 +117,6 @@ private:
     qint64 m_last_applied_frame = -1;
     bool m_store_failed = false;
     bool m_store_error_reported = false;
-    QString m_last_insert_error;
-    bool m_frame_store_failing = false;   ///< 当前处于连续入库失败中(只报一次)
     QString m_store_error_message;
 };
 

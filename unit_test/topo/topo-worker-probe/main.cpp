@@ -784,25 +784,39 @@ int main(int argc, char** argv) {
             return ok;
         };
 
-        // 1) 入库失败:不推进实时状态,连续失败只报一次
+        // 1) 入库失败:实时拓扑照常推进(与 main 一致),历史回放标记不可用,错误只报一次
         const bool trig = side_exec(QStringLiteral(
             "CREATE TRIGGER block_insert BEFORE INSERT ON topo_frames BEGIN SELECT RAISE(ABORT,'injected insert failure'); END;"));
         errors.clear();
         worker.submit_frame(association_frame_for(2, 6, kMac + 1));
+        const int changes_after_fail1 = live_changes;
         worker.submit_frame(association_frame_for(3, 7, kMac + 2));
-        CHECK("store-fail: failed frame insert does not advance live topology",
-              trig && changes_after_first > 0 && live_changes == changes_after_first);
+        CHECK("store-fail: failed frame insert still advances live topology",
+              trig && changes_after_first > 0 && changes_after_fail1 > changes_after_first
+              && live_changes > changes_after_fail1);
         CHECK("store-fail: consecutive insert failures reported once",
-              errors.size() == 1 && errors.value(0).contains(QStringLiteral("not stored")));
-        side_exec(QStringLiteral("DROP TRIGGER block_insert"));
-        worker.submit_frame(association_frame_for(4, 8, kMac + 3));
-        CHECK("store-fail: live topology advances again once inserts recover",
-              live_changes > changes_after_first);
-        bool hist_ok = false;
+              errors.size() == 1 && errors.value(0).contains(QStringLiteral("insert topology frame")));
+        bool hist_ok = false, hist_failed = false;
         QObject::connect(&worker, &TopoReplayWorker::history_ready, &app,
             [&](quint64 id, qint64, qint64, bool, const TopoStateMap&) { hist_ok = id == 7301; }, Qt::DirectConnection);
-        worker.request_history(7301, 4, 1004, true);
-        CHECK("store-fail: transient insert failure does not poison history replay", hist_ok);
+        QObject::connect(&worker, &TopoReplayWorker::history_failed, &app,
+            [&](quint64 id, qint64, qint64, bool, const QString&) { hist_failed = id == 7300; }, Qt::DirectConnection);
+        worker.request_history(7300, 3, 1003, true);
+        CHECK("store-fail: history replay is marked unavailable after an insert failure",
+              hist_failed && !hist_ok && errors.size() == 1);
+        side_exec(QStringLiteral("DROP TRIGGER block_insert"));
+        const int changes_before_recover = live_changes;
+        worker.submit_frame(association_frame_for(4, 8, kMac + 3));
+        CHECK("store-fail: live topology keeps advancing after inserts recover",
+              live_changes > changes_before_recover && errors.size() == 1);
+        // 成功清库后库与实时状态重新一致,历史回放恢复可用(不永久中毒)
+        resets = 0;
+        worker.clear();
+        worker.submit_frame(association_frame(1, kMac));
+        worker.submit_frame(association_frame_for(2, 6, kMac + 1));
+        worker.request_history(7301, 2, 1002, true);
+        CHECK("store-fail: successful clear makes history replay available again",
+              resets == 1 && hist_ok && errors.size() == 1);
 
         // 2) 清库失败:整体回滚,保留内存,不发 reset
         const bool trig2 = side_exec(QStringLiteral(
