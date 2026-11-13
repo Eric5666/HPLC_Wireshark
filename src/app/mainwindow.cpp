@@ -1001,7 +1001,6 @@ struct I18nRegMainWindow {
         trl::register_en("关于(&A)", "About(&A)");
         trl::register_en("关于 BPLC STA Monitor", "About BPLC STA Monitor");
         trl::register_en("BPLC/HRF 协议 STA 报文监控上位机(串口捕获 + 离线回放)。", "BPLC/HRF Protocol STA Packet Monitor (Serial Capture + Offline Replay).");
-        trl::register_en("历史拓扑回放失败: ", "Historical topology replay failed: ");
         trl::register_en("配置已保存(Ctrl+E 开始捕获)", "Settings saved (Ctrl+E to start capture)");
         trl::register_en("导入", "Import");
         trl::register_en("正在捕获/回放中,请先点击停止后再拖入文件", "Capture/replay in progress, please stop it before dropping files");
