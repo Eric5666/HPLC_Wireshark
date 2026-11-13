@@ -7,6 +7,13 @@
 #include <QThread>
 #include <atomic>
 #include <cstdio>
+#ifdef Q_OS_LINUX
+#include <fcntl.h>
+#include <pty.h>
+#include <termios.h>
+#include <unistd.h>
+#include <QMetaObject>
+#endif
 #include "frame_credit.h"
 #include "serialreader.h"
 
@@ -99,6 +106,61 @@ int main(int argc, char** argv) {
         check(done && tm.elapsed() < 1000, "stop interrupts a reader blocked on credit");
         delete th;
     }
+#ifdef Q_OS_LINUX
+    // ⑤ 实时串口(pty 模拟):消费者完全不归还额度,Reader 仍持续读串口、不被背压阻塞
+    //    (阻塞会让驱动缓冲溢出静默丢字节)。修复前在途达到上限即停读。
+    {
+        QFile sample(QStringLiteral(BPLC_REPO_DIR "/unit_test/ci/roundtrip/roundtrip_test.bin"));
+        sample.open(QIODevice::ReadOnly);
+        const QByteArray frames = sample.readAll();
+        int master = -1, slave = -1;
+        char slave_name[256] = {0};
+        const bool pty_ok = ::openpty(&master, &slave, slave_name, nullptr, nullptr) == 0;
+        if (!pty_ok) {
+            std::printf("SKIP live serial case: openpty failed\n");
+        } else {
+            termios tio{};
+            tcgetattr(slave, &tio); cfmakeraw(&tio); tcsetattr(slave, TCSANOW, &tio);
+            constexpr int kCap = 16;
+            auto credit = std::make_shared<FrameCredit>(kCap);
+            credit->set_enabled(true);
+            std::atomic<int> emitted{0};
+            QThread th;
+            auto* w = new ReaderWorker;
+            w->set_flow_credit(credit);
+            w->moveToThread(&th);
+            QObject::connect(&th, &QThread::finished, w, &QObject::deleteLater);
+            QObject::connect(w, &ReaderWorker::frame_ready, w, [&](const BplcFrame&) { ++emitted; },
+                             Qt::DirectConnection);
+            th.start();
+            ReaderConfig cfg;
+            cfg.mode = ReaderMode::SerialPort;
+            cfg.serial_name = QString::fromLocal8Bit(slave_name);
+            cfg.baud_rate = 115200;
+            QMetaObject::invokeMethod(w, [w, cfg] { w->start_reading(cfg); }, Qt::QueuedConnection);
+            QThread::msleep(200);
+            // 写端非阻塞:Reader 若停读,pty 缓冲写满后写入停滞
+            ::fcntl(master, F_SETFL, ::fcntl(master, F_GETFL) | O_NONBLOCK);
+            qint64 written = 0;
+            QElapsedTimer tm; tm.start();
+            while (written < frames.size() && tm.elapsed() < 5000) {
+                const ssize_t n = ::write(master, frames.constData() + written,
+                                          size_t(qMin<qint64>(4096, frames.size() - written)));
+                if (n > 0) written += n; else QThread::msleep(2);
+            }
+            QThread::msleep(300);
+            const int got = emitted.load();
+            std::printf("  live serial: written=%lld/%lld emitted=%d in_flight=%d (cap %d)\n",
+                        (long long)written, (long long)frames.size(), got, credit->in_flight(), kCap);
+            check(written == frames.size(), "live serial: reader keeps draining the port with no credit returned");
+            check(got > 4 * kCap, "live serial: frames are not throttled by the in-flight cap");
+            w->abort();   // 修复前 Reader 可能阻塞在 acquire:先中止再停,探针不至于挂死
+            QMetaObject::invokeMethod(w, [w] { w->stop_reading(); }, Qt::BlockingQueuedConnection);
+            th.quit(); th.wait(3000);
+            ::close(master); ::close(slave);
+        }
+    }
+#endif
     std::printf("frame_credit_probe: %s (%d failures)\n", g_fail ? "FAIL" : "OK", g_fail);
     return g_fail ? 1 : 0;
 }

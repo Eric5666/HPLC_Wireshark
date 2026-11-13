@@ -204,9 +204,17 @@ int ReaderWorker::last_bcd_tag_offset(const QByteArray& buf) {
 }
 
 bool ReaderWorker::emit_frame(const BplcFrame& frame) {
-    // 背压:在途帧已满时在此等待消费者;stop() 置中止标志后 50 ms 内放弃
-    if (m_credit && !m_credit->acquire([this]() { return aborted(); }))
-        return false;
+    if (m_credit) {
+        if (m_cfg.mode == ReaderMode::SerialPort) {
+            // 实时串口绝不阻塞读取:在此等待会让驱动/QSerialPort 缓冲溢出而静默丢字节。
+            // 只记在途数,不等待(串口速率本身有上限,无需背压)
+            if (aborted()) return false;
+            m_credit->acquire_nowait();
+        } else if (!m_credit->acquire([this]() { return aborted(); })) {
+            // 文件回放背压:在途帧已满时在此等待消费者;stop() 置中止标志后 50 ms 内放弃
+            return false;
+        }
+    }
     emit frame_ready(frame);
     return true;
 }

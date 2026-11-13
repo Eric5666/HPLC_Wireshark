@@ -17,3 +17,6 @@ include($$REPO/src/common/common.pri)
 SOURCES += frame_credit_probe.cpp \
            $$REPO/src/io/serialreader.cpp
 HEADERS += $$REPO/src/io/serialreader.h $$REPO/src/io/frame_credit.h
+
+# ⑤ 实时串口用例用 openpty 模拟串口(旧 glibc 需 -lutil)
+linux: LIBS += -lutil

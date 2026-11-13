@@ -6,6 +6,7 @@
 ///          防死锁:acquire 按 50 ms 分片等待并检查中止标志,stop() 总能在有限
 ///          时间内打断;更换解析器或新会话开始时 reset() 回收丢失的额度。
 ///          未接入消费者(enabled=false,如无可用解析器、单元测试)时不限流。
+///          只对文件回放(FilePlayback/RawHex)限流;实时串口走 acquire_nowait 不阻塞。
 #ifndef BPLC_IO_FRAME_CREDIT_H
 #define BPLC_IO_FRAME_CREDIT_H
 
@@ -40,6 +41,13 @@ public:
         if (aborted()) return false;
         ++m_in_flight;
         return true;
+    }
+
+    /// @brief 记一个在途额度但从不等待(实时串口:读串口绝不能被背压阻塞,
+    ///        否则驱动缓冲溢出静默丢字节);计数仍与 release 配平
+    void acquire_nowait() {
+        QMutexLocker lk(&m_lock);
+        ++m_in_flight;
     }
 
     /// @brief 归还一个额度(消费者处理完一帧;任意线程)
