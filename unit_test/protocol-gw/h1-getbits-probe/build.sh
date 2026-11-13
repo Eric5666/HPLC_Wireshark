@@ -23,7 +23,7 @@ if [ -z "$QT" ]; then
         if [ -d "$cand" ]; then QT="$cand"; break; fi
     done
     if [ -z "$QT" ]; then
-        for cand in "$HOME/qt/6.11.2/gcc_64" "/usr/lib/qt6" "/usr"; do
+        for cand in "$HOME/Qt/6.11.3/6.11.3/gcc_64" "$HOME/qt/6.11.2/gcc_64" "/usr/lib/qt6" "/usr"; do
             if [ -d "$cand/include/QtCore" ]; then QT="$cand"; break; fi
         done
     fi

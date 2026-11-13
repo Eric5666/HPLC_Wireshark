@@ -1247,7 +1247,7 @@ MsduInfo GW_2026_MsduParser::parse(const QByteArray& body) {
         if (msdu_len > 0) {
             const int crc_off = 4 + msdu_len;
             out.total_len = crc_off + 4;
-            if (msdu_len > 0 && crc_off + 4 <= body.size()) {
+            if (crc_off + 4 <= body.size()) {
                 quint32 stored = (quint8)body[crc_off]
                     | ((quint32)(quint8)body[crc_off + 1] << 8)
                     | ((quint32)(quint8)body[crc_off + 2] << 16)

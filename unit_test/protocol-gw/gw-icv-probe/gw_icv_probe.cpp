@@ -1,5 +1,5 @@
 // gw_icv_probe.cpp
-// 单跳 4B 简头(MSDU_BASE_S)尾部 32 位 ICV 校验三态 + 标准 16B 头对照(表驱动,T1-T5)。
+// 单跳 4B 简头(MSDU_BASE_S)尾部 32 位 ICV 校验三态 + 标准 16B 头对照(表驱动,4 个 variant:0=Ok、1=Fail、2/3=N/A 截断)。
 // 直接测 GW_2026_MsduParser::parse / GW_2022_MsduParser::parse 的 MSDU body。
 // 用户 2026-11 裁决:简头也要验证 ICV(HDC2.0 §5.1.1.6/§5.2.5.2、HDC1.0 均无单跳例外)。
 #include <cstdio>
