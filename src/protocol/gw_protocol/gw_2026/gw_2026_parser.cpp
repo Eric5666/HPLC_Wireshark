@@ -275,13 +275,19 @@ GW_2026_Parser::Result GW_2026_Parser::parse_inner(const BplcFrame& in, MsduStat
 
     if (ft == GW_2026_FrameType::SOF) {
         // SOF:FCH 字段 + 多 PB 重组(sof 模块)
+        bool msdu_span_clean = false;
         err = gw_2026_sof::assemble(r.payload_for_log, r.mpdu, msdu, r.msdu_body,
                                     r.meta.is_rf ? 0xFF : (quint8)r.meta.channel,
-                                    r.meta.is_rf);
+                                    r.meta.is_rf, &msdu_span_clean);
         if (!err.isEmpty()) { r.reject_reason = err; r.accept = false; return r; }
         // MSDU 重组完整:解析 MAC 层字段
         if (!r.msdu_body.isEmpty()) {
             r.msdu = GW_2026_MsduParser::parse(r.msdu_body);
+            // MSDU CRC32 是拓扑学习的最终判据:有效 MSDU CRC 可覆盖 PB CRC 失败;
+            // 仅当 MSDU CRC 不可用且首个 MSDU span 落在坏块上时,才剥离学习字段
+            // (解析与展示保留;FAIL 仍走 parse 内 msdu_crc_gate 降级)。
+            if (msdu_crc_state(r.msdu) == MsduCrcState::NotAvailable && !msdu_span_clean)
+                r.msdu = msdu_crc_strip_learning(r.msdu);
             // MSDU body 起点在 payload_for_log 中的偏移:FCH 16B + 1B pb_head = 17。
             // 仅当单块(整条 MSDU 连续位于本帧 17..)时才能把字段映射到 raw 高亮;
             // 多块重组时各 pb_body 在 raw 中被 pb_head/CRC 隔断,不连续,置 -1。

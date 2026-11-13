@@ -104,6 +104,27 @@ inline MsduInfo msdu_crc_fail_evidence(const MsduInfo& in) {
     return out;
 }
 
+/// @brief 剥离拓扑学习用字段(MSDU CRC32 不可用且 PB 回退也不成立时采用)。
+/// @details 保留解析与展示(present/summary/字段树/显示用标量原样),只清掉
+///          会进拓扑学习的数据:拓扑事件(首事件与后续事件)、TEI↔MAC 学习对、
+///          原始源/目的、发送方 TEI/MAC(TopoState 按发送方建身份基线、判重启、
+///          复活离线节点)与重启次数(TopoState 按帧 restart_count 采样)。
+///          与多站路径 msdu_crc_allows_learning 返回 false 时"不 merge 学习"
+///          语义对齐。MSDU CRC32 FAIL 仍走 msdu_crc_gate 降级,不走这里;
+///          Ok 时原样保留,学习不受影响。
+inline MsduInfo msdu_crc_strip_learning(const MsduInfo& in) {
+    MsduInfo out = in;
+    out.topo_event = TopoEvent();
+    out.topo_extra_events.clear();
+    out.tei_mac_pairs.clear();
+    out.orig_srcs.clear();
+    out.orig_dsts.clear();
+    out.msdu_src_tei = -1;
+    out.msdu_src_mac = 0;
+    out.restart_count = kRestartCountInvalid;
+    return out;
+}
+
 /// @brief 解析结果统一收敛:MSDU CRC32 FAIL ⇒ 降级为证据节点,其余原样返回
 inline MsduInfo msdu_crc_gate(const MsduInfo& in) {
     return msdu_crc_state(in) == MsduCrcState::Fail ? msdu_crc_fail_evidence(in) : in;
