@@ -232,6 +232,22 @@ int main(int argc, char** argv) {
                                            "https://mirror.example/") ==
               "file:///tmp/local.zip",
           "local resource URL bypasses network mirror");
+    CHECK(PluginMarket::is_allowed_text_url("https://raw.githubusercontent.com/a/b/main/README.md") &&
+              PluginMarket::is_allowed_text_url("http://example.com/r.md"),
+          "http/https text URL allowed");
+    CHECK(!PluginMarket::is_allowed_text_url("ftp://example.com/r.md") &&
+              !PluginMarket::is_allowed_text_url("qrc:/x.md") &&
+              !PluginMarket::is_allowed_text_url("data:text/plain,hi"),
+          "non-http text URL rejected");
+#ifndef QT_DEBUG
+    qputenv("BPLC_ALLOW_FILE_FEED", "");
+    CHECK(!PluginMarket::is_allowed_text_url("file:///etc/passwd"),
+          "file:// text URL rejected in release by default");
+    qputenv("BPLC_ALLOW_FILE_FEED", "1");
+    CHECK(PluginMarket::is_allowed_text_url("file:///tmp/r.md"),
+          "file:// allowed with BPLC_ALLOW_FILE_FEED=1");
+    qunsetenv("BPLC_ALLOW_FILE_FEED");
+#endif
 
     // 版本比较
     CHECK(PluginMarket::compare_version("1.1.0", "1.0.0") > 0, "ver gt");

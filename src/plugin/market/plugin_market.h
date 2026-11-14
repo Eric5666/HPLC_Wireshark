@@ -101,6 +101,9 @@ public:
     /// @brief 将市场资源 URL 按 feed 选中的代理前缀改写(已改写/非 HTTP URL 保持不变)
     static QString resolve_market_url(const QString& url,
                                       const QString& mirror_prefix);
+    /// @brief 文本拉取允许的 URL 方案(M3):只放行 http/https;file:// 仅在调试构建
+    ///        或环境变量 BPLC_ALLOW_FILE_FEED=1 时放行(本地联调用)
+    static bool is_allowed_text_url(const QString& url);
     /// @brief 拉取任意文本(如 README markdown,异步)
     void fetch_text(const QString& url,
                     const QString& mirror_prefix = QString());

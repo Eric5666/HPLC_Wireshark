@@ -286,8 +286,29 @@ void PluginMarket::fetch_feed(const QString& url) {
 }
 
 /// @brief 拉取任意文本(README markdown 等,异步,经 text_ready/text_error)
+bool PluginMarket::is_allowed_text_url(const QString& url) {
+    const QString scheme = QUrl(url).scheme().toLower();
+    if (scheme == QStringLiteral("http") || scheme == QStringLiteral("https"))
+        return true;
+    if (scheme == QStringLiteral("file")) {
+#ifdef QT_DEBUG
+        return true;
+#else
+        return qEnvironmentVariable("BPLC_ALLOW_FILE_FEED") == QStringLiteral("1");
+#endif
+    }
+    return false;
+}
+
 void PluginMarket::fetch_text(const QString& url,
                                const QString& mirror_prefix) {
+    // M3:feed 里的 README 链接来自远端,不得借 file:// 等方案读本地文件
+    if (!is_allowed_text_url(url)) {
+        QMetaObject::invokeMethod(this, [this, url]() {
+            emit text_error(url, trl::L("不支持的链接类型"));
+        }, Qt::QueuedConnection);
+        return;
+    }
     const QString request_url = resolve_market_url(url, mirror_prefix);
     QNetworkReply* rep = m_nam->get(QNetworkRequest(QUrl(request_url)));
     netcap::cap_reply_size(rep, netcap::kMaxManifestBytes);
