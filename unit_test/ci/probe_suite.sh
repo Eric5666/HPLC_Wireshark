@@ -235,7 +235,8 @@ p_ui_paging_race_probe() {   # PacketListModel 盘块换页竞态(M2/M3/M4)
     build ui/paging-race-probe || return 1
     local d; d=$(rundir paging-race)
     cp "$UT/ui/paging-race-probe/build/paging_race_probe/paging_race_probe" "$d/" || return 1
-    (cd "$d" && run paging-race 180 ./paging_race_probe) && OUT="$LOGD/paging-race.out" && has "RESULT: ALL PASS"
+    (cd "$d" && run paging-race 180 ./paging_race_probe) && OUT="$LOGD/paging-race.out" \
+        && has "paging_race_probe: OK (0 failures)" && lacks "FAIL "
 }
 p_plugin_plugin_ipc_thread_probe() {   # PluginManager 跨线程 IPC + 异步图形(真实 host 子进程)
     local host; host=$(plugin_host) || { echo "  FAIL: bplc-plugin-host 构建失败"; return 1; }
