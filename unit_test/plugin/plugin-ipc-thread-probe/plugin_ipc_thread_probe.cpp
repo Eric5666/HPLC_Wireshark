@@ -12,7 +12,7 @@
 ///   ④ (异步图形 API,BPLC_PLUGIN_ASYNC_GRAPHICS)真实 PluginGraphicsView 异步渲染
 ///   (lua_gfx_nofont:去掉文字绘制的 lua_graphics,宿主是 QCoreApplication 画不了字);
 ///   host 卡死(SIGSTOP 2 s)期间 GUI 每 5 ms 发图形事件并反复要求重绘:GUI 1 ms 定时器
-///   最大迟到须 < 20 ms、旧图保持、渲染请求合并(在途时只补发 1 次)、恢复后全部 ack;
+///   最大迟到(扣除等 CPU 的调度排队时间,见 LateMeter)须 < 20 ms、旧图保持、渲染请求合并(在途时只补发 1 次)、恢复后全部 ack;
 ///   SIGSTOP 5.6 s:异步请求 5 s 超时以失败回调、GUI 不卡、迟到 ack 被丢弃;
 ///   上下文对象销毁后回调不执行。
 ///   源码可在旧提交(无异步 API)上编译:图形请求回落到同步 API,④ 跳过;
@@ -51,6 +51,22 @@ static double thread_cpu_ms() {
     timespec ts{};
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+#else
+    return -1;
+#endif
+}
+
+/// 当前线程在运行队列上等 CPU 的累计时间(ns)。Linux 取 /proc/thread-self/schedstat 第 2 列
+/// (run_delay:可运行但没轮到 CPU 的时间,即被调度器抢占/排队的时长);不可用返回 -1。
+/// 用途:GUI 迟到量扣掉"等 CPU"的部分,只留 GUI 线程自身阻塞/忙的时间(见 LateMeter)。
+static qint64 thread_runqueue_wait_ns() {
+#ifdef Q_OS_LINUX
+    FILE* f = std::fopen("/proc/thread-self/schedstat", "r");
+    if (!f) return -1;
+    unsigned long long run_ns = 0, wait_ns = 0;
+    const int n = std::fscanf(f, "%llu %llu", &run_ns, &wait_ns);
+    std::fclose(f);
+    return n == 2 ? qint64(wait_ns) : -1;
 #else
     return -1;
 #endif
@@ -290,10 +306,21 @@ static qint64 host_pid(const QString& plugin_dir_tag) {
 #endif
 
 /// GUI 1 ms PreciseTimer 迟到量记录器(stall 测试用)
+///
+/// 门禁要抓的是"GUI 线程自己被卡住"(同步等插件 IPC、在 GUI 线程做重活)。原先直接用
+/// 墙钟间隔 - 1 ms 判 < 20 ms:CI/本地并行构建把 2 核占满时,GUI 线程可运行却排不上 CPU,
+/// CFS 一次排队就 20~30 ms(fullcheck 里多次见 timeout 段 28~32 ms、单跑 < 2 ms),
+/// 与被测代码无关 ⇒ 负载下偶发误报。现按 tick 扣掉这段间隔内本线程在运行队列上等 CPU 的
+/// 时间(schedstat run_delay):被抢占不计,阻塞在锁/条件变量/系统调用或真在忙仍全额计入。
+/// schedstat 不可用(非 Linux / 内核未开 SCHED_INFO)时退回墙钟口径。
 struct LateMeter {
     QElapsedTimer clock;
     qint64 last_ns = -1;
-    double max_late = 0;
+    qint64 last_rq_ns = -1;
+    double max_late = 0;       ///< 判定用:扣除等 CPU 时间后的最大迟到(ms)
+    double max_late_raw = 0;   ///< 仅打印:墙钟口径最大迟到(ms)
+    double max_rq_ms = 0;      ///< 仅打印:单个 tick 间隔内最长的等 CPU 时间(ms)
+    bool rq_ok = false;        ///< schedstat 是否可用(本轮)
     int ticks = 0;
     QTimer tick;
     LateMeter() {
@@ -301,13 +328,37 @@ struct LateMeter {
         tick.setInterval(1);
         QObject::connect(&tick, &QTimer::timeout, [this]() {
             const qint64 now = clock.nsecsElapsed();
-            if (last_ns >= 0) max_late = std::max(max_late, (now - last_ns) / 1e6 - 1.0);
+            const qint64 rq = thread_runqueue_wait_ns();
+            if (last_ns >= 0) {
+                const double gap_ms = (now - last_ns) / 1e6;
+                double rq_ms = 0;
+                if (rq >= 0 && last_rq_ns >= 0) rq_ms = std::max<qint64>(0, rq - last_rq_ns) / 1e6;
+                max_late_raw = std::max(max_late_raw, gap_ms - 1.0);
+                max_rq_ms = std::max(max_rq_ms, rq_ms);
+                max_late = std::max(max_late, gap_ms - rq_ms - 1.0);
+            }
             last_ns = now;
+            last_rq_ns = rq;
+            rq_ok = rq >= 0;
             ++ticks;
         });
     }
-    void start() { clock.start(); last_ns = -1; max_late = 0; ticks = 0; tick.start(); }
+    void start() {
+        clock.start();
+        last_ns = -1;
+        last_rq_ns = -1;
+        max_late = max_late_raw = max_rq_ms = 0;
+        ticks = 0;
+        tick.start();
+    }
     void stop() { tick.stop(); }
+    /// 打印用:"<判定值> ms (wall <墙钟值> ms, max run-queue wait <x> ms)"
+    QByteArray describe(double judged) const {
+        if (!rq_ok) return QByteArray::number(judged, 'f', 2) + " ms (wall clock; schedstat unavailable)";
+        return QByteArray::number(judged, 'f', 2) + " ms excl. run-queue wait (wall " +
+               QByteArray::number(max_late_raw, 'f', 2) + " ms, max run-queue wait/tick " +
+               QByteArray::number(max_rq_ms, 'f', 2) + " ms)";
+    }
 };
 
 int main(int argc, char** argv) {
@@ -478,6 +529,7 @@ bench:
         redraw.start();
         spin_until([&] { return st.elapsed() >= 2000; }, 2500);
         const double stall_late = lm.max_late;   // 计到恢复前(含下方 100 ms)
+        const QByteArray stall_desc = lm.describe(stall_late);
         const int stall_ticks = lm.ticks;
         const quint64 sent_during = view.renders_sent() - sent0;
         const bool kept_image = view.image().cacheKey() == before.cacheKey();
@@ -490,13 +542,14 @@ bench:
                                 pm.pending_async_requests() == 0; }, 5000);
         spin_until([] { return false; }, 200);   // 合并补发的那次渲染回来
         lm.stop();
-        std::printf("  stall 2s: GUI 1ms-timer max lateness %.2f ms (%d ticks); events %d sent, %d acked "
+        std::printf("  stall 2s: GUI 1ms-timer max lateness %s (%d ticks); events %d sent, %d acked "
                     "after resume; renders sent during stall %llu (redraw asked ~33x), total renders %llu, "
                     "applied %llu\n",
-                    stall_late, stall_ticks, ev_sent, ev_ok, (unsigned long long)sent_during,
+                    stall_desc.constData(), stall_ticks, ev_sent, ev_ok, (unsigned long long)sent_during,
                     (unsigned long long)(view.renders_sent() - sent0),
                     (unsigned long long)(view.renders_applied() - applied0));
-        check("stall 2s: GUI max lateness < 20 ms", stall_late < 20.0 && stall_ticks > 1000);
+        // ticks 只证明 1 ms 定时器确实在跑(名义约 2000);负载下排不上 CPU 会少,门槛放到 500
+        check("stall 2s: GUI max lateness < 20 ms", stall_late < 20.0 && stall_ticks > 500);
         check("stall 2s: last good image kept while host stalled", kept_image && !before.isNull());
         check("stall 2s: renders coalesced (<= 1 in flight while stalled)",
               sent_during <= 1 && sent_stalled <= 1);
@@ -526,12 +579,13 @@ bench:
         }
         spin_until([&] { return tt.elapsed() >= 5600; }, 6000);
         const double to_late = lm.max_late;
+        const QByteArray to_desc = lm.describe(to_late);
         ::kill(pid_t(hp), SIGCONT);
         spin_until([] { return false; }, 300);   // 迟到 ack 到达(须被丢弃)
         lm.stop();
-        std::printf("  stall 5.6s: seq %llu callback ok=%d after %lld ms; GUI max lateness %.2f ms; "
+        std::printf("  stall 5.6s: seq %llu callback ok=%d after %lld ms; GUI max lateness %s; "
                     "pending after resume %d\n",
-                    (unsigned long long)tseq, int(to_ok), (long long)to_ms, to_late,
+                    (unsigned long long)tseq, int(to_ok), (long long)to_ms, to_desc.constData(),
                     pm.pending_async_requests());
         check("timeout: async request fails after ~5 s (not before)",
               tseq > 0 && to_done && !to_ok && to_ms >= 4900 && to_ms < 5600);
