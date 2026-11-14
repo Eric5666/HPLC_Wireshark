@@ -100,7 +100,10 @@ FrameDispatcher::FrameDispatcher(QObject* parent)
     m_thread = new QThread(this);
     m_worker = new DispatcherWorker(std::move(parser));
     m_worker->moveToThread(m_thread);
-    connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
+    // worker 不挂 QThread::finished→deleteLater:shutdown() 会提前 quit 线程,
+    // 那样 worker 会在解析线程里先被删掉,随后 ~FrameDispatcher 再调 request_stop()
+    // 即释放后使用(ASan heap-use-after-free,表现为退出/重建时偶发崩溃)。
+    // 改由析构在线程 wait() 结束后直接 delete,生命周期与本对象一致。
     connect(m_worker, &DispatcherWorker::parsed,
             this,     &FrameDispatcher::on_parsed,
             Qt::QueuedConnection);
@@ -120,6 +123,9 @@ FrameDispatcher::~FrameDispatcher() {
             m_thread->wait();
         }
     }
+    // 线程已退出(或从未创建):在 GUI 线程直接销毁 worker,未处理的投递事件随之移除
+    delete m_worker;
+    m_worker = nullptr;
 }
 
 void FrameDispatcher::connect_source(QObject* source) {
