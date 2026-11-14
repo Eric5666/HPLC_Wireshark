@@ -97,6 +97,55 @@ static void test_counts() {
     }
 }
 
+/// L4:pb_heads / pb_crc_oks(帧级与站点级)计数的语义上限 kMaxPbBlocks=64
+static void test_pb_cap() {
+    auto rt = [](const MpduInfo& m, MpduInfo& out) {
+        QByteArray buf;
+        QDataStream w(&buf, QIODevice::WriteOnly);
+        pser::write_mpdu(w, m);
+        QDataStream r(buf);
+        pser::read_mpdu(r, out);
+        return r.status();
+    };
+    MpduInfo m;
+    for (int i = 0; i < 64; ++i) { m.pb_heads << quint8(i); m.pb_crc_oks << (i & 1); }
+    MpduInfo back;
+    check("pb cap: 64 pb_heads/pb_crc_oks round-trip",
+          rt(m, back) == QDataStream::Ok && back.pb_heads == m.pb_heads && back.pb_crc_oks == m.pb_crc_oks);
+    MpduInfo m65 = m; m65.pb_heads << 0x41;
+    MpduInfo b65;
+    check("pb cap: 65 pb_heads -> corrupt, empty",
+          rt(m65, b65) == QDataStream::ReadCorruptData && b65.pb_heads.isEmpty());
+    MpduInfo c65 = m; c65.pb_crc_oks << true;
+    MpduInfo bc;
+    check("pb cap: 65 pb_crc_oks -> corrupt, empty",
+          rt(c65, bc) == QDataStream::ReadCorruptData && bc.pb_crc_oks.isEmpty());
+    MpduInfo st = m;
+    SofStationPb sp; sp.tei = 2; sp.pb_num = 1; sp.pb_size = 16;
+    for (int i = 0; i < 65; ++i) sp.pb_heads << quint8(i);
+    st.sof_stations << sp;
+    MpduInfo bst;
+    check("pb cap: station with 65 pb_heads -> corrupt",
+          rt(st, bst) == QDataStream::ReadCorruptData);
+    {   // 计数 = 剩余字节数(1 MiB 填充):旧代码按剩余字节 reserve(1 MiB) 并读入垃圾
+        QByteArray buf;
+        QDataStream w(&buf, QIODevice::WriteOnly);
+        MpduInfo one; one.pb_heads = {7, 8};
+        pser::write_mpdu(w, one);
+        QByteArray bad = buf.left(27);
+        QDataStream patch(&bad, QIODevice::ReadWrite);
+        patch.device()->seek(27);
+        patch << quint32(1u << 20);
+        bad.append(QByteArray(1 << 20, '\x01'));
+        QDataStream r(bad);
+        MpduInfo m2;
+        pser::read_mpdu(r, m2);
+        check("pb cap: pb_heads count 1 MiB (fits remaining bytes) -> corrupt, no reserve",
+              r.status() == QDataStream::ReadCorruptData && m2.pb_heads.isEmpty()
+                  && m2.pb_heads.capacity() < 1024);
+    }
+}
+
 static void test_depth() {
     const QVector<QString> table{QStringLiteral("x")};
     auto nested = [](int levels) {
@@ -196,6 +245,7 @@ int main(int argc, char** argv) {
     setrlimit(RLIMIT_AS, &rl);
 #endif
     test_counts();
+    test_pb_cap();
     test_depth();
     test_entries();
     test_block();

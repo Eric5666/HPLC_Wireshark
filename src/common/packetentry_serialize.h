@@ -80,6 +80,18 @@ inline void read_count(QDataStream& s, quint32& n, quint32 min_elem_bytes) {
 }
 /// @brief 字段树最大嵌套深度(read_field_node 递归上限,防栈溢出)
 inline constexpr int kMaxFieldDepth = 64;
+/// @brief 每帧(及每站点)PB 块数语义上限(L4)
+/// @details PBNum 字段最宽 4 bit(≤15 块),多站点帧 ≤4 站、每站 ≤2 块,帧级聚合远小于 64;
+///          超过即损坏,不再按剩余字节数 reserve/读取。
+inline constexpr quint32 kMaxPbBlocks = 64;
+/// @brief 读 PB 块数组计数:先按剩余字节校验(read_count),再按 kMaxPbBlocks 语义上限
+inline void read_pb_count(QDataStream& s, quint32& n) {
+    read_count(s, n, 1);
+    if (n > kMaxPbBlocks) {
+        n = 0;
+        s.setStatus(QDataStream::ReadCorruptData);
+    }
+}
 /// @brief 循环条件:未读完且流仍正常(损坏后立即停,不空转到 n)
 inline bool more(QDataStream& s, quint32 i, quint32 n) {
     return i < n && s.status() == QDataStream::Ok;
@@ -234,10 +246,10 @@ inline void read_mpdu(QDataStream& s, MpduInfo& m) {
     read_bool(s, m.fch_crc_ok);
     read_bool(s, m.pb_crc_ok);
     read_u8(s, m.pb_head);
-    quint32 n = 0; read_count(s, n, 1);
+    quint32 n = 0; read_pb_count(s, n);   // L4:≤ kMaxPbBlocks,reserve 不再随剩余字节放大
     m.pb_heads.clear(); m.pb_heads.reserve(int(n));
     for (quint32 i = 0; more(s, i, n); ++i) { quint8 v; read_u8(s, v); m.pb_heads.append(v); }
-    read_count(s, n, 1);
+    read_pb_count(s, n);
     m.pb_crc_oks.clear(); m.pb_crc_oks.reserve(int(n));
     for (quint32 i = 0; more(s, i, n); ++i) { bool v; read_bool(s, v); m.pb_crc_oks.append(v); }
     read_u32(s, m.beacon_timestamp);
@@ -301,10 +313,10 @@ inline void read_mpdu(QDataStream& s, MpduInfo& m) {
         read_u8 (s, st.pb_num);
         read_u16(s, st.pb_size);
         read_i32(s, st.block_base);
-        quint32 nh = 0; read_count(s, nh, 1);
+        quint32 nh = 0; read_pb_count(s, nh);
         st.pb_heads.reserve(int(nh));
         for (quint32 j = 0; more(s, j, nh); ++j) { quint8 h; read_u8(s, h); st.pb_heads.append(h); }
-        quint32 nc = 0; read_count(s, nc, 1);
+        quint32 nc = 0; read_pb_count(s, nc);
         st.pb_crc_oks.reserve(int(nc));
         for (quint32 j = 0; more(s, j, nc); ++j) { bool b; read_bool(s, b); st.pb_crc_oks.append(b); }
         read_bytes(s, st.msdu);
