@@ -94,7 +94,8 @@ local function crc32_le(tvb, off, len)
 end
 
 -- 语言开关: 读取 Wireshark 界面语言 (Edit→Preferences→Appearance→Language)
--- Wireshark 4.x 把界面语言存于 %APPDATA%\Wireshark\language 文件 (内容如 "language: en")
+-- Wireshark 4.x 把界面语言存于个人配置目录的 language 文件 (Windows: %APPDATA%\Wireshark\language,
+-- Linux/macOS: ~/.config/wireshark/language; 内容如 "language: en")
 -- Lua pref 在脚本加载阶段恒为默认值, 无法用于决定字段名; 直接读该文件最可靠
 
 -- 判断系统语言是否为中文: 优先 LANG 环境变量, 其次 Windows 注册表 (GUI 从桌面启动时无 LANG)
@@ -111,14 +112,51 @@ local function system_is_chinese()
     return false
 end
 
+-- Wireshark 界面语言文件路径 (跨平台, 取不到返回 nil, 调用方回退默认语言, 绝不抛错)
+--   Windows : %APPDATA%\Wireshark\language
+--   其他平台: 优先 Wireshark API Dir.personal_config_path("language") (pcall 包住, 存在才用),
+--             否则 $XDG_CONFIG_HOME/wireshark/language, 再否则 $HOME/.config/wireshark/language
+--             (macOS 的 Wireshark 同样用 ~/.config/wireshark)
+-- 旧代码 os.getenv("APPDATA") .. "\\Wireshark\\language" 在 Linux/macOS 上 getenv 返回 nil,
+-- 拼接抛错导致整个插件加载失败
+local function wireshark_language_file()
+    local sep = (type(package) == "table" and type(package.config) == "string"
+                 and package.config:sub(1, 1)) or "/"
+    local function env(name)
+        local v = os.getenv(name)
+        if v and v ~= "" then return v end
+        return nil
+    end
+    local function ws_api_path()
+        if type(Dir) ~= "table" and type(Dir) ~= "userdata" then return nil end
+        local ok_get, fn = pcall(function() return Dir.personal_config_path end)
+        if not ok_get or type(fn) ~= "function" then return nil end
+        local ok, p = pcall(fn, "language")
+        if ok and type(p) == "string" and p ~= "" then return p end
+        return nil
+    end
+    if sep == "\\" then
+        local appdata = env("APPDATA")
+        if appdata then return appdata .. "\\Wireshark\\language" end
+        return ws_api_path()
+    end
+    local p = ws_api_path()
+    if p then return p end
+    local xdg = env("XDG_CONFIG_HOME")
+    if xdg then return xdg .. sep .. "wireshark" .. sep .. "language" end
+    local home = env("HOME")
+    if home then return home .. sep .. ".config" .. sep .. "wireshark" .. sep .. "language" end
+    return nil
+end
+
 local function detect_english()
     -- 1) 环境变量覆盖 (HPLC_RF_LANG=en/zh)
     local env = os.getenv("HPLC_RF_LANG")
     if env == "en" then return true end
     if env == "zh" then return false end
     -- 2) 读 Wireshark language 文件
-    local lang_file = os.getenv("APPDATA") .. "\\Wireshark\\language"
-    local f = io.open(lang_file, "r")
+    local lang_file = wireshark_language_file()
+    local f = lang_file and io.open(lang_file, "r")
     if f then
         local content = f:read("*a")
         f:close()
