@@ -7,6 +7,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QGuiApplication>
+#include <QImage>
 #include <QTemporaryDir>
 #include <cstdio>
 
@@ -135,6 +136,115 @@ static void test_lua(const QString& root) {
           !ok2 && err.contains(QStringLiteral("instruction budget")) && t.elapsed() < 30000);
 }
 
+// ---- L12:入口保护。脚本给 _G 设 __index/__newindex 元方法:宿主若用 lua_getglobal/
+// lua_setglobal(会跑元方法)且不在 pcall 内,错误只能走 lua_atpanic + longjmp(越过 C++ 栈帧、
+// 插件永久停用)。修复后全局查找/设置走 raw、入口整体在 lua_pcall 内:插件照常可用。
+static const char* kLuaGlobalsTrap = R"LUA(
+function get_info() return {protocolId = "LOOP", displayName = "trap"} end
+function render(p, w, h) end
+local saved_render = render
+function parse(frame)
+  local m = frame.data[1]
+  if m == 1 then setmetatable(_G, {__index = function(t, k) error("index trap: " .. tostring(k)) end}) end
+  if m == 2 then setmetatable(_G, {__index = function() while true do end end}) end
+  if m == 3 then
+    rawset(_G, "render", nil)
+    setmetatable(_G, {__index = function(t, k) error("render trap") end})
+  end
+  if m == 4 then setmetatable(_G, nil); rawset(_G, "render", saved_render) end
+  if m == 5 or m == 6 then
+    local depth = (m == 5) and 64 or 20000
+    local root = {name = "n0"}
+    local cur = root
+    for i = 1, depth - 1 do local c = {name = "n" .. i}; cur.children = {c}; cur = c end
+    return {accept = true, fields = {root}}
+  end
+  return {accept = false, rejectReason = "alive"}
+end
+)LUA";
+
+static int tree_depth(const QVector<MsduFieldNode>& t) {
+    int d = 0;
+    for (const MsduFieldNode* n = t.isEmpty() ? nullptr : &t[0]; n; n = n->children.isEmpty() ? nullptr : &n->children[0]) ++d;
+    return d;
+}
+
+static void test_lua_entry_protection(const QString& root) {
+    const QString dir = make_plugin(root, QStringLiteral("lua-gtrap"), "lua", "main.lua", kLuaGlobalsTrap);
+    const PluginManifest m = read_plugin_manifest(dir);
+    QString err;
+    qint64 ms = 0;
+    auto alive = [&](LuaBackend& b) { return call_parse(b, 0, &err, &ms).reject_reason == QStringLiteral("alive"); };
+    {   // ① __index 抛错:缺失函数的查找
+        LuaBackend b;
+        check("lua L12: initialize trap plugin", b.initialize(m, &err));
+        call_parse(b, 1, &err, &ms);
+        err.clear();
+        b.call_text_function("missing_fn", &err);
+        std::printf("  _G.__index error on lookup: err=%s\n", qPrintable(err));
+        check("lua L12: _G __index error on missing function -> 'not found', no panic",
+              err.contains(QStringLiteral("not found")) && !err.contains(QStringLiteral("panic")));
+        GraphicsEvent e;
+        err.clear();
+        b.handle_graphics_event(e, &err);
+        b.notify_frame_selected(1, false);
+        check("lua L12: event/notify with missing handlers under trap OK", err.isEmpty());
+        check("lua L12: plugin still usable after __index trap", alive(b));
+    }
+    {   // ② __index 死循环:查找不得在 pcall 外跑用户代码
+        LuaBackend b;
+        b.initialize(m, &err);
+        call_parse(b, 2, &err, &ms);
+        err.clear();
+        QElapsedTimer t;
+        t.start();
+        b.call_text_function("missing_fn2", &err);
+        std::printf("  _G.__index loop on lookup: %lld ms err=%s\n", (long long)t.elapsed(), qPrintable(err));
+        check("lua L12: _G __index loop not executed by host lookup",
+              err.contains(QStringLiteral("not found")) && t.elapsed() < 5000);
+        check("lua L12: plugin still usable after __index loop trap", alive(b));
+    }
+    {   // ③ render:QImage/QPainter 在查找之前构造时,panic longjmp 会跳过其析构(泄漏)
+        LuaBackend b;
+        b.initialize(m, &err);
+        check("lua L12: render() present at init", b.has_graphics());
+        call_parse(b, 3, &err, &ms);
+        err.clear();
+        const QImage img = b.render_graphics(1024, 1024, &err);
+        std::printf("  render under trap: null=%d err=%s\n", int(img.isNull()), qPrintable(err));
+        check("lua L12: render lookup under trap -> 'render() not found', no panic",
+              img.isNull() && err.contains(QStringLiteral("render() not found")));
+        call_parse(b, 4, &err, &ms);
+        err.clear();
+        const QImage ok = b.render_graphics(64, 64, &err);
+        check("lua L12: render works again after trap removed", !ok.isNull() && err.isEmpty());
+    }
+    {   // ④ 字段树嵌套:64 层接受;过深不得越过 Lua 栈写,报错且插件可用
+        LuaBackend b;
+        b.initialize(m, &err);
+        ParseResult r = call_parse(b, 5, &err, &ms);
+        check("lua L12: 64-level fields accepted", r.accept && tree_depth(r.msdu.tree) == 64);
+        r = call_parse(b, 6, &err, &ms);
+        std::printf("  20000-level fields: accept=%d reason=%s\n", int(r.accept), qPrintable(r.reject_reason));
+        check("lua L12: 20000-level fields rejected (nested too deep)",
+              !r.accept && r.reject_reason.contains(QStringLiteral("too deep")));
+        check("lua L12: plugin still usable after deep fields", alive(b));
+    }
+    {   // ⑤ __newindex 陷阱:宿主注册 request_redraw/host 不得触发
+        const PluginManifest m2 = read_plugin_manifest(make_plugin(
+            root, QStringLiteral("lua-ntrap"), "lua", "main.lua",
+            "function get_info() return {protocolId='LOOP'} end\n"
+            "function parse(f) return {accept=false, rejectReason=type(host)..'/'..type(request_redraw)} end\n"
+            "setmetatable(_G, {__newindex = function(t, k, v) error('newindex trap: '..k) end})\n"));
+        LuaBackend b;
+        const bool ok = b.initialize(m2, &err);
+        std::printf("  __newindex trap init: ok=%d err=%s\n", int(ok), qPrintable(err));
+        const ParseResult r = ok ? call_parse(b, 0, &err, &ms) : ParseResult();
+        check("lua L12: _G __newindex trap does not break host globals",
+              ok && r.reject_reason == QStringLiteral("table/function"));
+    }
+}
+
 static const char* kJsLoop = R"JS(
 function get_info() { return { protocolId: "LOOP", displayName: "loop" }; }
 function parse(frame) {
@@ -183,6 +293,7 @@ int main(int argc, char** argv) {
     if (!tmp.isValid()) return 2;
     const QString root = QDir(tmp.path()).canonicalPath();
     test_lua(root);
+    test_lua_entry_protection(root);
     test_js(root);
     std::printf("\nRESULT: %s (%d failures)\n", g_fails ? "FAILURES" : "ALL PASS", g_fails);
     return g_fails ? 1 : 0;

@@ -73,8 +73,9 @@ public:
     void notify_frame_selected(qint64 frameIndex, bool force_history) override;
 
 private:
-    /// @brief 在 panic 跳转点保护下执行 body;发生 Lua panic 时返回 false、
-    ///        标记本插件不可用(之后所有入口直接报错),宿主进程不 abort
+    /// @brief 在 lua_pcall 内执行 body(经 C 函数 protected_entry);body 中未被内层
+    ///        pcall 接住的 Lua 错误回到这一层,返回 false 并给出错误,状态一致、插件仍可用
+    ///        (不再用 lua_atpanic + setjmp/longjmp,越过 C++ 栈帧会跳过析构)
     bool run_protected(const std::function<void()>& body, QString* err);
     bool initialize_impl(const PluginManifest& m, QString* err);
     ParseResult parse_impl(const BplcFrame& frame, MsduState& msdu,
@@ -85,7 +86,7 @@ private:
     void notify_frame_selected_impl(qint64 frameIndex, bool force_history);
 
     /// @brief Lua fields 表(数组) → MsduFieldNode 树(递归)。表在栈顶
-    bool convert_fields(QVector<MsduFieldNode>* out, QString* err);
+    bool convert_fields(QVector<MsduFieldNode>* out, QString* err, int depth = 0);
     /// @brief 取表字段的字符串/整数(字段不存在给缺省)
     QString table_str(const char* key, const QString& d = QString());
     quint64 table_uint(const char* key, quint64 d = 0);
@@ -93,7 +94,6 @@ private:
     lua_State* m_lua = nullptr;
     std::unique_ptr<LuaBudget> m_budget;  ///< 每次调用的指令预算(count hook 读写)
     bool m_has_graphics = false;
-    bool m_panicked = false;  ///< 发生过 Lua panic:状态不可再用
     QString m_plugin_dir;  ///< 插件目录(设置/环境变量用)
     QString m_protocol_id;
     QString m_display_name;
