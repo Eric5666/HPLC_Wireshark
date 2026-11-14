@@ -706,6 +706,8 @@ jobs:
       #   曾在负载下偶发 "GUI max lateness < 20 ms" 失败:根因是用墙钟判迟到、把等 CPU 的
       #   调度排队算成 GUI 阻塞。探针已改为扣除 /proc/thread-self/schedstat run_delay(见其 README),
       #   不再负载敏感 ⇒ 不加重试;probe_suite.sh 里 300 s 超时只防挂死。
+      # ipc-decode:插件 IPC 反序列化防护(M2 字段树深度/节点数 + 容器计数不按流中计数 reserve);
+      #   探针把自己复制成 bplc-plugin-host 充当恶意宿主,PluginManager 真实收包,损坏响应 ⇒ 停用插件、不崩
       # i18n-concurrency:CONFIG+=tsan(-fsanitize=thread)构建,TSAN_OPTIONS=halt_on_error=1;
       #   先跑一个故意数据竞争的自检程序确认 TSan 真的生效,再确认探针二进制带 TSan 运行时
       - name: Runtime / thread / UI / TSan probes (probe_suite.sh)
@@ -716,6 +718,7 @@ jobs:
           io/reader-garbage-probe
           ui/paging-race-probe
           plugin/plugin-ipc-thread-probe
+          plugin/ipc-decode-probe
           common/i18n-concurrency-probe
 
       # mirror-probe 解析真实 update.json 并查出口地区(raw.githubusercontent / cloudflare trace /

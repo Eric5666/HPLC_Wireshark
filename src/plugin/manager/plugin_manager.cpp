@@ -349,7 +349,16 @@ void PluginManager::on_host_ready_read(PluginRuntime* rt) {
                 res.ok = ds.status() == QDataStream::Ok;
                 res.needs_redraw = res.ok && redraw;
             }   // 类型与登记不符:按失败回调
+            const bool corrupt = ds.status() != QDataStream::Ok;
             deliver_async(std::move(req), res);
+            if (corrupt) {
+                // 响应载荷截断/损坏 = 协议错误:停用插件(排到 GUI 线程,同帧长非法)
+                const QString pid = rt->manifest.protocol_id;
+                QMetaObject::invokeMethod(this, [this, rt, pid]() {
+                    if (find_runtime(pid) != rt) return;
+                    disable_plugin(pid, QStringLiteral("ipc protocol error (corrupt response)"));
+                }, Qt::QueuedConnection);
+            }
             continue;
         }
         if (mt == plugin_ipc::MsgType::Pong) {
@@ -519,6 +528,7 @@ bool PluginManager::parse_via_plugin(const QString& protocol_id,
     const bool got = wait_response(rt, seq, kParseTimeoutMs, &fr);
     ParseResult r;
     MsduState new_msdu;
+    bool corrupt = false;
     if (got) {
         QDataStream ds(fr);
         ds.setVersion(plugin_ipc::kStreamVersion);
@@ -527,24 +537,30 @@ bool PluginManager::parse_via_plugin(const QString& protocol_id,
         if (ok) { ds >> r >> new_msdu; }
         else { QString e; ds >> e; r.reject_reason = e; }
         r.accept = ok;
+        // 载荷来自插件进程:计数/深度/节点数超限或截断(status != Ok)= 协议错误,
+        // 不接受半棵树,按下方同一路径停用插件
+        corrupt = ds.status() != QDataStream::Ok;
     }
-    if (!got) {
+    if (!got || corrupt) {
+        r = ParseResult();
         r.accept = false;
-        r.reject_reason = QStringLiteral("plugin parse timeout/crash");
+        r.reject_reason = corrupt ? QStringLiteral("plugin ipc protocol error (corrupt ParseResponse)")
+                                  : QStringLiteral("plugin parse timeout/crash");
         if (rt->retired.load()) return false;   // stop_all 主动停机,不算超时
         if (rt->disabled.load() || !rt->connected.load()) return false;  // 已停用/断线:状态已另行上报
-        // 超时很可能意味着 host 挂了,禁用插件
+        // 超时很可能意味着 host 挂了;响应损坏说明插件不守协议:都禁用插件
         // 注意:不能在 worker 线程直接调 disable_plugin(涉及信号),标记即可
         if (rt->disabled.exchange(true)) return false;
         rt->ready = false;
         wake_waiters(rt);   // 同插件其他等待者立即返回
         fail_async(rt);     // 同插件在途异步图形请求排队失败回调
         const QString reason = r.reject_reason;
-        QMetaObject::invokeMethod(this, [this, rt, protocol_id, reason]() {
+        QMetaObject::invokeMethod(this, [this, rt, protocol_id, reason, corrupt]() {
             if (rt->retired.load()) return;
             rt->disable_reason = reason;
             unregister_parser(rt->manifest.protocol_id);
-            emit plugin_status_changed(protocol_id, QStringLiteral("timeout-disabled"));
+            emit plugin_status_changed(protocol_id, corrupt ? QStringLiteral("protocol-error-disabled")
+                                                            : QStringLiteral("timeout-disabled"));
         }, Qt::QueuedConnection);
         return false;
     }

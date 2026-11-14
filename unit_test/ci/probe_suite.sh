@@ -247,6 +247,13 @@ p_plugin_plugin_ipc_thread_probe() {   # PluginManager 跨线程 IPC + 异步图
     (cd "$d" && run plugin-ipc-thread 300 ./plugin_ipc_thread_probe) && OUT="$LOGD/plugin-ipc-thread.out" \
         && has "RESULT: ALL PASS (0 failures)" && lacks "wait_response called on the GUI thread"
 }
+p_plugin_ipc_decode_probe() {   # 插件 IPC 反序列化防护(M2 深度/节点数 + 容器计数),探针自充恶意 host 端到端
+    build plugin/ipc-decode-probe || return 1
+    local d; d=$(rundir ipc-decode)
+    cp "$UT/plugin/ipc-decode-probe/build/ipc_decode_probe/ipc_decode_probe" "$d/" || return 1
+    (cd "$d" && run ipc-decode 180 ./ipc_decode_probe) && OUT="$LOGD/ipc-decode.out" \
+        && has "RESULT: ALL PASS (0 failures)" "e2e hugecount: parse refused" && lacks " FAIL"
+}
 p_common_i18n_concurrency_probe() {   # i18n 词典并发(M6),ThreadSanitizer
     local d; d=$(rundir i18n-tsan) f=0
     # ① TSan 自检:故意有数据竞争的程序必须被报出来,证明本 runner 上 TSan 真的生效
