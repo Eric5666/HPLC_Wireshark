@@ -36,5 +36,5 @@ bash run.sh            # 或 LUA=/path/to/lua bash run.sh
 - `system_is_chinese()` 修复前（e3cd720）为 48/76：非 Windows 场景调用了 `reg query`、真实 popen 组在 cwd
   生成 `nul`、`LC_ALL=C` 覆盖 `LANG=zh` 判错。
 
-CI：`.github/workflows/protocol-regression.yml` 的 `lua-and-unit-probes` job 用 `apt-get install lua5.4` 后运行
+CI：`.github/workflows/protocol-regression.yml` 的 `wireshark-lua-linux` job 用 `apt-get install lua5.4` 后运行
 `bash run.sh`（`3rdparty/lua-5.4.*` 不入库，CI 里没有）。

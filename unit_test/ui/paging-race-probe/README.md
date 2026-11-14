@@ -14,3 +14,5 @@
 ```bash
 bash build.sh && QT_QPA_PLATFORM=offscreen ./build/paging_race_probe/paging_race_probe
 ```
+
+CI：`protocol-regression.yml` 的 `runtime-probes-linux` job 经 `unit_test/ci/probe_suite.sh` 构建运行。

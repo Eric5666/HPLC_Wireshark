@@ -29,3 +29,9 @@ cd build/probe_fb && ./mirror_probe_fb [auto|…]
 ## 预期结果（有网时）
 
 `mode=auto url=…` + `RESOLVED effective=… prefix=(native)`，exit 0。
+
+## CI
+
+`protocol-regression.yml` 的 `runtime-probes-linux` job：先单独构建（门禁），再经 `unit_test/ci/probe_suite.sh app/mirror-probe`
+运行 `mirror_probe auto` 与 `mirror_probe_fb auto`，断言 `RESOLVED effective=`；依赖外部服务，运行步 `continue-on-error`、
+脚本内失败重试一次。

@@ -10,6 +10,10 @@ on:
       - 'samples/**'
       - 'wireshark_support_plugins/**'
       - '.github/workflows/**'
+      # plugin-autotest-linux 整编主程序(main.cpp / BPLC_STA_Monitor.pro / 3rdparty)
+      - 'main.cpp'
+      - 'BPLC_STA_Monitor.pro'
+      - '3rdparty/**'
   pull_request:
   workflow_dispatch:
 
@@ -23,7 +27,9 @@ concurrency:
 jobs:
   linux-regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 原 30 分钟:本 job 已累计 20+ 步(含 ASan 构建、插件宿主/市场/IPC、5 个安全探针),
+    # runner 慢时逼近上限。调到 45 留余量;新增的重探针放下面独立 job 并行跑,不挤这里。
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -61,6 +67,11 @@ jobs:
               sys.exit(1)
           print(f"include guard uniqueness: PASS ({len(guards)} guards)")
           PY
+
+      # 发版脚本 scripts/update_json_release.py 自测(纯 Python stdlib)。原先只在 build.yml 的
+      # release-manifest(打 tag 才跑)里执行,PR 改坏脚本要到发版才发现 ⇒ 这里每次都跑
+      - name: update.json release script self-test (unit_test/ci/update-json-release)
+        run: python3 unit_test/ci/update-json-release/test_update_json_release.py
 
       - name: Non-blocking full i18n/title-case report
         if: always()
@@ -541,6 +552,232 @@ jobs:
           B=$(probe_bin plugin/ipc-frame-probe ipc_frame_probe);            timeout 60  "$B"
           B=$(probe_bin plugin/market-safety-probe market_safety_probe);    timeout 120 "$B"
           B=$(probe_bin plugin/lua-sandbox-probe lua_sandbox_probe);        timeout 120 "$B"
+
+  # ---------------------------------------------------------------------------
+  # unit_test 下其余探针(2026-11 "探针都进 CI"):除 manual/ 外每个目录都在 CI 构建并运行。
+  # 构建/运行/断言统一在 unit_test/ci/probe_suite.sh(按目录登记,未登记即失败);
+  # 这里只列目录,便于和 unit_test/ 对账。本地 /workspace/work/build_hplc.sh 用同一脚本、同一清单。
+  # ---------------------------------------------------------------------------
+  wireshark-lua-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # 3rdparty/lua-5.4.* 不入库(.gitignore),CI 里没有源码可编 ⇒ 用发行版 lua5.4
+      - name: Install Lua 5.4
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lua5.4
+          lua5.4 -v
+
+      # 四个 dissector 加载期:语言文件路径跨平台 + system_is_chinese 只在 Windows 查注册表
+      # (非 Windows 不得 io.popen、cwd 不得冒出 nul 文件);run.sh 在 mktemp -d 空目录里跑
+      - name: Wireshark Lua language-file path / system language regression (lang-path-test)
+        run: |
+          set -e
+          bash unit_test/wireshark-lua/lang-path-test/run.sh | tee "$RUNNER_TEMP/lang-path.out"
+          grep -qF "RESULT: ALL PASS (76/76 passed, 0 failures)" "$RUNNER_TEMP/lang-path.out"
+
+  protocol-probes-linux:
+    name: protocol-probes-linux (${{ matrix.group }})
+    runs-on: ubuntu-24.04
+    # 每组 ~12 个探针,各自编一遍解析器源码;两组并行
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: frames-gw-storage
+            probes: >-
+              frames/frame-probe
+              frames/nextgen-probe
+              frames/nextgen-probe-verify
+              protocol-gw/gw-beacon-harness
+              protocol-gw/gw-beacon-harness-mg
+              protocol-gw/gw-mcs-harness
+              protocol-gw/gw-multi-crc-probe
+              protocol-gw/gw-rsv-harness
+              protocol-gw/gw-topo-merge-probe
+              protocol-gw/gw2026-tree-probe
+              storage/golden
+          - group: nw
+            probes: >-
+              protocol-nw/coord-probe
+              protocol-nw/frame-probe-variant
+              protocol-nw/frame-probe-variant3
+              protocol-nw/learn-probe
+              protocol-nw/main-nw-mme-probe
+              protocol-nw/main-nw-probe
+              protocol-nw/mg-probe
+              protocol-nw/nw-mcs-harness
+              protocol-nw/nw-mcs-harness-mg
+              protocol-nw/nw-rf-harness
+              protocol-nw/nw-rf-harness-mg
+              protocol-nw/nw2026-frame-test
+              protocol-nw/nw2026-ul-probe
+              protocol-nw/trunc-stats-probe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Qt 6.11.3
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.3'
+          modules: 'qtserialport'
+          cache: true
+
+      - name: Qt symlink farm (QT_ROOT for unit_test build scripts)
+        run: |
+          set -e
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          for key in QT_HOST_BINS QT_INSTALL_LIBEXECS QT_INSTALL_HEADERS QT_INSTALL_LIBS QT_INSTALL_PLUGINS; do
+            value=$(qmake -query "$key" || true)
+            if [ -z "$value" ] || [ ! -d "$value" ]; then
+              echo "::error::qmake -query $key 返回空或目录不存在: '$value'"
+              exit 1
+            fi
+          done
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)"  "$QT_ROOT/plugins"
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+
+      - name: Build, run and check protocol / frame / storage probes (probe_suite.sh)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: bash unit_test/ci/probe_suite.sh ${{ matrix.probes }}
+
+  runtime-probes-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Qt 6.11.3
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.3'
+          modules: 'qtserialport'
+          cache: true
+
+      - name: Qt symlink farm (QT_ROOT for unit_test build scripts)
+        run: |
+          set -e
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          for key in QT_HOST_BINS QT_INSTALL_LIBEXECS QT_INSTALL_HEADERS QT_INSTALL_LIBS QT_INSTALL_PLUGINS; do
+            value=$(qmake -query "$key" || true)
+            if [ -z "$value" ] || [ ! -d "$value" ]; then
+              echo "::error::qmake -query $key 返回空或目录不存在: '$value'"
+              exit 1
+            fi
+          done
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)"  "$QT_ROOT/plugins"
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+
+      # ubuntu-24.04 runner 内核 vm.mmap_rnd_bits=32,ThreadSanitizer 运行时启动即
+      # "FATAL: ThreadSanitizer: unexpected memory mapping";调回 28 TSan 才能跑
+      - name: Allow ThreadSanitizer (vm.mmap_rnd_bits=28)
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Build plugin host (bplc-plugin-host)
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/plugin-host"
+          cd "$RUNNER_TEMP/plugin-host"
+          qmake "$GITHUB_WORKSPACE/src/plugin/host/bplc-plugin-host.pro" CONFIG+=release CONFIG-=debug
+          make -j"$(nproc)"
+          echo "PLUGIN_HOST=$RUNNER_TEMP/plugin-host/bplc-plugin-host" >> "$GITHUB_ENV"
+
+      # reader-garbage:回放切帧/Reader 生命周期(M5/L4/L5)
+      # paging-race:盘块换页竞态(M2/M3/M4)
+      # plugin-ipc-thread:PluginManager 跨线程 IPC + 异步图形,真实 host 子进程(H6)。
+      #   曾在负载下偶发 "GUI max lateness < 20 ms" 失败:根因是用墙钟判迟到、把等 CPU 的
+      #   调度排队算成 GUI 阻塞。探针已改为扣除 /proc/thread-self/schedstat run_delay(见其 README),
+      #   不再负载敏感 ⇒ 不加重试;probe_suite.sh 里 300 s 超时只防挂死。
+      # i18n-concurrency:CONFIG+=tsan(-fsanitize=thread)构建,TSAN_OPTIONS=halt_on_error=1;
+      #   先跑一个故意数据竞争的自检程序确认 TSan 真的生效,再确认探针二进制带 TSan 运行时
+      - name: Runtime / thread / UI / TSan probes (probe_suite.sh)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          bash unit_test/ci/probe_suite.sh
+          io/reader-garbage-probe
+          ui/paging-race-probe
+          plugin/plugin-ipc-thread-probe
+          common/i18n-concurrency-probe
+
+      # mirror-probe 解析真实 update.json 并查出口地区(raw.githubusercontent / cloudflare trace /
+      # country.is / ipwho.is 等外部服务)。构建是门禁(下一步);运行依赖外部服务,偶发不可用
+      # 不应挡合并 ⇒ 运行步 continue-on-error(失败在汇总里显示为警告),脚本内失败重试一次
+      - name: Build update mirror resolver probe (app/mirror-probe)
+        run: cd unit_test/app/mirror-probe && bash build.sh
+
+      - name: Run update mirror resolver probe (external network, non-blocking)
+        continue-on-error: true
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: bash unit_test/ci/probe_suite.sh app/mirror-probe
+
+  plugin-autotest-linux:
+    runs-on: ubuntu-24.04
+    # 要整编主程序(CONFIG+=plugin_autotest)+ 插件宿主,单独一个 job
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Qt 6.11.3
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.3'
+          modules: 'qtserialport'
+          cache: true
+
+      - name: Qt symlink farm (QT_ROOT for unit_test build scripts)
+        run: |
+          set -e
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          for key in QT_HOST_BINS QT_INSTALL_LIBEXECS QT_INSTALL_HEADERS QT_INSTALL_LIBS QT_INSTALL_PLUGINS; do
+            value=$(qmake -query "$key" || true)
+            if [ -z "$value" ] || [ ! -d "$value" ]; then
+              echo "::error::qmake -query $key 返回空或目录不存在: '$value'"
+              exit 1
+            fi
+          done
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)"  "$QT_ROOT/plugins"
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+
+      # 主程序 CONFIG+=plugin_autotest crash_no_default:回放 roundtrip_test.bin,等 Reader 结束、
+      # 插件线程空闲后给各插件面板截 plugin_<id>.png、主窗口截 main.png 后自行退出(900 s 超时)
+      - name: Plugin panel autotest (app/plugin-autotest, probe_suite.sh)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: bash unit_test/ci/probe_suite.sh app/plugin-autotest
+
+      - name: Upload plugin autotest screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-autotest-shots
+          path: ${{ runner.temp }}/probe-suite/run/plugin-autotest-shots
+          if-no-files-found: ignore
 
   topology-worker-linux:
     runs-on: ubuntu-24.04

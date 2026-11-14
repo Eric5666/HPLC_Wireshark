@@ -7,6 +7,7 @@
 | `nw-mme-test/` | NW MSDU/MME 截断边界回归 | Linux ASan/UBSan、Linux Release、Windows Release |
 | `roundtrip/` | bin/裸 hex 无损往返与 Reader/Playback 回归 | Linux、Windows |
 | `nw2026-type1-test/` | NW2026 OFDMA Type-1 trigger/UL/DL-SACK 回归 | Linux |
+| `probe_suite.sh` | `unit_test/` 其余探针的统一 CI 驱动：按目录逐个构建 → 运行 → 断言（每个探针的输入与期望写在脚本里，未登记的目录判失败），全部跑完再汇总；`QT_ROOT=<Qt 前缀或 symlink farm> bash unit_test/ci/probe_suite.sh <目录>...` | protocol-regression.yml 的 `protocol-probes-linux`（两组矩阵）、`runtime-probes-linux`、`plugin-autotest-linux` |
 | `update-json-release/` | `scripts/update_json_release.py`(发版时改 update.json 的 latest-version/download-url,不写 sha256)自测,纯 Python stdlib:`python3 unit_test/ci/update-json-release/test_update_json_release.py` | build.yml `release-manifest`(tag 触发) |
 
 本目录中的 `.pro` 使用相对仓库根目录的路径，不依赖开发机绝对路径。执行方式以 `.github/workflows/protocol-regression.yml` 和 `.github/workflows/build.yml` 为准。Qt 6 构建示例：

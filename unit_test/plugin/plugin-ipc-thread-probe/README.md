@@ -60,3 +60,6 @@ QT_QPA_PLATFORM=offscreen ./build/plugin_ipc_thread_probe/plugin_ipc_thread_prob
 ```
 
 预期：`RESULT: ALL PASS (0 failures)`，exit 0。
+
+CI：`protocol-regression.yml` 的 `runtime-probes-linux` job 经 `unit_test/ci/probe_suite.sh` 构建运行（宿主与探针复制到
+本地临时目录、300 s 超时防挂死，不重试）。

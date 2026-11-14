@@ -15,3 +15,5 @@
 ```bash
 bash build.sh && ./build/reader_garbage_probe/reader_garbage_probe
 ```
+
+CI：`protocol-regression.yml` 的 `runtime-probes-linux` job 经 `unit_test/ci/probe_suite.sh` 构建运行。

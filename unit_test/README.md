@@ -19,6 +19,11 @@
 
 ## 0. CI 与人工测试分区
 
+**除 `manual/` 外，本目录每个用例都在 CI 里构建并运行**（2026-11 起）：`ci/` 下的用例与早先接入的探针直接写在
+`.github/workflows/protocol-regression.yml` 各步骤里；其余探针由 [`ci/probe_suite.sh`](ci/probe_suite.sh) 统一
+构建 → 运行 → 断言（目录逐个列在 workflow 的 `probe_suite.sh` 调用参数中）。新增探针时同时登记到
+`probe_suite.sh` 与 workflow，未登记的目录会被判失败。
+
 从 `samples/` 迁入的可执行测试已经按用途分区：
 
 - `unit_test/ci/`：GitHub Actions 直接执行的稳定回归门禁，必须可在干净环境中无交互构建和运行；详见 [`unit_test/ci/README.md`](ci/README.md)。
@@ -65,11 +70,11 @@
 | protocol-gw/gw-learn-probe | GW_2026 TEI↔MAC 学习（AssocCnf/Gather/发现/OFDMA/TDA） | ./build_probe.sh | ./build/gw_learn_probe crafted.bin build/out.txt | 构造输入 `crafted.bin`（2795B，15 帧，由 `gw_craft.py` 生成，已入库）；完整抓包 `gw_mpdus.bin`（39M）未入库，见原位置 `~/workspace/gw_learn_probe/gw_mpdus.bin`，再生脚本 `split_gw_capture.py`（路径仍指向原位置，见下） | exit 0，总计 `total=15 accepted=15 msdu_pairs=16`，`ofdma=1 tda=1 stations=4 gather=1 assoc_cnf=5 discover=5`（与 CI `protocol-regression.yml` 断言一致） |
 | protocol-gw/gw-beacon-harness | GW_2022 信标解析 harness（合成信标帧 → 树节点断言） | ./build.sh | ./build/harness/gw_beacon_harness | 无（合成帧） | `RESULT: PASS`，exit 0 |
 | protocol-gw/gw-beacon-harness-mg | 同上（_mg 变体） | ./build.sh | ./build/harness/gw_beacon_harness | 无（合成帧） | `RESULT: PASS`，exit 0。**注意 _mg 陷阱**：本目录的 `harness.pro` 编译的是**原版** `gw-beacon-harness/main.cpp`，本目录的 `main.cpp` 从不被编译；改断言必须改原版，见本用例 README |
-| protocol-gw/gw-mcs-harness | GW MCS/信标字段 harness（树转储） | ./build.sh | ./build/harness/gw_mcs_harness | 无（合成帧） | exit 0，打印字段树（无显式 RESULT 行的转储型 harness） |
-| protocol-gw/gw-rsv-harness | GW_2022 RF SOF 保留位原值保留验证 | ./build.sh | ./build/harness/gw_rsv_harness | 无（合成帧） | **exit 1，单用例 FAIL**：保留位本身正确（sym=427、ext=5、pb_size=72、无错误），但 `tmi` 读到 0 而非设置的 MCS 3。探针与当前解析器实现存在分歧，归集时未改逻辑，原样记录 |
+| protocol-gw/gw-mcs-harness | GW_2022 RF SOF 字段树（MCS/Payload PB Size/保留位原值） | ./build.sh | ./build/harness/gw_mcs_harness | 无（合成帧） | 打印字段树 + 6 条断言，`RESULT: ALL PASS (0 failures)`，exit 0（2026-11：无线 MCS 改写 `mpdu.mcs`，原写 `tmi` 树里 MCS 恒 0） |
+| protocol-gw/gw-rsv-harness | GW_2022 RF SOF 保留位原值保留验证 | ./build.sh | ./build/harness/gw_rsv_harness | 无（合成帧） | `=> PASS`，exit 0。2026-11 修：无线 SOF 的 MCS 存 `mpdu.mcs`（树/导出/列表均按 `is_rf ? mcs : tmi`），旧断言查 `tmi == 3` 是过时口径 |
 | protocol-gw/gw2026-tree-probe | GW_2026 OFDMA/TDA 帧 → ProtocolTree 全节点打印 | ./build.sh | ./build/probe/gw2026_tree_probe \<mpdu.bin\> | 裸 MPDU；OFDMA/TDA 构造帧在 `../../frames/frame-probe/gw2026_ofdma_sim.bin`（440B）与 `gw2026_tda_sim.bin`（304B） | OFDMA 构造帧 accept=1，exit 0 |
 | protocol-gw/gw-multi-crc-probe | GW_2026 OFDMA/TDA 多站逐站 CRC 进 mpdu.pb_crc_oks（直接调 assemble，全好/翻转站 0/站 1/双站、TDA） | ./build.sh | ./build/gw_multi_crc_probe/gw_multi_crc_probe | 无（全合成帧） | `RESULT: ALL PASS`，exit 0 |
-| protocol-nw/learn-probe | NW_2026 TEI↔MAC 学习（级联/OFDMA/TEI 列表/Gather 等） | ./build.sh | ./build/learn_probe files crafted/*.bin（或 `scan <mpdus.bin>`，数据集不入库） | `crafted/` 下 5 个构造帧（已入库）；再生脚本 `craft_frames.py` | exit 0，stderr `scanned 5 frames`，打印 4 条 FRAME 行（`craft_ul_data.bin` 按探针的 interesting 规则不打印 FRAME 行，属探针设计而非失败） |
+| protocol-nw/learn-probe | NW_2026 TEI↔MAC 学习（级联/OFDMA/TEI 列表/Gather 等） | ./build.sh | ./build/learn_probe files crafted/*.bin（或 `scan <mpdus.bin>`，数据集不入库） | `crafted/` 下 5 个构造帧（已入库）；再生脚本 `craft_frames.py` | exit 0，stderr `scanned 5 frames`，打印 4 条 FRAME 行（`craft_ul_data.bin` 按探针的 interesting 规则不打印 FRAME 行，属探针设计而非失败）。2026-11：TEI 列表/Gather 两帧补 MSDU 帧尾 CRC32（旧夹具补零被判 CRC FAIL ⇒ 门控不学，只剩 2 行） |
 | protocol-nw/nw-trunc-pbcrc-probe | NW_2026 截断帧 pb_crc_ok 语义（定法 a：全声明块收到且通过才为 true） | ./build.sh | ./build/nw_trunc_pbcrc_probe/nw_trunc_pbcrc_probe | 无（全合成帧） | `RESULT: ALL PASS`，exit 0；未修复代码上截断 2 用例失败 |
 | protocol-nw/nw-dlofdma-crc-probe | NW_2026 DL-OFDMA 站点 1+ 非聚合分支 PB CRC 门（好 CRC 学习、坏 CRC 不学习） | ./build.sh | ./build/nw_dlofdma_crc_probe/nw_dlofdma_crc_probe | 无（全合成帧） | `RESULT: ALL PASS`，exit 0。对应修复 fix/nw-dlofdma-pbcrc（9832d1b）→ fix/remove-parse-filter（11afa31） |
 | protocol-nw/nw-ul-crc-probe | NW_2026 UL-OFDMA 类型 1 逐站 CRC 进 mpdu.pb_crc_oks（无 trigger 为空、UL 全好/翻转/聚合、DL-SACK） | ./build.sh | ./build/nw_ul_crc_probe/nw_ul_crc_probe | 无（全合成帧） | `RESULT: ALL PASS`，exit 0 |
@@ -80,18 +85,18 @@
 | protocol-nw/nw-mcs-harness-mg | 同上（_mg 变体） | ./build.sh | ./build/harness/nw_mcs_harness | 无（合成帧） | exit 0，打印字段树。**_mg 陷阱同 gw-beacon-harness-mg**：编译的是原版 main.cpp |
 | protocol-nw/nw-rf-harness | NW RF/PLC SOF harness（合成帧断言） | ./build.sh | ./build/harness/nw_rf_harness | 无（合成帧） | `SYNTH RESULT: PASS`，exit 0 |
 | protocol-nw/nw-rf-harness-mg | 同上（_mg 变体） | ./build.sh | ./build/harness/nw_rf_harness | 无（合成帧） | `SYNTH RESULT: PASS`，exit 0。**_mg 陷阱同上** |
-| protocol-nw/coord-probe | NW 协调（coord）字段探针 | ./build.sh | —（构建失败，无二进制） | 外部 `capture.txt`（未入库） | **构建失败**：探针读 `MpduInfo.coord_option`，当前仓库 `src/common/bplcframe.h` 该字段已为 `coord_duration`（“协调时隙占用时长 16-bit(ms)”）。属探针与仓库 API 漂移，归集时未改探针源码，原样记录 |
+| protocol-nw/coord-probe | NW 协调（coord）字段/版本分布统计 | ./build.sh | ./build/probe_coord/probe_coord \<capture\> | 抓包（CI 用 `ci/roundtrip/roundtrip_test.bin`） | 2026-11 修复构建：`coord_option`（字节 7 bit2-3）已并入保留位 `coord_rsv3`，探针改按 rsv3 统计；无参打印用法 exit 2。入库样本 `total=2457 accepted=2429`、`COORD total=1069` |
 | protocol-nw/mg-probe | NW MSDU 解析探针（合成 0x9999/不支持版本帧 → 树转储） | ./build.sh | ./build/mg_probe/mg_probe | 无（合成帧） | 构建通过（经 3 处构建脚本补齐，见搬迁改动清单），exit 0，打印 MSDU 树 |
 | protocol-nw/trunc-stats-probe | NW 截断/统计探针（3 个 .pro，共用 TARGET `trunc_stats_probe`） | ./build.sh | ./build/\<name\>/trunc_stats_probe [文件…] | 外部文件（未入库） | 3/3 构建通过；无参 + stdin 关闭时 exit 0 静默。注意：无参且 stdin 打开时，首个二进制会阻塞等待 stdin（实测挂起后 kill），无参运行请重定向 `</dev/null` |
-| protocol-nw/frame-probe-variant | NW_2021 帧变体探针 | ./build.sh | —（构建失败，无二进制） | 帧 .bin（见 `frames/frame-probe/`） | **构建失败**：与 coord-probe 同因，`main.cpp:68` 读 `MpduInfo.coord_option`，现为 `coord_duration`。原样记录，未改源码 |
+| protocol-nw/frame-probe-variant | NW_2021 帧变体探针 | ./build.sh | ./build/probe/nw_frame_probe_variant \<帧.bin\> | 帧 .bin（见 `frames/frame-probe/`） | 2026-11 修复构建：coord 行改打 rsv0..3（`coord_option` 已并入保留位）、.pro 补 QsLog（`parse_anomaly.h` 依赖）；`accept=1`，exit 0 |
 | protocol-nw/frame-probe-variant3 | NW_2021 MSDU 变体探针 | ./build.sh | ./build/probe/nw_msdu_probe \<帧.bin\> | 帧 .bin（见 `frames/frame-probe/`，如 `nw_frame_20261022.bin`） | 构建通过（经 qslog 构建脚本补齐），该帧 present=1，exit 0 |
 | protocol-nw/nw2026-ul-probe | NW_2026 UL-OFDMA 三件套探针（trigger + UL 数据 + SACK） | ./build.sh | ./build/probe/nw2026_ul_probe \<trigger\> \<ul\> \<sack\> | `../../frames/frame-probe/nw2026_trigger.bin`（32B）、`nw2026_ul_ofdma_data.bin`（296B）、`nw2026_dl_sack.bin`（32B） | trigger 与 UL 数据均 accept=1，exit 0 |
-| frames/frame-probe | NW_2021 帧探针 + GW/NW 构造帧生成脚本与输入 | ./build.sh | —（构建失败，无二进制） | 本目录 10 个小 .bin（已入库，见下表注）；生成脚本见 `wireshark_support_plugins/build_gw2026_ofdma_tda_sim.py`、`build_nw2026_ul_ofdma.py`（本目录副本已删除） | **构建失败**：与 coord-probe 同因，`main.cpp:67` 读 `MpduInfo.coord_option`，现为 `coord_duration`。原样记录，未改源码。注意：本目录的 .bin 仍是其他用例（gw2026-tree-probe、nw2026-ul-probe、nextgen-probe、frame-probe-variant3）的输入 |
+| frames/frame-probe | NW_2021 帧探针 + GW/NW 构造帧生成脚本与输入 | ./build.sh | ./build/probe/nw_frame_probe \<帧.bin\> | 本目录 10 个小 .bin（已入库，见下表注）；生成脚本见 `wireshark_support_plugins/build_gw2026_ofdma_tda_sim.py`、`build_nw2026_ul_ofdma.py`（本目录副本已删除） | 2026-11 修复构建（同 frame-probe-variant）；各帧 `accept=1`，exit 0。注意：本目录的 .bin 仍是其他用例（gw2026-tree-probe、nw2026-ul-probe、nextgen-probe、frame-probe-variant3）的输入 |
 | frames/nextgen-probe | 跨四协议批量跑器：对抓包逐帧跑指定解析器，统计接受/拒绝 | ./build.sh | ./build/probe/nextgen_probe \<nw2021\|nw2026\|gw2022\|gw2026\> \<抓包文件\> [detail] | 0x3C…0x3E 容器格式抓包；本用例无自带输入，可用 `../frame-probe/nw_frame_20261022.bin`（单帧容器） | 该单帧 nw2021：`total=1 accepted=1 sof=1 pb_crc_ok=1`，exit 0 |
 | frames/nextgen-probe-verify | 同上（verify 变体；main.cpp 与 nextgen-probe 相同，.pro 不同） | ./build.sh | ./build/probe/nextgen_probe \<which\> \<抓包文件\> [detail] | 同上 | 以 `topo-route-verify/user_frame_container.bin`（reader 容器格式，非 0x3C 串口格式）运行：`total=0`——输入格式不匹配所致，不是探针失败；二进制本身与 nextgen-probe 同源已验证 |
 | app/mirror-probe | UpdateMirrorResolver 探针：写 config.ini mirror_mode 再解析真实 update.json | ./build.sh | 在 `build/probe/` 目录下运行 `./mirror_probe [auto\|…]`；另有 `build/probe_fb/mirror_probe_fb`（fb 变体，见本用例 README） | 无（联网解析默认 update.json） | 构建通过；实测 `RESOLVED effective=https://raw.githubusercontent.com/aron566/HPLC_Wireshark/main/update.json prefix=(native)`，exit 0。注意：它把 `config.ini` 写到二进制同目录（即忽略的 `build/probe/` 内），不要在用例根目录运行；无网时 30 秒后 TIMEOUT exit 2 |
 | app/plugin-autotest | 插件面板自动化截图(原 MainWindow QTimer 截图脚本,测试侧) | 主工程 `qmake CONFIG+=plugin_autotest` | `./BPLC_STA_Monitor --replay <bin> --plugin-autotest <shot_dir>` | 任意回放 .bin + 插件目录 | 产出 `plugin_<id>.png` 与 `main.png` 后退出;产品构建忽略该参数(见本用例 README) |
-| storage/golden | PacketEntry 块序列化 golden：生成 4 档条目块并打印 sha256 | ./build.sh | 在 scratch 目录运行 `../golden/golden`（不要在用例根目录运行，以免覆盖已入库的 golden 文件） | 生成物 `v3_n1/n57/n250/n1000.bin`（已入库，系参考输出） | 构建通过，运行 exit 0，打印 4 行 sha256；但**再生字节与已入库文件全部不匹配**（330 vs 312、5802 vs 5514、24207 vs 22720、95505 vs 90080 字节，约每条目 +5 字节）——序列化格式自 golden 录制后已漂移，golden 已过期。已入库文件原样保留未覆盖；是否重录 golden 需另行决定，归集时不擅自覆盖 |
+| storage/golden | PacketEntry 块序列化 golden：无损往返 + 与入库 golden 内容一致 | ./build.sh | 在 scratch 目录运行 `../golden/golden --check <用例目录>` | `v<block_version>_n1/n57/n250/n1000.bin`（2026-11 重录 v20，删除过期 v3） | `RESULT: ALL PASS (0 failures)`，exit 0；格式有意变更须 bump `block_version()` 并 `--record` 重录（见用例 README） |
 
 注：`frames/frame-probe/` 的 10 个 .bin 为
 `gw2026_ofdma_sim.bin`（440B）、`gw2026_tda_sim.bin`（304B）、

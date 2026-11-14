@@ -26,3 +26,10 @@ QT_QPA_PLATFORM=offscreen ./BPLC_STA_Monitor \
 
 驱动只经 `MainWindow` 的公开测试接口(`capture()` / `plugin_engine()` /
 `plugin_tabs()` / `packet_model()` / `plugin_id_of()` / `jump_packet_to_frame()`)。
+
+## CI
+
+`protocol-regression.yml` 的 `plugin-autotest-linux` job 经 `unit_test/ci/probe_suite.sh app/plugin-autotest`：
+`CONFIG+=release crash_no_default plugin_autotest` 整编主程序 + 插件宿主，以 `--plugins-dir src/plugin/examples
+--replay unit_test/ci/roundtrip/roundtrip_test.bin --plugin-autotest <dir>` 运行（900 s 超时），断言 exit 0、日志含
+`[autotest] reader finished` / `[autotest] shoot start`、产出 `main.png` 与至少 1 张 `plugin_*.png`；截图作为 artifact 上传。
