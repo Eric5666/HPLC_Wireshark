@@ -110,11 +110,29 @@ end
 
 -- 语言开关: 与 GW_2022 相同策略 (界面语言 → Wireshark 个人配置目录的 language 文件, 环境变量可覆盖)
 local function system_is_chinese()
-    local lc = os.getenv("LANG") or os.getenv("LANGUAGE") or ""
-    if lc:lower():match("^zh") then return true end
-    local h = io.popen('reg query "HKCU\\Control Panel\\International" /v LocaleName 2>nul')
-    if h then
-        local out = h:read("*a")
+    -- 1) 区域设置环境变量 (POSIX 优先级 LC_ALL > LC_MESSAGES > LANG, 首个非空者决定; 都没设再看 GNU LANGUAGE)
+    local function env(name)
+        local v = os.getenv(name)
+        if v and v ~= "" then return v end
+        return nil
+    end
+    local lc = env("LC_ALL") or env("LC_MESSAGES") or env("LANG")
+    if lc then
+        if lc:lower():match("^zh") then return true end
+    else
+        local language = env("LANGUAGE")
+        if language and language:lower():match("^zh") then return true end
+    end
+    -- 2) 仅 Windows: 注册表 LocaleName (如 zh-CN; GUI 从桌面启动时通常无 LANG)
+    --    非 Windows 绝不执行: POSIX shell 会把 "2>nul" 当成重定向到当前目录下名为 nul 的文件并创建它,
+    --    而且 Linux/macOS 上本就没有 reg 命令
+    local sep = (type(package) == "table" and type(package.config) == "string"
+                 and package.config:sub(1, 1)) or "/"
+    if sep ~= "\\" or lc then return false end
+    if type(io) ~= "table" or type(io.popen) ~= "function" then return false end
+    local ok, h = pcall(io.popen, 'reg query "HKCU\\Control Panel\\International" /v LocaleName 2>nul')
+    if ok and h then
+        local out = h:read("*a") or ""
         h:close()
         if out:lower():match("zh%-") then return true end
     end

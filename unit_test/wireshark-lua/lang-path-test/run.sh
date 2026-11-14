@@ -21,7 +21,21 @@ if [ -z "$LUA_BIN" ]; then
     # 只编译解释器到 build/(不含 luac.c,它也有 main),不改动 3rdparty 源码目录
     ${CC:-cc} -O2 -std=gnu99 -DLUA_USE_POSIX -I"$src" -o build/lua \
         $(ls "$src"/*.c | grep -v '/luac\.c$') -lm
-    LUA_BIN=build/lua
+    LUA_BIN="$PWD/build/lua"
 fi
+command -v "$LUA_BIN" >/dev/null 2>&1 && LUA_BIN="$(command -v "$LUA_BIN")"
+case "$LUA_BIN" in /*) ;; *) LUA_BIN="$PWD/$LUA_BIN" ;; esac
 echo "lua: $LUA_BIN ($("$LUA_BIN" -v 2>&1))"
-"$LUA_BIN" test_lang_path.lua "$REPO/wireshark_support_plugins"
+# 在空的临时目录里跑: 测试用例之一用真实 io.popen 加载插件, 检查 cwd 不会冒出名为 nul 的文件
+# (旧 system_is_chinese() 在非 Windows 也执行 `reg query ... 2>nul`, sh 把 2>nul 当成写 ./nul)
+HERE="$PWD"
+RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/lang-path-test.XXXXXX")"
+trap 'rm -rf "$RUNDIR"' EXIT
+cd "$RUNDIR"
+rc=0
+"$LUA_BIN" "$HERE/test_lang_path.lua" "$REPO/wireshark_support_plugins" real-popen-cwd-ok || rc=$?
+if [ -e "$RUNDIR/nul" ]; then
+    echo "FAIL: 运行后临时目录出现 nul 文件(非 Windows 执行了 reg query ... 2>nul)" >&2
+    rc=1
+fi
+exit $rc

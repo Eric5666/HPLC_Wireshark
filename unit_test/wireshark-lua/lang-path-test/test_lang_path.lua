@@ -68,6 +68,25 @@ local SCEN = {
       expect_path = "C:\\Users\\u\\AppData\\Roaming\\Wireshark\\language", expect_english = false },
     { name = "windows: 无 APPDATA、无 Dir ⇒ 不打开文件, 不报错",
       env = { HOME = "C:\\Users\\u" }, win = true, files = {}, expect_path = nil, expect_english = true },
+    -- system_is_chinese(): 非 Windows 只看 LC_ALL > LC_MESSAGES > LANG(> LANGUAGE), 绝不 io.popen("reg query ... 2>nul")
+    -- (POSIX shell 会把 2>nul 当成重定向到 cwd 下名为 nul 的文件并创建它)
+    { name = "linux: LC_ALL=zh_CN 覆盖 LANG=en_US ⇒ 中文",
+      env = { LC_ALL = "zh_CN.UTF-8", LANG = "en_US.UTF-8" }, files = {}, expect_path = nil, expect_english = false },
+    { name = "linux: LC_ALL=C 覆盖 LANG=zh_CN ⇒ 英文",
+      env = { LC_ALL = "C", LANG = "zh_CN.UTF-8" }, files = {}, expect_path = nil, expect_english = true },
+    { name = "linux: LC_MESSAGES=zh_TW 覆盖 LANG=en_US ⇒ 中文",
+      env = { LC_MESSAGES = "zh_TW.UTF-8", LANG = "en_US.UTF-8" }, files = {}, expect_path = nil, expect_english = false },
+    { name = "linux: 仅 LANGUAGE=zh_CN:en ⇒ 中文",
+      env = { LANGUAGE = "zh_CN:en" }, files = {}, expect_path = nil, expect_english = false },
+    { name = "macOS: language 文件 system ⇒ 跟随 LANG=zh, 不调 reg query",
+      env = { HOME = "/Users/u", LANG = "zh_CN.UTF-8" }, files = { ["/Users/u/.config/wireshark/language"] = "language: system\n" },
+      expect_path = "/Users/u/.config/wireshark/language", expect_english = false },
+    { name = "windows: 无 LANG ⇒ 查注册表 LocaleName=zh-CN ⇒ 中文",
+      env = { APPDATA = "C:\\A" }, win = true, reg = "    LocaleName    REG_SZ    zh-CN\r\n",
+      files = {}, expect_path = "C:\\A\\Wireshark\\language", expect_english = false, expect_reg = true },
+    { name = "windows: 无 LANG ⇒ 查注册表 LocaleName=en-US ⇒ 英文",
+      env = { APPDATA = "C:\\A" }, win = true, reg = "    LocaleName    REG_SZ    en-US\r\n",
+      files = {}, expect_path = "C:\\A\\Wireshark\\language", expect_english = true, expect_reg = true },
     { name = "环境变量覆盖仍优先(HPLC_RF_LANG / NW_2021_LANG = zh), 不读文件",
       env = { HPLC_RF_LANG = "zh", NW_2021_LANG = "zh", HOME = "/home/u" },
       files = { ["/home/u/.config/wireshark/language"] = "language: en\n" },
@@ -77,7 +96,7 @@ local SCEN = {
 local function is_english(s) return type(s) == "string" and not s:find("[\128-\255]") end
 
 local function run_one(plugin, sc)
-    local opened, proto_desc = {}, nil
+    local opened, popens, proto_desc = {}, {}, nil
     local env = sc.env
     -- 新的全局环境: 真实标准库 + stub 兜底 + 受控的 Dir/Proto
     local G = {}
@@ -94,7 +113,15 @@ local function run_one(plugin, sc)
             end
             return real_open(path, mode)   -- 与真实 io.open 一致: path 为 nil 时抛 bad argument
         end,
-        popen = function() return nil end,  -- 不真的执行 reg query
+        -- 不真的执行命令: 记录调用; sc.reg 为模拟的 reg query 输出
+        popen = function(cmd)
+            popens[#popens + 1] = tostring(cmd)
+            if sc.reg then
+                local out = sc.reg
+                return { read = function() return out end, close = function() return true end }
+            end
+            return nil
+        end,
     }, { __index = io })
     G.package = setmetatable({ config = sc.win and WIN_CONFIG or NIX_CONFIG }, { __index = package })
     if sc.dir == "ok" then
@@ -119,6 +146,15 @@ local function run_one(plugin, sc)
     if got ~= sc.expect_path then
         return false, string.format("语言文件路径 期望 %s 实际 %s", tostring(sc.expect_path), tostring(got))
     end
+    -- 非 Windows 一律不得 io.popen(旧代码在 Linux/macOS 跑 reg query ... 2>nul, 在 cwd 生成 nul 文件)
+    if not sc.win and #popens > 0 then
+        return false, "非 Windows 调用了 io.popen: " .. table.concat(popens, " | ")
+    end
+    if sc.expect_reg then
+        if #popens ~= 1 or not popens[1]:find("reg query", 1, true) then
+            return false, "Windows 应恰好查一次注册表, 实际 popen: " .. (#popens > 0 and table.concat(popens, " | ") or "(无)")
+        end
+    end
     if is_english(proto_desc) ~= sc.expect_english then
         return false, string.format("语言 期望 %s 实际 %s (Proto 描述: %s)",
             sc.expect_english and "英文" or "中文", is_english(proto_desc) and "英文" or "中文", tostring(proto_desc))
@@ -136,6 +172,38 @@ for _, sc in ipairs(SCEN) do
         if not ok then fails = fails + 1 end
     end
 end
+-- ---------- 真实 io.popen: 非 Windows 加载插件后 cwd 不得出现 nul 文件 ----------
+-- run.sh 在一个空的临时目录里运行本脚本(arg[2] = "real-popen-cwd-ok")。这里不替换 io.popen,
+-- 环境变量全空(让插件走到 system_is_chinese 的注册表分支): 旧代码会真的执行
+-- `reg query ... 2>nul`, /bin/sh 把 stderr 重定向到 ./nul 并创建该文件。
+if package.config:sub(1, 1) ~= "\\" and arg[2] == "real-popen-cwd-ok" then
+    print("== 真实 io.popen: 非 Windows 加载后 cwd 无 nul 文件")
+    local pre = real_open("nul", "r")
+    if pre then pre:close(); os.remove("nul") end
+    for _, p in ipairs(PLUGINS) do
+        total = total + 1
+        local G = {}
+        for k, v in pairs(_G) do G[k] = v end
+        G._G = G
+        G.os = setmetatable({ getenv = function() return nil end }, { __index = os })
+        G.Proto = function() return new_stub() end
+        setmetatable(G, { __index = function(_, k) if k == "Dir" then return nil end return new_stub() end })
+        local chunk, err = loadfile(PLUGIN_DIR .. "/" .. p, "t", G)
+        local ok, perr = false, err
+        if chunk then ok, perr = pcall(chunk) end
+        local nul = real_open("nul", "r")
+        local msg
+        if not ok then
+            msg = "加载报错: " .. tostring(perr)
+        elseif nul then
+            msg = "cwd 生成了 nul 文件(执行了 reg query ... 2>nul)"
+        end
+        if nul then nul:close(); os.remove("nul") end
+        print(string.format("  %s %-20s %s", msg and "FAIL" or "PASS", p, msg or "no nul"))
+        if msg then fails = fails + 1 end
+    end
+end
+
 -- 防止 stub 环境泄漏到宿主
 assert(os.getenv == real_getenv and io.open == real_open and io.popen == real_popen and package.config == real_config)
 print(string.format("RESULT: %s (%d/%d passed, %d failures)", fails == 0 and "ALL PASS" or "FAIL", total - fails, total, fails))

@@ -98,14 +98,31 @@ end
 -- Linux/macOS: ~/.config/wireshark/language; 内容如 "language: en")
 -- Lua pref 在脚本加载阶段恒为默认值, 无法用于决定字段名; 直接读该文件最可靠
 
--- 判断系统语言是否为中文: 优先 LANG 环境变量, 其次 Windows 注册表 (GUI 从桌面启动时无 LANG)
+-- 判断系统语言是否为中文: 优先 LC_ALL/LC_MESSAGES/LANG 环境变量, 其次仅在 Windows 查注册表 (GUI 从桌面启动时无 LANG)
 local function system_is_chinese()
-    local lc = os.getenv("LANG") or os.getenv("LANGUAGE") or ""
-    if lc:lower():match("^zh") then return true end
-    -- Windows 注册表 LocaleName (如 zh-CN)
-    local h = io.popen('reg query "HKCU\\Control Panel\\International" /v LocaleName 2>nul')
-    if h then
-        local out = h:read("*a")
+    -- 1) 区域设置环境变量 (POSIX 优先级 LC_ALL > LC_MESSAGES > LANG, 首个非空者决定; 都没设再看 GNU LANGUAGE)
+    local function env(name)
+        local v = os.getenv(name)
+        if v and v ~= "" then return v end
+        return nil
+    end
+    local lc = env("LC_ALL") or env("LC_MESSAGES") or env("LANG")
+    if lc then
+        if lc:lower():match("^zh") then return true end
+    else
+        local language = env("LANGUAGE")
+        if language and language:lower():match("^zh") then return true end
+    end
+    -- 2) 仅 Windows: 注册表 LocaleName (如 zh-CN; GUI 从桌面启动时通常无 LANG)
+    --    非 Windows 绝不执行: POSIX shell 会把 "2>nul" 当成重定向到当前目录下名为 nul 的文件并创建它,
+    --    而且 Linux/macOS 上本就没有 reg 命令
+    local sep = (type(package) == "table" and type(package.config) == "string"
+                 and package.config:sub(1, 1)) or "/"
+    if sep ~= "\\" or lc then return false end
+    if type(io) ~= "table" or type(io.popen) ~= "function" then return false end
+    local ok, h = pcall(io.popen, 'reg query "HKCU\\Control Panel\\International" /v LocaleName 2>nul')
+    if ok and h then
+        local out = h:read("*a") or ""
         h:close()
         if out:lower():match("zh%-") then return true end
     end
