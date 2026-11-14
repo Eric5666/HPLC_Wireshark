@@ -488,6 +488,60 @@ jobs:
             && timeout 150 ./plugin_ipc_test --host "$GITHUB_WORKSPACE/build/plugin-host/bplc-plugin-host" \
                  --examples "$GITHUB_WORKSPACE/src/plugin/examples")
 
+      - name: Security probes (download size cap / frame credit / IPC frame / plugin market / Lua sandbox)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          # 复用/重建 Qt symlink farm(逐条守卫,已存在则跳过)
+          QT_ROOT="$RUNNER_TEMP/qt-root"
+          mkdir -p "$QT_ROOT"
+          [ -e "$QT_ROOT/bin" ]     || ln -s "$(qmake -query QT_HOST_BINS)"        "$QT_ROOT/bin"
+          [ -e "$QT_ROOT/libexec" ] || ln -s "$(qmake -query QT_INSTALL_LIBEXECS)" "$QT_ROOT/libexec"
+          [ -e "$QT_ROOT/include" ] || ln -s "$(qmake -query QT_INSTALL_HEADERS)"  "$QT_ROOT/include"
+          [ -e "$QT_ROOT/lib" ]     || ln -s "$(qmake -query QT_INSTALL_LIBS)"     "$QT_ROOT/lib"
+          [ -e "$QT_ROOT/plugins" ] || ln -s "$(qmake -query QT_INSTALL_PLUGINS)"  "$QT_ROOT/plugins"
+          export QT_ROOT
+          export LD_LIBRARY_PATH="$QT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
+          # net-size-cap-probe:下载大小上限(CVE-2026-116337 缓解,5 GB Content-Length / 无限 chunked / gzip 解压后计数)
+          # frame-credit-probe:Reader→解析→GUI 在途帧额度(M7 背压,abort 可打断阻塞)
+          # ipc-frame-probe:插件 IPC 帧长 0/0xFFFFFFFC/超 1 MB 一律 Bad(M1,防 GUI 死循环)
+          # market-safety-probe:插件名路径穿越 / zip 条目越界与解包上限 / 市场安装 sha256(H2/H3/H4)
+          # lua-sandbox-probe:Lua 插件受限标准库、路径限制、拒字节码
+          for d in app/net-size-cap-probe io/frame-credit-probe plugin/ipc-frame-probe \
+                   plugin/market-safety-probe plugin/lua-sandbox-probe; do
+            (cd "unit_test/$d" && bash build.sh)
+          done
+
+          # 产物路径随平台不同:Windows(Qt 默认 debug_and_release)在 release/ 子目录,
+          # Linux 单配置直接落在 build/<name>/ 下 ⇒ 逐个试,取第一个可执行的
+          probe_bin() {
+            dir="$1"; bin="$2"
+            B="unit_test/$dir/build/$bin/release/$bin"
+            [ -x "$B" ] || B="unit_test/$dir/build/$bin/$bin"
+            if [ ! -x "$B" ]; then
+              echo "::error::$dir 未找到可执行文件(检查 build.sh 产物路径)" >&2
+              find "unit_test/$dir/build" -maxdepth 3 -type f | head -20 >&2
+              exit 1
+            fi
+            echo "$B"
+          }
+
+          # net_size_cap_probe 的 /endless 用例(无限 chunked 流,探针内 15 s 等待)在 runner 负载高时
+          # 偶发等不到中止信号而误报超时(本地 fullcheck 也见过,单跑稳定通过)。这里外层给足 180 s,
+          # 失败后只重试一次;真回归(上限失效)两次都会失败,门禁仍然变红。
+          B=$(probe_bin app/net-size-cap-probe net_size_cap_probe)
+          if ! timeout 180 "$B"; then
+            echo "::warning::net_size_cap_probe 首次失败(/endless 负载下偶发超时),重试一次"
+            timeout 180 "$B"
+          fi
+
+          B=$(probe_bin io/frame-credit-probe frame_credit_probe);          timeout 120 "$B"
+          B=$(probe_bin plugin/ipc-frame-probe ipc_frame_probe);            timeout 60  "$B"
+          B=$(probe_bin plugin/market-safety-probe market_safety_probe);    timeout 120 "$B"
+          B=$(probe_bin plugin/lua-sandbox-probe lua_sandbox_probe);        timeout 120 "$B"
+
   topology-worker-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
