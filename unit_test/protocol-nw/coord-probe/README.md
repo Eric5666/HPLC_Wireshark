@@ -1,20 +1,19 @@
 # coord-probe（原名 coord_probe）
 
-NW 协调（coord）字段探针。
+NW_2021 协调（COORD）字段 / FCH 版本 / MSDU 版本分布统计探针（研究用，经 `SerialReader` 回放抓包）。
 
-## 状态：构建失败（已记录，未改源码）
-
-探针读 `MpduInfo.coord_option`，但当前仓库
-`src/common/bplcframe.h` 该字段已为 `coord_duration`
-（“协调时隙占用时长 16-bit(ms)”）。属探针与仓库 API 漂移：
-改探针源码可恢复构建，但归集任务不改探针逻辑，故原样记录，
-待另行修复流程处理。
-
-## 原运行形式（恢复构建后）
+## 构建与运行
 
 ```
 ./build.sh
-./build/probe/probe_coord <capture.txt>
+./build/probe_coord/probe_coord <capture.txt|capture.bin>   # 无参打印用法并 exit 2
 ```
 
-输入为外部 capture 文本文件（未入库）。
+## 状态
+
+2026-11 修复构建：`MpduInfo` 已无 `coord_option`——原字节 7 bit2-3 的"选项"字段并入保留位
+（NW_2021 `coord_rsv3` = 字节 7 bit2-7），探针改按 `coord_rsv3` 统计，`coord_joint` 键改为
+`ch<信道>/rsv3_<值>`。
+
+CI（`ci/probe_suite.sh`）用入库抓包 `unit_test/ci/roundtrip/roundtrip_test.bin` 运行，断言
+`total=2457 accepted=2429`、`COORD total=1069 rf=0`。

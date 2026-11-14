@@ -39,6 +39,7 @@ static void dump_msdu(const QVector<MsduFieldNode>& nodes, int depth) {
 
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
+    if (argc < 2) { std::printf("usage: %s <nw_frame.bin>\n", argv[0]); return 2; }
     QFile file(QString::fromLocal8Bit(argv[1]));
     if (!file.open(QIODevice::ReadOnly)) { std::printf("cannot open\n"); return 1; }
     QByteArray buf = file.readAll();
@@ -63,9 +64,11 @@ int main(int argc, char* argv[]) {
                 m.beacon_timestamp, m.beacon_line, m.beacon_type, m.beacon_netsn,
                 (unsigned long long)m.beacon_cco_mac, m.beacon_period_cnt,
                 m.beacon_rf_channel, m.beacon_rf_option, m.beacon_item_num, m.beacon_rsv);
-    std::printf("  coord: dur=%d shift=%d nbr_nid=0x%x rf_ch=%d opt=%d band_end=%d end_off=%d start_off=%d\n",
+    // MpduInfo 已无 coord_option:字节 7 bit2-3 归入保留位(NW_2021 coord_rsv3 = bit2-7),按 rsv0..3 打印
+    std::printf("  coord: dur=%d shift=%d nbr_nid=0x%x rf_ch=%d rsv0=%d rsv1=%d rsv2=%d rsv3=%d band_end=%d end_off=%d start_off=%d\n",
                 m.coord_duration, m.coord_shift, m.coord_neighbour_nid, m.coord_rf_channel,
-                m.coord_option, (int)m.coord_band_end_flag, m.coord_band_end_offset, m.coord_band_start_offset);
+                m.coord_rsv0, m.coord_rsv1, m.coord_rsv2, m.coord_rsv3,
+                (int)m.coord_band_end_flag, m.coord_band_end_offset, m.coord_band_start_offset);
     std::printf("payload_for_log (MPDU) bytes: %d\n", (int)r.payload_for_log.size());
     std::printf("msdu: present=%d summary=%s\n", (int)r.msdu.present, qPrintable(r.msdu.summary));
     if (r.msdu.present) dump_msdu(r.msdu.tree, 1);

@@ -1,7 +1,8 @@
 // COORD / version distribution probe (research only, 2026-10-17)
 // Counts, on a NW capture, using the fix/nw-mme-spec-fields parser (3851fd5):
 //  - FCH frame_type and FCH version distribution (all accepted frames)
-//  - COORD frames: coord_rf_channel (byte3), coord_option (byte7 bit2-3),
+//  - COORD frames: coord_rf_channel (byte3), coord_rsv3 (byte7; NW_2021 bit2-7 — the former
+//    coord_option bit2-3 was folded into this reserved field, MpduInfo no longer has coord_option),
 //    neighbouring reserved fields (rsv1 byte4-5 10b, rsv2, rsv3), src TEI, is_rf
 //  - MSDU version (msdu_body byte0 bit1-2) distribution for reassembled MSDUs,
 //    with the decoded summary for non-1 versions
@@ -31,6 +32,10 @@ int main(int argc, char** argv) {
     qRegisterMetaType<BplcFrame>("BplcFrame");
     qRegisterMetaType<ReaderConfig>("ReaderConfig");
 
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: %s <capture.txt|capture.bin>\n", argv[0]);
+        return 2;
+    }
     const QString path = QString::fromLocal8Bit(argv[1]);
     SerialReader reader;
     NW_2021_Parser parser;
@@ -40,7 +45,7 @@ int main(int argc, char** argv) {
     QMap<int,int> ftypeCount, fchVerCount;
     QMap<int,int> msduVerCount;
     int coordTotal = 0;
-    QMap<int,int> chanCount, optCount, rsv1Count, rsv2Count, rsv3Count, coordSrcCount;
+    QMap<int,int> chanCount, rsv1Count, rsv2Count, rsv3Count, coordSrcCount;
     QMap<QString,int> coordJoint;
     int coordRf = 0;
     struct VFrame { int ver; QString summary; quint16 mme; int ftype; int src; int dst; quint16 mtype; };
@@ -57,12 +62,11 @@ int main(int argc, char** argv) {
             ++coordTotal;
             if (r.meta.is_rf) ++coordRf;
             chanCount[r.mpdu.coord_rf_channel]++;
-            optCount[r.mpdu.coord_option]++;
             rsv1Count[r.mpdu.coord_rsv1]++;
             rsv2Count[r.mpdu.coord_rsv2]++;
             rsv3Count[r.mpdu.coord_rsv3]++;
             coordSrcCount[r.mpdu.src_tei]++;
-            coordJoint[QStringLiteral("ch%1/opt%2").arg(r.mpdu.coord_rf_channel).arg(r.mpdu.coord_option)]++;
+            coordJoint[QStringLiteral("ch%1/rsv3_%2").arg(r.mpdu.coord_rf_channel).arg(r.mpdu.coord_rsv3)]++;
         }
         if (r.msdu.present && !r.msdu_body.isEmpty()) {
             int v = (int)get_bits_local(r.msdu_body, 0, 1, 2);
@@ -96,10 +100,9 @@ int main(int argc, char** argv) {
         printf("\n");
     };
     dump("coord_channel", chanCount);
-    dump("coord_option", optCount);
     dump("coord_rsv1(byte4-5,10b)", rsv1Count);
     dump("coord_rsv2(byte7bit0)", rsv2Count);
-    dump("coord_rsv3(byte7bit4-7)", rsv3Count);
+    dump("coord_rsv3(byte7 bit2-7)", rsv3Count);
     dump("coord_src_tei", coordSrcCount);
     printf("coord_joint:");
     for (auto it = coordJoint.begin(); it != coordJoint.end(); ++it) printf(" %s=%d", qPrintable(it.key()), it.value());
