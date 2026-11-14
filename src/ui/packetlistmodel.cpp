@@ -5,6 +5,7 @@
 #include "mac_format.h"  // 48-bit MAC 格式化唯一实现(src/common)
 #include "common/msdu_crc_state.h"   // MSDU CRC32 三态唯一实现(与 parser 共用)
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <QColor>
 #include <QDataStream>
@@ -1014,10 +1015,43 @@ void PacketListModel::on_block_written(int session, int idx, bool ok) {
 }
 
 void PacketListModel::append_packets(QVector<PacketEntry> entries) {
+    static_assert(kMaxEntries <= qint64(INT_MAX), "global row index is int");
     if (entries.isEmpty()) return;
     if (m_filtering) {                        // 过滤中:暂存,过滤完成后再补 append
-        m_deferred += entries;
+        if (qint64(m_deferred.size()) + entries.size() <= kMaxDeferred) {
+            m_deferred.reserve(m_deferred.size() + entries.size());
+            for (PacketEntry& e : entries) m_deferred.append(std::move(e));
+            return;
+        }
+        // M5:过滤期间到达的条目超过暂存上限(长过滤 + 高速实时流)。作废本次过滤
+        // (换代 ⇒ 在跑 watcher 的结果被丢弃),暂存 + 本批按正常路径落入模型(不丢帧,
+        // 新条目按当前过滤表达式判可见),再对全量数据重新过滤,完成时 reset 可见集。
+        ++m_filter_gen;
+        m_filtering = false;
+        ++m_filter_restarts;
+        QVector<PacketEntry> all;
+        all.swap(m_deferred);
+        all.reserve(all.size() + entries.size());
+        for (PacketEntry& e : entries) all.append(std::move(e));
+        entries.clear();
+        append_packets(std::move(all));
+        start_filter();
         return;
+    }
+    // L2:全局行号是 int。达到条目上限后丢弃新条目并明确报出(信号 + 告警),
+    // 不让 int(m_total) 回绕成负数把可见集/定位变成垃圾
+    const qint64 room = m_entry_limit - m_total;
+    if (room < entries.size()) {
+        const qint64 keep = qMax<qint64>(room, 0);
+        const bool first = m_dropped == 0;
+        m_dropped += entries.size() - keep;
+        entries.resize(qsizetype(keep));
+        if (first) {
+            qWarning("PacketListModel: entry limit %lld reached, dropping new packets",
+                     static_cast<long long>(m_entry_limit));
+            emit entry_limit_reached(m_entry_limit);
+        }
+        if (entries.isEmpty()) return;
     }
     QVector<int> new_visible;
     new_visible.reserve(entries.size());
@@ -1026,7 +1060,7 @@ void PacketListModel::append_packets(QVector<PacketEntry> entries) {
     for (PacketEntry& e : entries) {
         if (e.search_text.isEmpty())          // 兜底:非 make_entry 路径(测试等)补生成
             e.search_text = make_search_text(e);
-        const int g = int(m_total);
+        const int g = int(m_total);           // m_total < m_entry_limit ≤ kMaxEntries < INT_MAX
         ++m_total;
         m_hot.append(std::move(e));           // move 进热缓存,避免深拷贝
         mac_mapping_changed |= update_tei_mac(m_hot.last());
@@ -1048,6 +1082,8 @@ void PacketListModel::clear_all() {
     ++m_filter_gen;          // 作废在跑的异步过滤(结果作废,不再回填)
     m_filtering = false;
     m_deferred.clear();
+    m_filter_restarts = 0;
+    m_dropped = 0;
     beginResetModel();
     m_hot.clear();
     m_block_cache.clear();
@@ -1159,14 +1195,19 @@ void PacketListModel::set_display_filter(const QString& expr) {
     if (m_filter == expr) return;
     m_filter = expr;
     m_prepared = prepare_filter(expr, m_mac_tei);  // 预处理与表达式同步重建
+    start_filter();
+}
+
+void PacketListModel::start_filter() {
+    const QString expr = m_filter;
     const int gen = ++m_filter_gen;          // 换代,丢弃在跑的旧过滤结果
     if (expr.isEmpty()) {                    // 清空过滤:恢复全可见(同步)
         m_filtering = false;                 // 复位过滤中状态(在跑旧过滤结果已由 gen 作废)
         beginResetModel();
         m_visible.clear();
-        const qint64 total = m_total;
-        m_visible.reserve(int(qMin<qint64>(total, 1000000)));
-        for (int g = 0; g < int(total); ++g) m_visible.append(g);
+        const int total = int(m_total);      // L2:m_total ≤ kMaxEntries < INT_MAX,不再窄化回绕
+        m_visible.reserve(qMin(total, 1000000));
+        for (int g = 0; g < total; ++g) m_visible.append(g);
         endResetModel();
         if (!m_deferred.isEmpty()) {         // 过滤期间暂存的 append 补进来(空过滤全可见)
             QVector<PacketEntry> def;

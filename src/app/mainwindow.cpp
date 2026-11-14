@@ -238,6 +238,11 @@ void MainWindow::build_ui() {
     m_splitter_main = new QSplitter(Qt::Vertical, this);
 
     m_model = new PacketListModel(this);
+    // L2:条目总数达到上限后新帧被丢弃 —— 状态栏明确提示,不静默
+    connect(m_model, &PacketListModel::entry_limit_reached, this, [this](qint64 limit) {
+        const QString msg = trl::L("包列表已达上限 %1 条,新帧不再加入(请清空或另存后重新捕获)").arg(limit);
+        if (m_status_left) { m_status_left->setText(msg); m_status_left->setToolTip(msg); }
+    });
     m_table_packets = new QTableView(m_splitter_main);
     m_table_packets->setModel(m_model);
     m_table_packets->setAlternatingRowColors(true);
@@ -972,6 +977,8 @@ struct I18nRegMainWindow {
         trl::register_en("复制(含 0x 前缀)", "Copy (with 0x prefix)");
         trl::register_en("复制(纯 hex)", "Copy (plain hex)");
         trl::register_en("回放进度: %1%", "Replay progress: %1%");
+        trl::register_en("包列表已达上限 %1 条,新帧不再加入(请清空或另存后重新捕获)",
+                         "Packet list reached its limit of %1 entries; new frames are no longer added (clear or save, then capture again)");
         trl::register_en("立即更新", "Update Now");
         trl::register_en("发现新版本,点击下载安装", "New version available, click to download");
         trl::register_en("发现新版本,请点击右上角\"立即更新\"下载",

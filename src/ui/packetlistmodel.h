@@ -64,6 +64,14 @@ public:
     static constexpr int kBlockSize = 1000;
     /// @brief 盘块 LRU 缓存上限(滚动预取窗口,可调;块数 × kBlockSize = 预取内存)
     static constexpr int kMaxCacheBlocks = 4;
+    /// @brief 异步过滤期间暂存 append 的条目上限(M5)
+    /// @details 超限:作废本次过滤(换代),暂存 + 本批走正常 append(不丢帧),
+    ///          再对全量数据重新过滤
+    static constexpr int kMaxDeferred = 20000;
+    /// @brief 模型条目总数上限(L2)
+    /// @details 全局行号以 int 存于 m_visible / locate(int),预留一个块余量;
+    ///          达到上限后新条目被丢弃并发 entry_limit_reached(不静默变空)
+    static constexpr qint64 kMaxEntries = qint64(2147483647) - kBlockSize;
 
     /// @brief 一个盘块的内存副本(落盘未完成或失败时代替文件;只读共享)
     using BlockMem = QSharedPointer<const QVector<PacketEntry>>;
@@ -79,6 +87,15 @@ public:
 
     /// @brief 总条目数(含已落盘历史)
     qint64 total_count() const { return m_total; }
+
+    /// @brief 因达到条目上限而丢弃的条目数(本会话,clear_all 清零)
+    qint64 dropped_count() const { return m_dropped; }
+    /// @brief 当前条目上限(默认 kMaxEntries)
+    qint64 entry_limit() const { return m_entry_limit; }
+    /// @brief 调小条目上限(测试/受限环境用);取值截到 [0, kMaxEntries]
+    void set_entry_limit(qint64 n) { m_entry_limit = qBound<qint64>(0, n, kMaxEntries); }
+    /// @brief 因 m_deferred 超限而作废并重启过滤的次数(本会话)
+    int filter_restart_count() const { return m_filter_restarts; }
 
     /// @brief 是否正在异步过滤(测试等待用)
     bool filtering() const { return m_filtering; }
@@ -120,8 +137,12 @@ public slots:
 
 signals:
     void packet_activated(const PacketEntry& entry);
+    /// @brief 条目总数达到上限,其后条目被丢弃(每会话首次发一次;dropped_count() 给累计数)
+    void entry_limit_reached(qint64 limit);
 
 private:
+    /// @brief 按 m_filter 重建可见集(空=同步全可见;非空=换代 + 异步过滤)
+    void start_filter();
     /// @brief 全局行号 g → 条目引用(盘块或热区)
     /// @warning 盘块路径的引用来自 BlockReader 单槽缓存(见 entry_ref):
     ///          下一次 locate/data 调用即可能失效,只能瞬时消费(立即读
@@ -156,7 +177,10 @@ private:
     PacketPreparedFilter   m_prepared;   ///< m_filter 的预处理形式(匹配零分配)
     bool                   m_filtering = false; ///< 过滤进行中(异步;期间 append 暂存到 m_deferred)
     int                    m_filter_gen = 0; ///< 过滤代计数,丢弃过期异步结果
-    QVector<PacketEntry>   m_deferred;    ///< 过滤期间暂存的 append 条目
+    QVector<PacketEntry>   m_deferred;    ///< 过滤期间暂存的 append 条目(≤ kMaxDeferred)
+    int                    m_filter_restarts = 0; ///< m_deferred 超限导致的过滤重启次数
+    qint64                 m_entry_limit = kMaxEntries; ///< 条目总数上限
+    qint64                 m_dropped = 0;  ///< 达到上限后丢弃的条目数
     QHash<quint32, QHash<quint16, quint64>> m_tei_mac; ///< TEI→MAC 映射表(NID → TEI → MAC48)
     QHash<quint32, QHash<quint64, quint16>> m_mac_tei; ///< MAC→TEI 反向索引(NID → MAC48 → TEI;与 m_tei_mac 同步维护,供 lookup_tei_by_mac O(1) 反查)
     QTemporaryDir          m_paging_dir;  ///< 盘块临时目录(进程结束自动清理)

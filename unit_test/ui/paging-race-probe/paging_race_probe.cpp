@@ -8,6 +8,7 @@
 #include <QSemaphore>
 #include <QThread>
 #include <QThreadPool>
+#include <climits>
 #include <cstdio>
 
 static int g_fail = 0;
@@ -74,6 +75,33 @@ static void drain(QApplication& app, PacketListModel& m) {
         app.processEvents();
     }
     app.processEvents();
+}
+
+// L2:模板延迟实例化——旧代码没有 set_entry_limit 时退到"缺失"分支,源码仍可在旧提交上编译
+template <typename M>
+static auto l2_case(QApplication& app, M& m4, int) -> decltype(m4.set_entry_limit(1), void()) {
+    int signals_seen = 0;
+    qint64 sig_limit = -1;
+    QObject::connect(&m4, &M::entry_limit_reached, [&](qint64 l) { ++signals_seen; sig_limit = l; });
+    m4.set_entry_limit(2500);
+    for (int i = 0; i < 6; ++i) m4.append_packets(make_entries(1 + i * 500, 500));
+    check(m4.total_count() == 2500 && m4.rowCount() == 2500 && m4.dropped_count() == 500,
+          "entry limit: 3000 appended, 2500 kept, 500 dropped (counted)");
+    check(signals_seen == 1 && sig_limit == 2500, "entry limit: entry_limit_reached emitted once");
+    check(row_index(m4, 0) == 1 && row_index(m4, 2499) == 2500, "entry limit: kept rows intact (not blank)");
+    m4.set_display_filter(QStringLiteral("beacon"));
+    drain(app, m4);
+    check(m4.rowCount() == 2500, "entry limit: async filter over capped model keeps 2500 rows");
+    m4.set_display_filter(QString());
+    check(m4.rowCount() == 2500, "entry limit: unfilter keeps 2500 rows");
+    m4.clear_all();
+    m4.append_packets(make_entries(1, 10));
+    check(m4.rowCount() == 10 && m4.dropped_count() == 0, "entry limit: clear_all resets counters");
+    check(M::kMaxEntries < qint64(INT_MAX), "entry limit: default cap below INT_MAX");
+}
+template <typename M>
+static void l2_case(QApplication&, M&, long) {
+    check(false, "entry limit API present (L2: int(m_total) narrowing unguarded)");
 }
 
 int main(int argc, char** argv) {
@@ -157,6 +185,37 @@ int main(int argc, char** argv) {
         drain(app, m2);
         check(violations == 0 && m2.rowCount() == 1800 && known == 1800,
               "filter completion resets before inserting deferred rows");
+    }
+
+    // ⑦ M5:过滤卡住(线程池占满)期间持续 append 25000 条:暂存不得无上限增长。
+    //    修复后超过 kMaxDeferred(20000)即作废本次过滤、暂存转正常 append(total 立即增长)
+    //    并重新过滤;放行后全部条目可见、顺序正确、不丢帧
+    {
+        PacketListModel m3;
+        m3.append_packets(make_entries(1, 1200));
+        gate.block();
+        m3.set_display_filter(QStringLiteral("beacon"));   // 异步过滤排队,不会完成
+        for (int i = 0; i < 50; ++i) m3.append_packets(make_entries(1201 + i * 500, 500));
+        const qint64 total_during = m3.total_count();
+        std::printf("  stalled filter: total_count=%lld after 25000 appends (old: deferred unbounded, total stays 1200)\n",
+                    static_cast<long long>(total_during));
+        check(total_during >= 1200 + 25000 - 20000, "deferred appends bounded while filter is stalled (<= 20000 held back)");
+        gate.release();
+        drain(app, m3);
+        bool order = m3.rowCount() == 26200 && m3.total_count() == 26200 && !m3.filtering();
+        for (int r : {0, 1199, 1200, 9999, 20000, 26199})
+            if (order && row_index(m3, r) != r + 1) order = false;
+        check(order, "after stalled filter: all 26200 rows visible in order (no loss)");
+        m3.set_display_filter(QStringLiteral("coord"));
+        drain(app, m3);
+        check(m3.rowCount() == 0 && m3.total_count() == 26200, "re-filter after overflow restart still correct");
+    }
+
+    // ⑧ L2:条目总数上限。调小上限模拟 int 行号边界:超出部分被丢弃并发信号,
+    //    已有行不变空;清空后计数复位(旧代码无上限接口 ⇒ 判失败)
+    {
+        PacketListModel m4;
+        l2_case(app, m4, 0);
     }
 
     std::printf("paging_race_probe: %s (%d failures)\n", g_fail ? "FAIL" : "OK", g_fail);
