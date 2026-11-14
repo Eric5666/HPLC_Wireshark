@@ -238,6 +238,14 @@ p_ui_paging_race_probe() {   # PacketListModel 盘块换页竞态(M2/M3/M4)
     (cd "$d" && run paging-race 180 ./paging_race_probe) && OUT="$LOGD/paging-race.out" \
         && has "paging_race_probe: OK (0 failures)" && lacks "FAIL "
 }
+p_app_frame_dispatcher_lifetime_probe() {   # FrameDispatcher 重建生命周期(77b89dc 释放后使用回归),ASan+UBSan 构建
+    build app/frame-dispatcher-lifetime-probe || return 1
+    local d; d=$(rundir frame-dispatcher-lifetime)
+    cp "$UT/app/frame-dispatcher-lifetime-probe/build/frame_dispatcher_lifetime_probe/frame_dispatcher_lifetime_probe" "$d/" || return 1
+    (cd "$d" && ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 run frame-dispatcher-lifetime 180 ./frame_dispatcher_lifetime_probe) \
+        && OUT="$LOGD/frame-dispatcher-lifetime.out" \
+        && has "frame_dispatcher_lifetime_probe: OK" && lacks "ERROR: AddressSanitizer" && lacks "runtime error:"
+}
 p_plugin_plugin_ipc_thread_probe() {   # PluginManager 跨线程 IPC + 异步图形(真实 host 子进程)
     local host; host=$(plugin_host) || { echo "  FAIL: bplc-plugin-host 构建失败"; return 1; }
     build plugin/plugin-ipc-thread-probe || return 1
