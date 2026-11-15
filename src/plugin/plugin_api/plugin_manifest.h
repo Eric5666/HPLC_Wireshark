@@ -20,10 +20,12 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
+#include <QSysInfo>
 #include <QVariant>
 #include <cstdint>
 
@@ -100,6 +102,32 @@ struct PluginManifest {
     QString error;         ///< valid=false 时的原因
 };
 
+/// @brief 主程序运行平台标识 "<os>-<arch>"(市场 feed platforms / plugin.json 按平台 abi 的键)
+/// @details os = windows | macos | linux;arch 取**编译目标**架构(不是宿主 CPU):
+///   x86_64 | arm64,其它架构回落 QSysInfo::buildCpuArchitecture()(如 i386 / riscv64)。
+///   按编译目标取值:Windows on ARM 上跑 x64 仿真版时仍需 x86_64 插件。
+///   取值如 windows-x86_64 / windows-arm64 / linux-x86_64 / linux-arm64 /
+///   macos-x86_64 / macos-arm64。
+inline QString plugin_host_platform() {
+    const QString os =
+#if defined(Q_OS_WIN)
+        QStringLiteral("windows");
+#elif defined(Q_OS_MACOS)
+        QStringLiteral("macos");
+#else
+        QStringLiteral("linux");
+#endif
+    const QString arch =
+#if defined(Q_PROCESSOR_X86_64)
+        QStringLiteral("x86_64");
+#elif defined(Q_PROCESSOR_ARM_64)
+        QStringLiteral("arm64");
+#else
+        QSysInfo::buildCpuArchitecture();
+#endif
+    return os + QLatin1Char('-') + arch;
+}
+
 /// @brief 主程序 native 插件 ABI 标识(编译器 + Qt 大版本 + 架构)
 /// @details native 插件是编译产物,其二进制 ABI 由「Qt 大版本 + 编译器 + 架构」决定。
 ///   Qt 6.x 系列保证二进制兼容(6.10 与 6.11 可互载),故只用大版本号;5↔6 或
@@ -167,6 +195,57 @@ inline QString plugin_resolve_native_entry(const QString& plugin_dir,
 #endif
 }
 
+/// @brief 插件入口路径解析 + 目录包含检查(三种 runtime 共用)
+/// @details 先做词法检查(拒绝空、绝对路径、盘符/':'、'\\'、NUL、'..' 段),
+///          再按 canonical 路径(解析符号链接)确认入口是插件目录内的普通文件。
+///          任何一步不通过返回空串;调用方据此拒绝加载。
+inline QString plugin_contained_entry_path(const QString& plugin_dir,
+                                           const QString& runtime,
+                                           const QString& entry) {
+    const QString e = entry.trimmed();
+    if (e.isEmpty() || e.contains(QChar(0)) || e.contains(QLatin1Char('\\')) ||
+        e.contains(QLatin1Char(':')) || e.startsWith(QLatin1Char('/')) ||
+        QDir::isAbsolutePath(e))
+        return {};
+    for (const QString& part : e.split(QLatin1Char('/')))
+        if (part == QStringLiteral("..")) return {};
+    const QString candidate = (runtime == QStringLiteral("native"))
+                                  ? plugin_resolve_native_entry(plugin_dir, e)
+                                  : QDir(plugin_dir).filePath(e);
+    const QString dir_canon = QFileInfo(plugin_dir).canonicalFilePath();
+    const QFileInfo fi(candidate);
+    const QString file_canon = fi.canonicalFilePath();   // 不存在时为空
+    if (dir_canon.isEmpty() || file_canon.isEmpty() || !fi.isFile()) return {};
+#ifdef Q_OS_WIN
+    const Qt::CaseSensitivity cs = Qt::CaseInsensitive;
+#else
+    const Qt::CaseSensitivity cs = Qt::CaseSensitive;
+#endif
+    const QString prefix = dir_canon.endsWith(QLatin1Char('/')) ? dir_canon
+                                                                : dir_canon + QLatin1Char('/');
+    if (!file_canon.startsWith(prefix, cs)) return {};
+    return file_canon;
+}
+
+/// @brief 插件名(= 安装目录名)白名单:[A-Za-z0-9][A-Za-z0-9._-]{0,63}
+/// @details 名字会被拼成安装目录并在覆盖安装/卸载时整目录删除,
+///          必须是单级目录名:不含 '/' '\\' ':',不能是 "." / ".."(首字符须为字母数字)。
+inline bool plugin_name_is_safe(const QString& name) {
+    if (name.isEmpty() || name.size() > 64) return false;
+    for (int i = 0; i < name.size(); ++i) {
+        const QChar c = name.at(i);
+        const bool alnum = (c >= QLatin1Char('a') && c <= QLatin1Char('z')) ||
+                           (c >= QLatin1Char('A') && c <= QLatin1Char('Z')) ||
+                           (c >= QLatin1Char('0') && c <= QLatin1Char('9'));
+        if (alnum) continue;
+        if (i > 0 && (c == QLatin1Char('.') || c == QLatin1Char('_') ||
+                      c == QLatin1Char('-')))
+            continue;
+        return false;
+    }
+    return true;
+}
+
 /// @brief 从插件目录读取并校验 plugin.json
 inline PluginManifest read_plugin_manifest(const QString& plugin_dir) {
     PluginManifest m;
@@ -189,19 +268,11 @@ inline PluginManifest read_plugin_manifest(const QString& plugin_dir) {
     m.runtime      = o.value(QStringLiteral("runtime")).toString();
     // abi 支持两种写法:字符串(单平台包,向后兼容)或按平台的对象
     // {"linux-x86_64": "qt6.4.2-gcc-x64", "windows-x86_64": "qt6.10.1-mingw-x64"};
-    // 解析为当前平台的值,存入 m.abi。
+    // 按 plugin_host_platform()(如 linux-arm64)解析为当前平台的值,存入 m.abi。
     {
         const QJsonValue abi_v = o.value(QStringLiteral("abi"));
         if (abi_v.isObject()) {
-            const char* plat =
-#if defined(Q_OS_WIN)
-                "windows-x86_64";
-#elif defined(Q_OS_MACOS)
-                "macos-x86_64";
-#else
-                "linux-x86_64";
-#endif
-            m.abi = abi_v.toObject().value(QString::fromLatin1(plat)).toString();
+            m.abi = abi_v.toObject().value(plugin_host_platform()).toString();
         } else {
             m.abi = abi_v.toString();
         }
@@ -247,17 +318,16 @@ inline PluginManifest read_plugin_manifest(const QString& plugin_dir) {
     }
 
     if (m.name.isEmpty())         { m.error = QStringLiteral("missing 'name'"); return m; }
+    if (!plugin_name_is_safe(m.name)) { m.error = QStringLiteral("invalid 'name' (allowed: [A-Za-z0-9][A-Za-z0-9._-], max 64)"); return m; }
     if (m.runtime.isEmpty())      { m.error = QStringLiteral("missing 'runtime'"); return m; }
     if (m.entry.isEmpty())        { m.error = QStringLiteral("missing 'entry'"); return m; }
     if (m.api_version <= 0)       { m.error = QStringLiteral("missing/invalid 'api_version'"); return m; }
     if (m.protocol_id.isEmpty())  { m.error = QStringLiteral("missing 'protocol_id'"); return m; }
-    // native 插件允许 entry 为裸库名(按平台解析);脚本插件 entry 必须为确切文件名
-    const QString entry_path =
-        (m.runtime == QStringLiteral("native"))
-            ? plugin_resolve_native_entry(plugin_dir, m.entry)
-            : QDir(plugin_dir).filePath(m.entry);
-    if (!QFile::exists(entry_path)) {
-        m.error = QStringLiteral("entry file not found: %1").arg(m.entry);
+    // native 插件允许 entry 为裸库名(按平台解析);脚本插件 entry 必须为确切文件名。
+    // 入口必须是插件目录内的文件(canonical 包含检查,拒绝 ../、绝对路径、越界符号链接)
+    const QString entry_path = plugin_contained_entry_path(plugin_dir, m.runtime, m.entry);
+    if (entry_path.isEmpty()) {
+        m.error = QStringLiteral("entry file not found or outside plugin dir: %1").arg(m.entry);
         return m;
     }
     m.valid = true;

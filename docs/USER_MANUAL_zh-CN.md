@@ -425,6 +425,8 @@ db_path=
 }
 ```
 
+程序内置下载器直接下载并打开安装包，不做 SHA-256 校验（旧清单里的 `sha256` 字段会被忽略）。如需自行核对完整性，可在 GitHub Release 下载页取与安装包同列的 `SHA256SUMS.txt`，执行 `sha256sum -c SHA256SUMS.txt --ignore-missing`（Windows 可用 `certutil -hashfile <安装包> SHA256` 对照）。
+
 更新说明字符串支持 `<br/>`。
 
 ### 9.1 更新下载加速（中国网络自动走代理）

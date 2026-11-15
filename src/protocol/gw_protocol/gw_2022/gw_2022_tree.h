@@ -2,8 +2,8 @@
 /// @brief 国网 GW_2022 协议字段树构建器(IProtocolTreeBuilder 实现)
 /// @details 国网双模标准 2022(202203)的 MPDU Base + 各帧型 FCH 字段树。
 ///          字段坐标/语义与 GW_2022_Parser 解析结果(MpduInfo)严格一致。
-#ifndef GW_2022_TREE_H
-#define GW_2022_TREE_H
+#ifndef BPLC_GW_2022_TREE_H
+#define BPLC_GW_2022_TREE_H
 
 #include "protocol_tree_builder.h"
 
@@ -40,4 +40,4 @@ public:
     void build(QTreeWidgetItem* root, const PacketEntry& e) override;
 };
 
-#endif // GW_2022_TREE_H
+#endif  // BPLC_GW_2022_TREE_H

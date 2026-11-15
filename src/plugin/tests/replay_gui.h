@@ -1,7 +1,7 @@
 /// @file replay_gui.h
 /// @brief 真实帧回灌 GUI 工具:把 0x3C 抓包 bin 回灌进 4 个示例插件并可视化结果
-#ifndef REPLAY_GUI_H
-#define REPLAY_GUI_H
+#ifndef BPLC_REPLAY_GUI_H
+#define BPLC_REPLAY_GUI_H
 
 #include <QMainWindow>
 #include <QThread>
@@ -105,4 +105,4 @@ QList<QByteArray> split_wire_frames(const QByteArray& data, int max_n);
 /// @brief 注册本工具的英文词典(供 main / 测试驱动调用)
 void replay_gui_register_en();
 
-#endif // REPLAY_GUI_H
+#endif  // BPLC_REPLAY_GUI_H

@@ -12,8 +12,8 @@
 ///          低字节在前(crc.h crc24_lsb)。
 /// @note  header-only(同 crc.h/fieldtools.h 惯例:协议无关小工具免 .cpp,
 ///        手工枚举源文件的测试 .pro 无需逐一追加)。
-#ifndef PROTOCOL_PB_ASSEMBLER_H
-#define PROTOCOL_PB_ASSEMBLER_H
+#ifndef BPLC_PB_ASSEMBLER_H
+#define BPLC_PB_ASSEMBLER_H
 
 #include <QByteArray>
 #include <QVector>
@@ -403,4 +403,4 @@ inline bool body_parseable_with_good_msdu_span(const AssembleResult& r,
 
 }  // namespace pb_asm
 
-#endif  // PROTOCOL_PB_ASSEMBLER_H
+#endif  // BPLC_PB_ASSEMBLER_H

@@ -1,5 +1,5 @@
-#ifndef TOPO_INPUT_H
-#define TOPO_INPUT_H
+#ifndef BPLC_TOPO_INPUT_H
+#define BPLC_TOPO_INPUT_H
 
 #include "topo_worker.h"
 #include "bplcframe.h"
@@ -8,4 +8,4 @@
 /// This keeps protocol-field interpretation out of MainWindow and makes it testable.
 TopoFrameInput make_topo_frame_input(const PacketEntry& entry);
 
-#endif // TOPO_INPUT_H
+#endif  // BPLC_TOPO_INPUT_H

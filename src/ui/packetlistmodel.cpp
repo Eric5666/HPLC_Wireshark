@@ -5,12 +5,15 @@
 #include "mac_format.h"  // 48-bit MAC 格式化唯一实现(src/common)
 #include "common/msdu_crc_state.h"   // MSDU CRC32 三态唯一实现(与 parser 共用)
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <QColor>
 #include <QDataStream>
 #include <QDir>
 #include "i18n.h"
 #include <QFile>
+#include <QMutex>
+#include <QPointer>
 #include <QtConcurrent>
 #include <QFutureWatcher>
 #include <QThreadPool>
@@ -176,8 +179,26 @@ QColor bid_color(quint8 bid) {
 }
 }  // namespace
 
+/// @brief 后台落盘任务 → 模型 的完成通知通道
+/// @details 写任务在线程池运行,可能晚于模型析构。任务持有 shared_ptr,在锁内
+///          检查模型是否还在,并在锁内把回调排队到 GUI 线程;模型析构时在锁内
+///          置空 model,之后到达的任务不再投递。已排队未执行的回调随接收者
+///          析构被 Qt 丢弃。
+struct PacketBlockSink {
+    QMutex lock;
+    PacketListModel* model = nullptr;
+};
+
 PacketListModel::PacketListModel(QObject* parent)
-    : QAbstractTableModel(parent), m_block_count(0), m_total(0) {}
+    : QAbstractTableModel(parent), m_block_count(0), m_total(0),
+      m_sink(std::make_shared<PacketBlockSink>()) {
+    m_sink->model = this;
+}
+
+PacketListModel::~PacketListModel() {
+    QMutexLocker lk(&m_sink->lock);
+    m_sink->model = nullptr;
+}
 
 int PacketListModel::rowCount(const QModelIndex& parent) const {
     if (parent.isValid()) return 0;
@@ -835,9 +856,25 @@ QVector<int> run_filter(const PacketListModel::ExportSnapshot& snap,
     const PacketPreparedFilter pf = prepare_filter(filter, mac_tei);
     QVector<int> result;
     int g = 0;
-    for (const QString& bp : snap.block_paths) {
+    auto match_entry = [&pf](const PacketEntry& e) {
+        QVector<quint16> o_src, o_dst;
+        entry_orig_teis(e, o_src, o_dst);
+        return prepared_match(pf, e.mpdu.frame_type, e.mpdu.src_tei,
+                              e.mpdu.dst_tei, e.msdu.msdu_src_tei,
+                              e.msdu.msdu_dst_tei, o_src, o_dst, e.search_text);
+    };
+    for (int b = 0; b < snap.block_paths.size(); ++b) {
+        // 落盘未完成的块:用快照里的内存副本,不读半截文件
+        const PacketListModel::BlockMem mem = snap.block_mem.value(b);
+        if (mem) {
+            for (const PacketEntry& e : *mem) {
+                if (match_entry(e)) result.append(g);
+                ++g;
+            }
+            continue;
+        }
         pser::BlockReader reader;
-        if (!reader.open(bp)) {
+        if (!reader.open(snap.block_paths[b])) {
             g += PacketListModel::kBlockSize;
             continue;
         }
@@ -852,12 +889,7 @@ QVector<int> run_filter(const PacketListModel::ExportSnapshot& snap,
         g += n;
     }
     for (const PacketEntry& e : snap.hot) {
-        QVector<quint16> o_src, o_dst;
-        entry_orig_teis(e, o_src, o_dst);
-        if (prepared_match(pf, e.mpdu.frame_type, e.mpdu.src_tei,
-                            e.mpdu.dst_tei, e.msdu.msdu_src_tei,
-                            e.msdu.msdu_dst_tei, o_src, o_dst, e.search_text))
-            result.append(g);
+        if (match_entry(e)) result.append(g);
         ++g;
     }
     return result;
@@ -873,7 +905,9 @@ bool PacketListModel::passes_filter(const PacketEntry& e) const {
 }
 
 QString PacketListModel::block_path(int idx) const {
-    return m_paging_dir.filePath(QStringLiteral("blk_%1.bin").arg(idx));
+    // 文件名带会话号:clear_all 之后新会话的块不会与旧会话迟到的后台写撞名
+    return m_paging_dir.filePath(
+        QStringLiteral("blk_%1_%2.bin").arg(m_session).arg(idx));
 }
 
 void PacketListModel::touch_lru(int idx) const {
@@ -883,6 +917,8 @@ void PacketListModel::touch_lru(int idx) const {
 
 bool PacketListModel::load_block(int idx) const {
     if (m_block_cache.contains(idx)) { touch_lru(idx); return true; }
+    // 未就绪的块由内存副本提供(locate 直接读副本),不打开可能写了一半的文件
+    if (m_pending_blocks.contains(idx)) return false;
     pser::BlockReader reader;
     // 打开只解析头/池/索引,条目按需解码;条数必须 == kBlockSize,否则视为
     // 截断/损坏,拒收(成功落盘的块必为整块;残缺块不进缓存,避免越界)
@@ -911,6 +947,11 @@ const PacketEntry& PacketListModel::locate(int g) const {
     }
     const int bi = g / kBlockSize;
     const int off = g % kBlockSize;
+    const auto pit = m_pending_blocks.constFind(bi);
+    if (pit != m_pending_blocks.constEnd()) {   // 落盘未完成:读内存副本
+        const QVector<PacketEntry>& mem = *pit.value();
+        return (off < mem.size()) ? mem[off] : kNullEntry;
+    }
     if (!load_block(bi)) return kNullEntry;
     auto it = m_block_cache.constFind(bi);
     if (it == m_block_cache.constEnd() || off < 0 || off >= it->count())
@@ -929,28 +970,88 @@ void PacketListModel::flush_hot_block() {
     for (int i = 0; i < kBlockSize; ++i)
         blk.append(std::move(m_hot[i]));
     m_hot.remove(0, kBlockSize);
-    m_block_count++;   // 块号立即可用;文件在后台落盘(完成前 load_block 返回空块)
-    // 后台线程:序列化 + qCompress + 写盘。
-    // 安全:只捕获 path(值) + blk(move),不捕获 this —— 模型析构/clear 后,
-    // 后台只碰局部资源;临时目录被删则 open 失败安全返回,不悬空不崩溃。
+    m_block_count++;   // 块号立即可用;落盘完成前由内存副本 m_pending_blocks 提供
+    const BlockMem mem = BlockMem::create(std::move(blk));
+    m_pending_blocks.insert(idx, mem);
+    // 后台线程:序列化 + qCompress + 写 .tmp + 原子 rename,完成后经 sink 排队
+    // 回 GUI 线程置就绪。只捕获值(路径/会话号/共享只读副本/sink),不捕获 this。
     const QString path = block_path(idx);
-    QThreadPool::globalInstance()->start([path, blk = std::move(blk)]() {
-        const QByteArray data = pser::encode_block(blk);
-        QFile f(path);
-        if (!f.open(QIODevice::WriteOnly)) return;
-        const bool ok = (f.write(data) == data.size());
-        f.close();
-        // 只有完整落盘才保留;残缺文件删除,load_block 读到空块返回 false(不崩溃)
-        if (!ok || f.error() != QFile::NoError)
-            f.remove();
+    const int session = m_session;
+    const std::shared_ptr<PacketBlockSink> sink = m_sink;
+    QThreadPool::globalInstance()->start([path, session, idx, mem, sink]() {
+        const QByteArray data = pser::encode_block(*mem);
+        const QString tmp = path + QStringLiteral(".tmp");
+        bool ok = false;
+        {
+            QFile f(tmp);
+            if (f.open(QIODevice::WriteOnly)) {
+                ok = (f.write(data) == data.size());
+                f.close();
+                ok = ok && f.error() == QFile::NoError;
+            }
+        }
+        // 只有完整写完才发布到最终文件名;读方永远看不到半截文件
+        ok = ok && QFile::rename(tmp, path);
+        if (!ok) QFile::remove(tmp);
+        QMutexLocker lk(&sink->lock);
+        if (PacketListModel* m = sink->model) {
+            QMetaObject::invokeMethod(m, [m, session, idx, ok]() {
+                m->on_block_written(session, idx, ok);
+            }, Qt::QueuedConnection);
+        } else if (ok) {
+            QFile::remove(path);   // 模型已析构:无人再读
+        }
     });
 }
 
+void PacketListModel::on_block_written(int session, int idx, bool ok) {
+    if (session != m_session) {   // 期间 clear_all 过:旧会话的块作废
+        if (ok) QFile::remove(m_paging_dir.filePath(
+            QStringLiteral("blk_%1_%2.bin").arg(session).arg(idx)));
+        return;
+    }
+    // 落盘失败(磁盘满等):保留内存副本,不丢帧(只是这一块不换出内存)
+    if (ok) m_pending_blocks.remove(idx);
+}
+
 void PacketListModel::append_packets(QVector<PacketEntry> entries) {
+    static_assert(kMaxEntries <= qint64(INT_MAX), "global row index is int");
     if (entries.isEmpty()) return;
     if (m_filtering) {                        // 过滤中:暂存,过滤完成后再补 append
-        m_deferred += entries;
+        if (qint64(m_deferred.size()) + entries.size() <= kMaxDeferred) {
+            m_deferred.reserve(m_deferred.size() + entries.size());
+            for (PacketEntry& e : entries) m_deferred.append(std::move(e));
+            return;
+        }
+        // M5:过滤期间到达的条目超过暂存上限(长过滤 + 高速实时流)。作废本次过滤
+        // (换代 ⇒ 在跑 watcher 的结果被丢弃),暂存 + 本批按正常路径落入模型(不丢帧,
+        // 新条目按当前过滤表达式判可见),再对全量数据重新过滤,完成时 reset 可见集。
+        ++m_filter_gen;
+        m_filtering = false;
+        ++m_filter_restarts;
+        QVector<PacketEntry> all;
+        all.swap(m_deferred);
+        all.reserve(all.size() + entries.size());
+        for (PacketEntry& e : entries) all.append(std::move(e));
+        entries.clear();
+        append_packets(std::move(all));
+        start_filter();
         return;
+    }
+    // L2:全局行号是 int。达到条目上限后丢弃新条目并明确报出(信号 + 告警),
+    // 不让 int(m_total) 回绕成负数把可见集/定位变成垃圾
+    const qint64 room = m_entry_limit - m_total;
+    if (room < entries.size()) {
+        const qint64 keep = qMax<qint64>(room, 0);
+        const bool first = m_dropped == 0;
+        m_dropped += entries.size() - keep;
+        entries.resize(qsizetype(keep));
+        if (first) {
+            qWarning("PacketListModel: entry limit %lld reached, dropping new packets",
+                     static_cast<long long>(m_entry_limit));
+            emit entry_limit_reached(m_entry_limit);
+        }
+        if (entries.isEmpty()) return;
     }
     QVector<int> new_visible;
     new_visible.reserve(entries.size());
@@ -959,7 +1060,7 @@ void PacketListModel::append_packets(QVector<PacketEntry> entries) {
     for (PacketEntry& e : entries) {
         if (e.search_text.isEmpty())          // 兜底:非 make_entry 路径(测试等)补生成
             e.search_text = make_search_text(e);
-        const int g = int(m_total);
+        const int g = int(m_total);           // m_total < m_entry_limit ≤ kMaxEntries < INT_MAX
         ++m_total;
         m_hot.append(std::move(e));           // move 进热缓存,避免深拷贝
         mac_mapping_changed |= update_tei_mac(m_hot.last());
@@ -981,18 +1082,22 @@ void PacketListModel::clear_all() {
     ++m_filter_gen;          // 作废在跑的异步过滤(结果作废,不再回填)
     m_filtering = false;
     m_deferred.clear();
+    m_filter_restarts = 0;
+    m_dropped = 0;
     beginResetModel();
     m_hot.clear();
     m_block_cache.clear();
     m_lru.clear();
+    m_pending_blocks.clear();
+    ++m_session;             // 新会话:新文件名;旧会话迟到的写由 on_block_written 删除
     m_visible.clear();
     m_block_count = 0;
     m_total = 0;
     m_tei_mac.clear();
     m_mac_tei.clear();
     endResetModel();
-    // 删除旧盘块文件:异步写盘的后台任务可能还在写,删掉后其 open 失败即安全;
-    // 已被后台打开的文件(Windows 文件锁)删不掉,写盘完成后残留,由下次 clear 清理。
+    // 删除旧会话已发布的盘块文件。仍在后台写的 .tmp 不动:写完 rename 后
+    // 由 on_block_written 按会话号删除;删不掉的残留随临时目录在退出时清理。
     const QDir dir(m_paging_dir.path());
     for (const QString& f : dir.entryList(QStringList() << QStringLiteral("blk_*.bin"),
                                           QDir::Files))
@@ -1090,14 +1195,19 @@ void PacketListModel::set_display_filter(const QString& expr) {
     if (m_filter == expr) return;
     m_filter = expr;
     m_prepared = prepare_filter(expr, m_mac_tei);  // 预处理与表达式同步重建
+    start_filter();
+}
+
+void PacketListModel::start_filter() {
+    const QString expr = m_filter;
     const int gen = ++m_filter_gen;          // 换代,丢弃在跑的旧过滤结果
     if (expr.isEmpty()) {                    // 清空过滤:恢复全可见(同步)
         m_filtering = false;                 // 复位过滤中状态(在跑旧过滤结果已由 gen 作废)
         beginResetModel();
         m_visible.clear();
-        const qint64 total = m_total;
-        m_visible.reserve(int(qMin<qint64>(total, 1000000)));
-        for (int g = 0; g < int(total); ++g) m_visible.append(g);
+        const int total = int(m_total);      // L2:m_total ≤ kMaxEntries < INT_MAX,不再窄化回绕
+        m_visible.reserve(qMin(total, 1000000));
+        for (int g = 0; g < total; ++g) m_visible.append(g);
         endResetModel();
         if (!m_deferred.isEmpty()) {         // 过滤期间暂存的 append 补进来(空过滤全可见)
             QVector<PacketEntry> def;
@@ -1115,15 +1225,18 @@ void PacketListModel::set_display_filter(const QString& expr) {
             const QVector<int> res = watcher->result();
             watcher->deleteLater();
             if (gen != m_filter_gen) return;  // 过期结果(期间又改了过滤),丢弃
+            // m_visible 只能在 begin/endResetModel 之间改:视图/代理在 reset 前
+            // 仍按旧行数理解模型,先赋值再发信号会让后续 beginInsertRows 的
+            // 行号与观察方不一致(QAbstractItemModel 约定)
+            beginResetModel();
             m_visible = res;
             m_filtering = false;
-            if (!m_deferred.isEmpty()) {      // 过滤期间暂存的 append 补进来
+            endResetModel();
+            if (!m_deferred.isEmpty()) {      // reset 完成后再补过滤期间暂存的 append
                 QVector<PacketEntry> def;
                 def.swap(m_deferred);
                 append_packets(std::move(def));
             }
-            beginResetModel();
-            endResetModel();
         });
     // 映射表快照按值进工作线程:只读 + COW,与 snap/expr 同款,无竞态
     const auto mac_tei = m_mac_tei;
@@ -1145,6 +1258,11 @@ void PacketListModel::ensure_loaded(int visible_row) {
 
 void PacketListModel::for_each_entry(const std::function<void(const PacketEntry&)>& fn) {
     for (int b = 0; b < m_block_count; ++b) {
+        const auto pit = m_pending_blocks.constFind(b);
+        if (pit != m_pending_blocks.constEnd()) {   // 未就绪:内存副本
+            for (const PacketEntry& e : *pit.value()) fn(e);
+            continue;
+        }
         if (!load_block(b)) continue;
         auto it = m_block_cache.constFind(b);
         if (it == m_block_cache.constEnd()) continue;
@@ -1162,8 +1280,12 @@ PacketListModel::ExportSnapshot PacketListModel::make_export_snapshot() const {
     ExportSnapshot s;
     s.hot = m_hot;   // 深拷贝(≤ kBlockSize 条)
     s.block_paths.reserve(m_block_count);
-    for (int i = 0; i < m_block_count; ++i)
+    s.block_mem.reserve(m_block_count);
+    for (int i = 0; i < m_block_count; ++i) {
         s.block_paths << block_path(i);
+        s.block_mem << m_pending_blocks.value(i);   // 未就绪块带内存副本(共享,不深拷贝)
+    }
+    s.total = m_total;
     s.tei_mac = m_tei_mac;   // 深拷贝 TEI→MAC 映射表(CSV 导出显示 MAC 用)
     return s;
 }

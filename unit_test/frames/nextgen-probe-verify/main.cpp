@@ -33,6 +33,7 @@ static bool extract_frame(QByteArray& buf, BplcFrame& out) {
 
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
+    if (argc < 3) { std::printf("usage: %s <nw2021|nw2026|gw2022|gw2026> <capture> [detail]\n", argv[0]); return 2; }
     const QString which = QString::fromLocal8Bit(argv[1]);
     QFile f(QString::fromLocal8Bit(argv[2]));
     if (!f.open(QIODevice::ReadOnly)) { std::printf("open fail\n"); return 1; }

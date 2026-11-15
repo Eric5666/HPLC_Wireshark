@@ -1,8 +1,8 @@
 /// @file topo_window.h
 /// @brief 拓扑(Topo)独立窗口:多 NID 下拉切换 + 拓扑图 + 路由变更表 + TEI→MAC 表
 /// @details 只持有服务端送来的 value snapshots;不访问 MainWindow 或 worker 内部状态。
-#ifndef TOPO_WINDOW_H
-#define TOPO_WINDOW_H
+#ifndef BPLC_TOPO_WINDOW_H
+#define BPLC_TOPO_WINDOW_H
 
 #include "topo_state.h"
 #include <QComboBox>
@@ -230,4 +230,4 @@ private:
     QHash<quint16, quint64> m_routes_mac_asof;
 };
 
-#endif // TOPO_WINDOW_H
+#endif  // BPLC_TOPO_WINDOW_H

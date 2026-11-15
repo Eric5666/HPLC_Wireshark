@@ -417,6 +417,8 @@ Manifest format:
 }
 ```
 
+The built-in downloader downloads and opens the installer directly; it does not verify a SHA-256 (a `sha256` key in an older manifest is ignored). To check integrity yourself, download `SHA256SUMS.txt` from the GitHub Release page next to the installer and run `sha256sum -c SHA256SUMS.txt --ignore-missing` (on Windows, compare against `certutil -hashfile <installer> SHA256`).
+
 The changelog string may contain `<br/>`.
 
 ### 9.1 Update Download Acceleration (automatic mirror for China networks)

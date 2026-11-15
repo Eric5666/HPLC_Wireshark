@@ -210,18 +210,19 @@ GW_2022_Parser::Result GW_2022_Parser::parse_inner(const BplcFrame& in, MsduStat
         r.beacon = GW_2022_BeaconParser::parse_beacon(r.payload_for_log);
         if (r.beacon.present) {
             const QByteArray& gb = r.payload_for_log;
-            const quint8* gp = reinterpret_cast<const quint8*>(gb.constData());
-            r.mpdu.beacon_type       = (quint8)get_bits(gp, 16 + 0, 0, 3);
-            r.mpdu.beacon_netsn      = (quint8)get_bits(gp, 16 + 1, 0, 8);
-            r.mpdu.beacon_cco_mac    = get_bits(gp, 16 + 2, 0, 48);
-            r.mpdu.beacon_period_cnt = (quint32)get_bits(gp, 16 + 8, 0, 32);
+            // 信标字段一律走带边界检查的 QByteArray 版 get_bits(越界返回 0):
+            // parse_beacon 已校验长度,这里是纵深防御(M1/L1),正常帧结果不变
+            r.mpdu.beacon_type       = (quint8)get_bits(gb, 16 + 0, 0, 3);
+            r.mpdu.beacon_netsn      = (quint8)get_bits(gb, 16 + 1, 0, 8);
+            r.mpdu.beacon_cco_mac    = get_bits(gb, 16 + 2, 0, 48);
+            r.mpdu.beacon_period_cnt = (quint32)get_bits(gb, 16 + 8, 0, 32);
             // 精简信标(51243 表56)无字节12 信道编号;管理区(条目数)位于
             // 字节12(精简)或 20(标准)
-            const bool lite = ((quint8)gb.at(16) & 0x10) != 0;
+            const bool lite = ((quint8)get_bits(gb, 16, 0, 8) & 0x10) != 0;
             r.mpdu.beacon_rf_channel = lite ? 0
-                                            : (quint8)get_bits(gp, 16 + 12, 0, 8);
+                                            : (quint8)get_bits(gb, 16 + 12, 0, 8);
             r.mpdu.beacon_rf_option  = 0;
-            r.mpdu.beacon_item_num   = (quint8)gb.at(16 + (lite ? 12 : 20));
+            r.mpdu.beacon_item_num   = (quint8)get_bits(gb, 16 + (lite ? 12 : 20), 0, 8);
         }
     } else if (ft == GW_2022_FrameType::ACK) {
         // ACK(ack 模块)

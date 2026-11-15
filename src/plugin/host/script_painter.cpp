@@ -75,15 +75,18 @@ void ScriptPainter::draw_icon(const QString& name, double x, double y,
         {QStringLiteral("meter_joining"), QStringLiteral(":/icons/electric-meter _online_going.png")},
         {QStringLiteral("meter_offline"), QStringLiteral(":/icons/electric-meter _offline.png")},
     };
+    // 缓存只收内置图标名(至多 kRes.size() 项):脚本传入任意名字不再让
+    // 缓存无界增长(M10);未知名字无资源可读,直接走退化圆点,无 IO。
     QPixmap pm;
-    auto cit = cache.constFind(name);
-    if (cit != cache.constEnd()) {
-        pm = cit.value();
-    } else {
-        const QString res = kRes.value(name);
-        if (!res.isEmpty())
+    const QString res = kRes.value(name);
+    if (!res.isEmpty()) {
+        auto cit = cache.constFind(name);
+        if (cit != cache.constEnd()) {
+            pm = cit.value();
+        } else {
             pm = QPixmap(res);
-        cache.insert(name, pm);  // 失败也缓存(空 pixmap),避免重复 IO
+            cache.insert(name, pm);  // 失败也缓存(空 pixmap),避免重复 IO
+        }
     }
     const QRectF r(x, y, w, h);
     if (!pm.isNull()) {

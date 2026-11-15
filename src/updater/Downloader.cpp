@@ -41,8 +41,31 @@
 #include <QRegularExpressionMatch>
 
 #include "AuthenticateDialog.h"
+#include "i18n.h"
 
 static const QString PARTIAL_DOWN(".part");
+
+namespace {
+// 中→英注册(文件级,L3:更新包大小上限的错误文案随界面语言切换)
+struct I18nRegDownloader {
+    I18nRegDownloader() {
+        trl::register_en("更新包超出大小上限（%1 MB）",
+                         "The Update Package Exceeds the Size Limit (%1 MB)");
+        trl::register_en("更新包已拒收",
+                         "Update Package Rejected");
+        trl::register_en("更新错误",
+                         "Update Error");
+        trl::register_en("找不到已下载的更新包",
+                         "Cannot Find the Downloaded Update");
+    }
+};
+const I18nRegDownloader g_i18n_reg_downloader;
+}  // namespace
+
+// Local extension: hard cap on the installer size (CVE-2026-116337, Qt Network
+// HTTP response resource exhaustion). A malicious or compromised server must not
+// be able to fill memory or disk; the download is aborted past this size.
+static constexpr qint64 kMaxDownloadBytes = 512LL * 1024 * 1024;
 
 /**
  * @brief Constructs the Downloader widget.
@@ -164,6 +187,8 @@ void Downloader::startDownload(const QUrl& url)
   }
 
   // Start download
+  m_savedBytes   = 0;      // local extension: size cap
+  m_sizeExceeded = false;
   m_reply     = m_manager->get(request);
   m_startTime = QDateTime::currentDateTime().toSecsSinceEpoch();
 
@@ -211,17 +236,30 @@ void Downloader::setUserAgentString(const QString& agent)
  */
 void Downloader::finished()
 {
-  if (!m_reply || m_reply->error() != QNetworkReply::NoError) {
+  if (!m_reply || m_reply->error() != QNetworkReply::NoError || m_sizeExceeded) {
     QFile::remove(m_downloadDir.filePath(m_fileName + PARTIAL_DOWN));
     if (m_reply) {
       m_reply->deleteLater();
       m_reply = nullptr;
+    }
+    // Local extension: tell the user why an oversized download stopped
+    if (m_sizeExceeded) {
+      const QString msg = trl::L("更新包超出大小上限（%1 MB）")
+                            .arg(kMaxDownloadBytes / (1024 * 1024));
+      m_ui->stopButton->setText(tr("Close"));
+      m_ui->downloadLabel->setText(trl::L("更新包已拒收"));
+      m_ui->timeLabel->setText(msg);
+      QMessageBox::critical(this, trl::L("更新错误"), msg, QMessageBox::Close);
     }
     return;
   }
 
   // Flush any data not yet delivered through downloadProgress
   saveFile(0, 0);
+  if (m_sizeExceeded) {   // local extension: the final flush crossed the cap
+    finished();
+    return;
+  }
 
   // Rename file
   QFile::rename(m_downloadDir.filePath(m_fileName + PARTIAL_DOWN),
@@ -248,7 +286,7 @@ void Downloader::openDownload()
     QDesktopServices::openUrl(QUrl::fromLocalFile(m_downloadDir.filePath(m_fileName)));
   else
     QMessageBox::critical(
-      this, tr("Error"), tr("Cannot find downloaded update!"), QMessageBox::Close);
+      this, trl::L("更新错误"), trl::L("找不到已下载的更新包"), QMessageBox::Close);
 }
 
 /**
@@ -352,11 +390,31 @@ void Downloader::saveFile(qint64 received, qint64 total)
   }
 
   // Save downloaded data to disk
+  const QByteArray chunk = m_reply->readAll();
+  m_savedBytes += chunk.size();
+  if (m_savedBytes > kMaxDownloadBytes) {   // local extension: size cap
+    abortOversize();
+    return;
+  }
   QFile file(m_downloadDir.filePath(m_fileName + PARTIAL_DOWN));
   if (file.open(QIODevice::WriteOnly | QIODevice::Append)) {
-    file.write(m_reply->readAll());
+    file.write(chunk);
     file.close();
   }
+}
+
+/**
+ * @brief Local extension: aborts a download that exceeds kMaxDownloadBytes.
+ *
+ * abort() finishes the reply with OperationCanceledError; finished() then
+ * removes the partial file and reports the reason.
+ */
+void Downloader::abortOversize()
+{
+  if (!m_reply || m_sizeExceeded)
+    return;
+  m_sizeExceeded = true;
+  m_reply->abort();
 }
 
 /**
@@ -394,6 +452,14 @@ void Downloader::metaDataChanged()
   if (!m_reply)
     return;
 
+  // Local extension: reject an oversized declared Content-Length up front
+  bool lenOk = false;
+  const qint64 declared = m_reply->header(QNetworkRequest::ContentLengthHeader).toLongLong(&lenOk);
+  if (lenOk && declared > kMaxDownloadBytes) {
+    abortOversize();
+    return;
+  }
+
   QVariant variant = m_reply->header(QNetworkRequest::ContentDispositionHeader);
   if (variant.isValid()) {
     QString contentDisposition = QByteArray::fromPercentEncoding(variant.toByteArray()).constData();
@@ -414,6 +480,12 @@ void Downloader::metaDataChanged()
  */
 void Downloader::updateProgress(qint64 received, qint64 total)
 {
+  // Local extension: size cap (declared length or bytes received so far)
+  if (received > kMaxDownloadBytes || total > kMaxDownloadBytes) {
+    abortOversize();
+    return;
+  }
+
   if (total > 0) {
     m_ui->progressBar->setMinimum(0);
     m_ui->progressBar->setMaximum(100);

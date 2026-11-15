@@ -1,7 +1,7 @@
 /// @file rawframeimporter.h
 /// @brief 裸 hex 文本导入工具
-#ifndef RAWFRAMEIMPORTER_H
-#define RAWFRAMEIMPORTER_H
+#ifndef BPLC_RAWFRAMEIMPORTER_H
+#define BPLC_RAWFRAMEIMPORTER_H
 
 #include <QObject>
 #include "serialreader.h"
@@ -13,4 +13,4 @@ public:
     static int import_text(const QString& path, QByteArray& out);
 };
 
-#endif // RAWFRAMEIMPORTER_H
+#endif  // BPLC_RAWFRAMEIMPORTER_H

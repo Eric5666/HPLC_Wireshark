@@ -57,7 +57,13 @@ Entry point: **Plugins → Plugin marketplace** menu in the main window.
   this URL, then to the plain description.
 - `updated_at`: per-version update date (ISO), shown as 更新时间/Updated.
 - `platforms`: optional list of platform IDs this version supports
-  (`linux-x86_64`, `windows-x86_64`, `macos-arm64`, `macos-x86_64`).
+  (`linux-x86_64`, `linux-arm64`, `windows-x86_64`, `windows-arm64`,
+  `macos-arm64`, `macos-x86_64`). The ID is `<os>-<arch>` of the host
+  **build** (`plugin_host_platform()` in `plugin_api/plugin_manifest.h`):
+  arch is `x86_64` or `arm64` (other architectures fall back to
+  `QSysInfo::buildCpuArchitecture()`), so an x64 build running under
+  emulation on Windows on ARM still reports `windows-x86_64`. The same
+  key selects the per-platform `abi` entry below.
   Absent or empty = all platforms (script plugins). The client only
   offers/installs the newest version compatible with the running
   platform, shows the platform list in the detail panel, and hides
@@ -120,7 +126,9 @@ plugin.json   # manifest, see plugin_api/plugin_manifest.h
 
 ## Install flow
 
-1. Market install: download zip → verify **sha256** against the feed value
+1. Market install: the feed version entry **must** carry `sha256` (64 hex
+   chars); entries without a valid `sha256` are refused before download.
+   Download zip → verify **sha256** against the feed value
    (mismatch = rejected) → unzip to temp dir → validate `plugin.json`
    (manifest + entry file must exist) → check `min_app_version` against the
    running app version → check `platforms` against the running platform
@@ -128,15 +136,22 @@ plugin.json   # manifest, see plugin_api/plugin_manifest.h
 2. Offline install (`Install from file...`): same chain minus sha256
    (no feed to compare against) — manifest validity and entry-file
    existence are still enforced.
-3. Zip-slip guard: entries with absolute paths or `..` are rejected.
+3. Zip-slip guard (`PluginMarket::safe_extract_path`): entries with absolute
+   paths, drive letters (`C:/x`, `C:x`), UNC paths, backslashes or any `..`
+   component are rejected, and the whole package is refused before anything
+   is written. Limits: at most 4096 entries, 64 MB per entry, 256 MB total.
 
 Install dir: `<applicationDirPath>/plugins/<name>/` (next to the executable).
 On Linux, if the dir is not writable, installation requests elevation via
 pkexec(1).
 Each installed plugin gets `meta.json`: `{ "enabled": bool, "installed_at" }`.
 Re-installing the same name replaces it (= update). `uninstall(name)`
-deletes the dir; name is restricted to a single path segment
-(`..`, `/`, `\` rejected).
+deletes the dir. The plugin `name` (manifest and feed) must match
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (`plugin_name_is_safe`, enforced by
+`read_plugin_manifest`); install / uninstall / enable all resolve the
+directory through `PluginMarket::plugin_dir_path()`, which also requires a
+direct child of the install root and refuses entries (incl. symlinks)
+whose real path leaves it.
 
 ## Enable / disable
 
@@ -157,7 +172,8 @@ string (single-platform package) or per-platform (multi-platform package):
 
     "abi": {
         "windows-x86_64": "qt6-mingw-x64",
-        "linux-x86_64": "qt6-gcc-x64"
+        "linux-x86_64": "qt6-gcc-x64",
+        "linux-arm64": "qt6-gcc-arm64"
     }
 
 The host computes its own ABI at startup as `qt<major>-<compiler>-<arch>`
@@ -173,7 +189,8 @@ and need no `abi` field.
 
 ## Verification chain (current)
 
-- sha256 of the downloaded package vs the feed (market installs).
+- sha256 of the downloaded package vs the feed (market installs);
+  a feed entry without `sha256` is not installable.
 - Manifest + entry-file validation for every install.
 - `min_app_version` compatibility check before market installs.
 - `platforms` compatibility check before market installs.
@@ -183,6 +200,47 @@ packages (per the plugin-system interface draft). The feed and the
 transport are not trusted; the local checks above are the trust anchor
 for now. Signature verification is the next step before shipping
 non-test plugins.
+
+## Script sandbox (Lua)
+
+Lua plugins run with a restricted standard library
+(`open_sandboxed_libs` in `host/lua_backend.cpp`, used by both the
+in-process backend and `bplc-plugin-host`):
+
+- available: base, `string`, `table`, `math`, `utf8`, `coroutine`,
+  `package`/`require`, and `os.clock/date/difftime/time`;
+- removed: `io`, `debug`, `os.execute/exit/getenv/remove/rename/tmpname/setlocale`,
+  `package.loadlib`, C module loading (`package.cpath` is empty, C searchers
+  removed) — use `host.getEnv(name)` for environment values;
+- `require`, `dofile` and `loadfile` only load files inside the plugin
+  directory (relative paths are resolved against it);
+- `load`/`loadfile`/`dofile`/`require` and the entry script accept **text
+  chunks only** (precompiled bytecode is rejected).
+
+## Script time limits (Lua and JS)
+
+Every call into a script plugin (loading the entry script, `get_info`,
+`parse`, `render`, `on_event`, `on_frame_selected`, text functions) has a
+budget:
+
+- **Lua**: 200 million VM instructions per call (an instruction-count hook).
+  On overrun the call fails with the Lua error
+  `instruction budget exceeded (...)`; catching it with `pcall`/`xpcall` or
+  running the loop in a coroutine does not help, the error is raised again
+  at the next instruction until it leaves the entry point. The next call
+  starts with a fresh budget. Override for tests with
+  `BPLC_LUA_INSTR_BUDGET=<instructions>`.
+- **JS**: 3 s wall clock per call. A watchdog calls
+  `QJSEngine::setInterrupted(true)`; the call fails with
+  `<entry>: script exceeded 3000 ms time limit, interrupted` and the engine
+  is reset for the next call. Override with `BPLC_JS_CALL_TIMEOUT_MS=<ms>`.
+
+A plugin whose `parse()` hits the limit gets that frame rejected with the
+error as the reason; the plugin keeps running.
+
+This is defence in depth, not a security boundary: there is no memory
+limit, and JS/native plugins are not sandboxed (native plugins are fully
+trusted code).
 
 ## API notes
 

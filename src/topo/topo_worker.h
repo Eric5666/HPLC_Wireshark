@@ -1,5 +1,5 @@
-#ifndef TOPO_WORKER_H
-#define TOPO_WORKER_H
+#ifndef BPLC_TOPO_WORKER_H
+#define BPLC_TOPO_WORKER_H
 
 #include "topo_state.h"
 #include <QObject>
@@ -36,6 +36,8 @@ struct TopoFramePage {
     quint64 request_id = 0;
     qint64 offset = 0;
     qint64 total = 0;
+    bool ok = true;          ///< false:查询出错(items 为空,error 为原因),不是"没有数据"
+    QString error;
     QVector<TopoFrameInput> items;
 };
 Q_DECLARE_METATYPE(TopoFramePage)
@@ -45,6 +47,8 @@ struct TopoAnomalyPage {
     quint32 nid = 0;
     qint64 offset = 0;
     qint64 total = 0;
+    bool ok = true;          ///< false:查询出错(items 为空,error 为原因),不是"没有数据"
+    QString error;
     QVector<TopoAnomaly> items;
 };
 Q_DECLARE_METATYPE(TopoAnomalyPage)
@@ -116,4 +120,4 @@ private:
     QString m_store_error_message;
 };
 
-#endif // TOPO_WORKER_H
+#endif  // BPLC_TOPO_WORKER_H

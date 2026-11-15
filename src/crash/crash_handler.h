@@ -16,7 +16,8 @@
 //   - crashpad: 崩溃时生成 minidump 到 database_path;配了 DSN/upload_url 则
 //               由 crashpad_handler 自动上报到该地址,否则只本地落盘,
 //               用户手动取回分析。
-#pragma once
+#ifndef BPLC_CRASH_HANDLER_H
+#define BPLC_CRASH_HANDLER_H
 
 #include <string>
 
@@ -61,3 +62,5 @@ public:
 private:
     CrashHandler() = delete;
 };
+
+#endif  // BPLC_CRASH_HANDLER_H

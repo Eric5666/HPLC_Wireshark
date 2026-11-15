@@ -3,8 +3,8 @@
 /// @details 首次启动自动生成带注释模板;后续由本模块统一读写。
 ///          承载:更新检查地址、语言、串口/回放参数、显示过滤器等。
 ///          兼容旧注册表:仅在 config.ini 不存在且注册表有值时迁移一次。
-#ifndef APPCONFIG_H
-#define APPCONFIG_H
+#ifndef BPLC_APPCONFIG_H
+#define BPLC_APPCONFIG_H
 
 #include <QString>
 #include <QSettings>
@@ -325,4 +325,4 @@ inline void set_reader(int mode, const QString& com, int baud,
 
 }  // namespace appcfg
 
-#endif // APPCONFIG_H
+#endif  // BPLC_APPCONFIG_H

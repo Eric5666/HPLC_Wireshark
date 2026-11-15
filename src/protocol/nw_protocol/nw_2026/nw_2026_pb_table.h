@@ -8,8 +8,8 @@
 ///     Bitloading标识=0 用 nw_2026_splc_pb_size,=1 用 nw_2026_splc_bitload_pb_size
 ///   - 无线路径:载荷 PB 大小(PBLen,表130)→ PB size,0-5 → 16/40/72/136/264/520
 /// @note PB 大小映射见协议表(SPLC 第3部分物理层表13 / 第4部分数据链路层表23 / 无线表130)。与国网独立,勿共享。
-#ifndef NW_2026_PB_TABLE_H
-#define NW_2026_PB_TABLE_H
+#ifndef BPLC_NW_2026_PB_TABLE_H
+#define BPLC_NW_2026_PB_TABLE_H
 
 #include <QtGlobal>
 
@@ -85,4 +85,4 @@ inline int nw_2026_max_pb_num(quint8 band, quint8 tmi_idx) {
     return nw_2026_pb_num_table[band][tmi_idx];
 }
 
-#endif // NW_2026_PB_TABLE_H
+#endif  // BPLC_NW_2026_PB_TABLE_H

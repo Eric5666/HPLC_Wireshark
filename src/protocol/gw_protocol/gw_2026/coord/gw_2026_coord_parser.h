@@ -2,8 +2,8 @@
 /// @brief 网间协调帧(COORD)解析模块声明(51242 COORD:FCH 时隙参数)
 /// @brief 协调帧的 FCH 字段(TimeDuration/NextTimeSlotShift/NeighbourNID/
 ///          NetRfChannel/RSV0,表26),填充 MpduInfo。
-#ifndef GW_2026_CORDPARSER_H
-#define GW_2026_CORDPARSER_H
+#ifndef BPLC_GW_2026_COORD_PARSER_H
+#define BPLC_GW_2026_COORD_PARSER_H
 
 #include "bplcframe.h"
 
@@ -16,4 +16,4 @@ void parse_fch(const quint8* p, MpduInfo& m);
 
 }  // namespace gw_2026_coordp
 
-#endif // GW_2026_CORDPARSER_H
+#endif  // BPLC_GW_2026_COORD_PARSER_H

@@ -4,8 +4,12 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QPainter>
+
+#include <cstdio>
+#include <cstring>
 
 #include "plugin_env.h"
 #include "script_painter.h"
@@ -16,7 +20,94 @@ extern "C" {
 #include "lualib.h"
 }
 
+/// @brief 单次脚本调用的指令计数(lua_getextraspace 存其指针,协程继承)
+struct LuaBudget {
+    quint64 used = 0;
+    quint64 limit = 0;
+    lua_State* main = nullptr;  ///< 主线程(超限时一并切逐条触发)
+};
+
 namespace {
+// ---- 指令预算(M10):每个脚本入口一次 pcall 的指令数上限 ----
+// count hook 每 kLuaHookStep 条 VM 指令触发一次,累计超过预算即在脚本内
+// 抛 Lua 错误;死循环(含 pcall 包裹的死循环:超限后每次 hook 都再抛)
+// 在有限时间内结束,宿主进程不再被单个插件占满 CPU。
+constexpr int kLuaHookStep = 1000;
+constexpr quint64 kDefaultLuaInstrBudget = 200000000ull;  // ~1-3 s
+/// @brief 每次调用的指令预算;环境变量 BPLC_LUA_INSTR_BUDGET 可覆盖(测试用)
+quint64 lua_instr_budget() {
+    bool ok = false;
+    const quint64 v = qEnvironmentVariable("BPLC_LUA_INSTR_BUDGET").toULongLong(&ok);
+    return (ok && v >= quint64(kLuaHookStep)) ? v : kDefaultLuaInstrBudget;
+}
+LuaBudget* budget_of(lua_State* L) {
+    return *static_cast<LuaBudget**>(lua_getextraspace(L));
+}
+void budget_hook(lua_State* L, lua_Debug*) {
+    LuaBudget* b = budget_of(L);
+    if (!b) return;
+    const int step = lua_gethookcount(L);
+    b->used += quint64(step > 0 ? step : kLuaHookStep);
+    if (b->used > b->limit) {
+        // 超限后把主线程和当前协程都切到“每条指令都触发”:错误若被脚本内
+        // pcall/xpcall/协程接住,外层下一条指令立即再抛,最终逃出脚本入口
+        if (b->main) lua_sethook(b->main, budget_hook, LUA_MASKCOUNT, 1);
+        lua_sethook(L, budget_hook, LUA_MASKCOUNT, 1);
+        luaL_error(L, "instruction budget exceeded (%I instructions per call)",
+                   static_cast<lua_Integer>(b->limit));
+    }
+    if (step != kLuaHookStep)  // 上次超限遗留的逐条触发:新一次调用恢复步长
+        lua_sethook(L, budget_hook, LUA_MASKCOUNT, kLuaHookStep);
+}
+/// @brief 所有脚本入口统一走这里:清零本次预算再 lua_pcall
+int guarded_pcall(lua_State* L, int nargs, int nresults) {
+    if (LuaBudget* b = budget_of(L)) b->used = 0;
+    lua_sethook(L, budget_hook, LUA_MASKCOUNT, kLuaHookStep);
+    return lua_pcall(L, nargs, nresults, 0);
+}
+// ---- 受保护入口(L12):每个入口的 body 都在 lua_pcall 调起的 C 函数里执行,
+// body 内任何未被内层 guarded_pcall 接住的 Lua 错误都回到这一层 pcall,状态保持一致、
+// 插件照常可用;不再依赖 lua_atpanic + setjmp/longjmp 越过 C++ 栈帧(会跳过析构)。
+// 另外 body 里不再有能运行用户 Lua 代码的 API(全局查找/设置走 raw,结果表 raw 读),
+// 剩下能抛错的只有内存不足;需析构的 C++ 对象在这些调用之后才构造(见 render)。
+int protected_entry(lua_State* L) {
+    const auto* body = static_cast<const std::function<void()>*>(lua_touserdata(L, 1));
+    lua_settop(L, 0);
+    (*body)();
+    return 0;
+}
+// 兜底:理论上不再有 pcall 外的错误;万一出现只记录(Lua 随后 abort,便于发现)
+int lua_panic_handler(lua_State* L) {
+    const char* msg = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : "non-string error object";
+    std::fprintf(stderr, "Lua panic outside a protected host call: %s\n", msg ? msg : "");
+    return 0;
+}
+/// @brief 原始取全局(不触发 _G 的 __index 元方法:脚本可给 _G 设元表,
+///        lua_getglobal 会在 pcall 外跑用户代码)。值压栈,返回类型
+int raw_getglobal(lua_State* L, const char* name) {
+    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
+    lua_pushstring(L, name);
+    const int t = lua_rawget(L, -2);
+    lua_remove(L, -2);
+    return t;
+}
+/// @brief 原始设全局(栈顶值出栈;不触发 _G 的 __newindex)
+void raw_setglobal(lua_State* L, const char* name) {
+    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
+    lua_insert(L, -2);           // _G, value
+    lua_pushstring(L, name);
+    lua_insert(L, -2);           // _G, name, value
+    lua_rawset(L, -3);
+    lua_pop(L, 1);
+}
+/// @brief Lua fields 表的最大嵌套层数(与主程序 IPC 解码的 pser::kMaxFieldDepth 一致,超了主程序会拒收)
+constexpr int kMaxLuaFieldDepth = 64;
+/// @brief 原始取字段(lua_rawget,不触发 __index 等元方法),值压栈,返回类型
+int raw_getfield(lua_State* L, int idx, const char* key) {
+    idx = lua_absindex(L, idx);
+    lua_pushstring(L, key);
+    return lua_rawget(L, idx);
+}
 // QByteArray → Lua 数组表(1-based),留在栈顶
 void push_byte_table(lua_State* L, const QByteArray& b) {
     lua_newtable(L);
@@ -262,6 +353,162 @@ void push_painter_table(lua_State* L, ScriptPainter* bridge) {
 } // namespace
 } // namespace
 
+namespace {
+// ===== 插件 Lua 沙箱 =====
+// 插件脚本来自市场/离线包,不可信:只开放 base/package/coroutine/table/string/
+// math/utf8 与 os 的只读时间函数;不开放 io/debug、os.execute/exit/remove/rename/
+// getenv/tmpname/setlocale、C 模块加载(package.loadlib/cpath/C searcher);
+// dofile/loadfile 只能读插件目录内的文件;load/loadfile/dofile 只接受文本 chunk
+// (恶意字节码可绕过 Lua VM 校验)。环境变量请用 host.getEnv。
+
+/// 解析插件目录内的脚本路径(相对路径相对插件目录);越界返回空串
+QString sandbox_plugin_path(lua_State* L, const char* fname) {
+    const QString dir = QString::fromUtf8(lua_tostring(L, lua_upvalueindex(1)));
+    const QString root = QFileInfo(dir).canonicalFilePath();
+    const QString path = QDir(dir).absoluteFilePath(QString::fromUtf8(fname));
+    const QString real = QFileInfo(path).canonicalFilePath();
+    if (root.isEmpty() || real.isEmpty() ||
+        !real.startsWith(root + QLatin1Char('/')))
+        return QString();
+    return real;
+}
+
+/// loadfile(filename [, mode [, env]]):仅插件目录内、仅文本 chunk
+int l_sandbox_loadfile(lua_State* L) {
+    const char* fname = luaL_optstring(L, 1, nullptr);
+    const bool has_env = !lua_isnone(L, 3);
+    if (!fname) {
+        luaL_pushfail(L);
+        lua_pushliteral(L, "loadfile: stdin is not available to plugins");
+        return 2;
+    }
+    const QString path = sandbox_plugin_path(L, fname);
+    if (path.isEmpty()) {
+        luaL_pushfail(L);
+        lua_pushfstring(L, "loadfile: '%s' is outside the plugin directory", fname);
+        return 2;
+    }
+    const QByteArray p = path.toUtf8();  // 与入口脚本加载同口径
+    if (luaL_loadfilex(L, p.constData(), "t") != LUA_OK) {
+        luaL_pushfail(L);
+        lua_insert(L, -2);
+        return 2;  // nil, message
+    }
+    if (has_env) {
+        lua_pushvalue(L, 3);
+        if (!lua_setupvalue(L, -2, 1)) lua_pop(L, 1);  // 设为首个 upvalue(_ENV)
+    }
+    return 1;
+}
+
+/// dofile(filename):仅插件目录内、仅文本 chunk
+int l_sandbox_dofile(lua_State* L) {
+    const char* fname = luaL_checkstring(L, 1);
+    const QString path = sandbox_plugin_path(L, fname);
+    if (path.isEmpty())
+        return luaL_error(L, "dofile: '%s' is outside the plugin directory", fname);
+    lua_settop(L, 1);
+    const QByteArray p = path.toUtf8();  // 与入口脚本加载同口径
+    if (luaL_loadfilex(L, p.constData(), "t") != LUA_OK) return lua_error(L);
+    lua_call(L, 0, LUA_MULTRET);
+    return lua_gettop(L) - 1;
+}
+
+/// load(chunk [, chunkname [, mode [, env]]]):转调原 load,mode 强制 "t"
+int l_sandbox_load(lua_State* L) {
+    const bool has_env = lua_gettop(L) >= 4;  // 不传 env 时保持「无 env」语义
+    lua_settop(L, 4);                         // chunk, chunkname, mode, env(缺省补 nil)
+    lua_pushvalue(L, lua_upvalueindex(1));    // 原 load
+    lua_pushvalue(L, 1);
+    lua_pushvalue(L, 2);
+    lua_pushliteral(L, "t");
+    if (has_env) lua_pushvalue(L, 4);
+    lua_call(L, has_env ? 4 : 3, LUA_MULTRET);
+    return lua_gettop(L) - 4;
+}
+
+/// require 的 Lua 文件搜索器:按 package.path 查找,但只加载插件目录内的文本 chunk
+int l_sandbox_lua_searcher(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    lua_settop(L, 1);
+    lua_getglobal(L, LUA_LOADLIBNAME);   // 2
+    lua_getfield(L, 2, "searchpath");    // 3
+    lua_pushstring(L, name);
+    lua_getfield(L, 2, "path");
+    lua_call(L, 2, 2);                   // 3: filename | nil, 4: 未找到说明
+    if (lua_isnil(L, 3)) {
+        lua_pushvalue(L, 4);
+        return 1;
+    }
+    const char* fname = lua_tostring(L, 3);
+    const QString path = sandbox_plugin_path(L, fname);
+    if (path.isEmpty()) {
+        lua_pushfstring(L, "\n\tmodule file '%s' is outside the plugin directory", fname);
+        return 1;
+    }
+    const QByteArray p = path.toUtf8();  // 与入口脚本加载同口径
+    if (luaL_loadfilex(L, p.constData(), "t") != LUA_OK)
+        return luaL_error(L, "error loading module '%s' from file '%s':\n\t%s",
+                          name, fname, lua_tostring(L, -1));
+    lua_pushvalue(L, 3);  // 第二返回值:文件名(传给模块)
+    return 2;
+}
+
+/// 打开受限标准库并装好沙箱(替代 luaL_openlibs)
+void open_sandboxed_libs(lua_State* L, const QString& plugin_dir) {
+    static const luaL_Reg kLibs[] = {
+        {LUA_GNAME, luaopen_base},          {LUA_LOADLIBNAME, luaopen_package},
+        {LUA_COLIBNAME, luaopen_coroutine}, {LUA_TABLIBNAME, luaopen_table},
+        {LUA_STRLIBNAME, luaopen_string},   {LUA_MATHLIBNAME, luaopen_math},
+        {LUA_UTF8LIBNAME, luaopen_utf8},    {LUA_OSLIBNAME, luaopen_os},
+        {nullptr, nullptr}};
+    for (const luaL_Reg* lib = kLibs; lib->func; ++lib) {
+        luaL_requiref(L, lib->name, lib->func, 1);
+        lua_pop(L, 1);
+    }
+    // os:只保留 clock/date/difftime/time
+    lua_getglobal(L, LUA_OSLIBNAME);
+    for (const char* k : {"execute", "exit", "getenv", "remove", "rename",
+                          "setlocale", "tmpname"}) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, k);
+    }
+    lua_pop(L, 1);
+
+    const QByteArray dir = QDir(plugin_dir).absolutePath().toUtf8();
+    // package:require 只搜插件目录内的 Lua 文件;禁止 C 模块
+    lua_getglobal(L, LUA_LOADLIBNAME);
+    lua_pushfstring(L, "%s/?.lua;%s/?/init.lua", dir.constData(), dir.constData());
+    lua_setfield(L, -2, "path");
+    lua_pushliteral(L, "");
+    lua_setfield(L, -2, "cpath");
+    lua_pushnil(L);
+    lua_setfield(L, -2, "loadlib");
+    lua_getfield(L, -1, "searchers");  // {preload, Lua, C, Croot} → preload + 受限 Lua 搜索器
+    if (lua_istable(L, -1)) {
+        for (lua_Integer i = luaL_len(L, -1); i > 2; --i) {
+            lua_pushnil(L);
+            lua_seti(L, -2, i);
+        }
+        lua_pushstring(L, dir.constData());
+        lua_pushcclosure(L, l_sandbox_lua_searcher, 1);
+        lua_seti(L, -2, 2);
+    }
+    lua_pop(L, 2);
+
+    // base:dofile/loadfile 限插件目录;load 只收文本
+    lua_pushstring(L, dir.constData());
+    lua_pushcclosure(L, l_sandbox_loadfile, 1);
+    lua_setglobal(L, "loadfile");
+    lua_pushstring(L, dir.constData());
+    lua_pushcclosure(L, l_sandbox_dofile, 1);
+    lua_setglobal(L, "dofile");
+    lua_getglobal(L, "load");
+    lua_pushcclosure(L, l_sandbox_load, 1);
+    lua_setglobal(L, "load");
+}
+}  // namespace
+
 LuaBackend::LuaBackend() = default;
 
 LuaBackend::~LuaBackend() {
@@ -278,28 +525,45 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
         *err = QStringLiteral("luaL_newstate failed");
         return false;
     }
-    luaL_openlibs(m_lua);
-    m_plugin_dir = m.dir_path;
+    m_budget.reset(new LuaBudget);
+    m_budget->limit = lua_instr_budget();
+    m_budget->main = m_lua;
+    *static_cast<LuaBudget**>(lua_getextraspace(m_lua)) = m_budget.get();
+    lua_sethook(m_lua, budget_hook, LUA_MASKCOUNT, kLuaHookStep);
+    lua_atpanic(m_lua, lua_panic_handler);   // 未受保护的错误不再 abort() 宿主
+    bool ok = false;
+    if (!run_protected([&] { ok = initialize_impl(m, err); }, err)) return false;
+    return ok;
+}
 
-    const QString lua_path = QDir(m.dir_path).filePath(m.entry);
+bool LuaBackend::initialize_impl(const PluginManifest& m, QString* err) {
+    m_plugin_dir = m.dir_path;
+    open_sandboxed_libs(m_lua, m_plugin_dir);   // 受限标准库(不再 luaL_openlibs)
+
+    // 加载时再做一次包含检查(防 manifest 校验后入口被替换为越界符号链接)
+    const QString lua_path = plugin_contained_entry_path(m.dir_path, m.runtime, m.entry);
+    if (lua_path.isEmpty()) {
+        *err = QStringLiteral("entry outside plugin dir: %1").arg(m.entry);
+        return false;
+    }
     const QByteArray path_utf8 = lua_path.toUtf8();
-    if (luaL_loadfile(m_lua, path_utf8.constData()) != LUA_OK) {
+    if (luaL_loadfilex(m_lua, path_utf8.constData(), "t") != LUA_OK) {  // 只收文本(拒字节码)
         *err = QStringLiteral("load %1: %2").arg(m.entry, pop_lua_error(m_lua));
         return false;
     }
-    if (lua_pcall(m_lua, 0, 0, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 0, 0) != LUA_OK) {
         *err = QStringLiteral("run %1: %2").arg(m.entry, pop_lua_error(m_lua));
         return false;
     }
 
     // get_info()
-    lua_getglobal(m_lua, "get_info");
+    raw_getglobal(m_lua, "get_info");
     if (!lua_isfunction(m_lua, -1)) {
         *err = QStringLiteral("missing function get_info()");
         lua_pop(m_lua, 1);
         return false;
     }
-    if (lua_pcall(m_lua, 0, 1, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 0, 1) != LUA_OK) {
         *err = QStringLiteral("get_info: %1").arg(pop_lua_error(m_lua));
         return false;
     }
@@ -321,7 +585,7 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
         return false;
     }
 
-    lua_getglobal(m_lua, "parse");
+    raw_getglobal(m_lua, "parse");
     if (!lua_isfunction(m_lua, -1)) {
         *err = QStringLiteral("missing function parse(frame)");
         lua_pop(m_lua, 1);
@@ -330,7 +594,7 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
     lua_pop(m_lua, 1);  // 每次 parse 重新取(脚本可能热替换)
 
     // 图形函数(可选,manifest graphics=true 时必需)
-    lua_getglobal(m_lua, "render");
+    raw_getglobal(m_lua, "render");
     m_has_graphics = lua_isfunction(m_lua, -1);
     lua_pop(m_lua, 1);
     if (m.graphics && !m_has_graphics) {
@@ -346,7 +610,7 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
         if (backend->m_redraw_cb) backend->m_redraw_cb();
         return 0;
     }, 1);
-    lua_setglobal(m_lua, "request_redraw");
+    raw_setglobal(m_lua, "request_redraw");
 
     // host 界面控制表:host.jumpToFrame(frameIndex)
     // + 插件设置 host.getSetting(key, default)
@@ -391,12 +655,16 @@ bool LuaBackend::initialize(const PluginManifest& m, QString* err) {
         return 1;
     }, 1);
     lua_setfield(m_lua, -2, "getEnv");
-    lua_setglobal(m_lua, "host");
+    raw_setglobal(m_lua, "host");
     return true;
 }
 
 void LuaBackend::shutdown() {
-    if (m_lua) { lua_close(m_lua); m_lua = nullptr; }
+    if (m_lua) {
+        lua_close(m_lua);
+        m_lua = nullptr;
+    }
+    m_budget.reset();
     m_has_graphics = false;
 }
 
@@ -412,7 +680,7 @@ QSize LuaBackend::graphics_preferred_size() const {
     return QSize(400, 300);
 }
 
-QImage LuaBackend::render_graphics(int w, int h, QString* err) {
+QImage LuaBackend::render_graphics_impl(int w, int h, QString* err) {
     if (!m_has_graphics) {
         *err = QStringLiteral("no graphics");
         return QImage();
@@ -421,22 +689,23 @@ QImage LuaBackend::render_graphics(int w, int h, QString* err) {
         *err = QStringLiteral("bad size");
         return QImage();
     }
-    QImage img(w, h, QImage::Format_ARGB32);
-    img.fill(Qt::white);
-    QPainter painter(&img);
-    painter.setRenderHint(QPainter::Antialiasing);
-    ScriptPainter bridge(&painter);
-
-    lua_getglobal(m_lua, "render");
+    // 先做 Lua 侧查找,再构造需析构的 C++ 对象(QImage/QPainter):查找之后能抛错的只剩
+    // 内存不足,且 body 在 run_protected 的 pcall 内,不会再越过这些对象 longjmp 到 panic
+    raw_getglobal(m_lua, "render");
     if (!lua_isfunction(m_lua, -1)) {
         *err = QStringLiteral("render() not found");
         lua_pop(m_lua, 1);
         return QImage();
     }
+    QImage img(w, h, QImage::Format_ARGB32);
+    img.fill(Qt::white);
+    QPainter painter(&img);
+    painter.setRenderHint(QPainter::Antialiasing);
+    ScriptPainter bridge(&painter);
     push_painter_table(m_lua, &bridge);
     lua_pushinteger(m_lua, w);
     lua_pushinteger(m_lua, h);
-    if (lua_pcall(m_lua, 3, 0, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 3, 0) != LUA_OK) {
         *err = QStringLiteral("render: %1").arg(pop_lua_error(m_lua));
         return QImage();
     }
@@ -444,9 +713,9 @@ QImage LuaBackend::render_graphics(int w, int h, QString* err) {
     return img;
 }
 
-bool LuaBackend::handle_graphics_event(const GraphicsEvent& e, QString* err) {
+bool LuaBackend::handle_graphics_event_impl(const GraphicsEvent& e, QString* err) {
     if (!m_has_graphics) return false;
-    lua_getglobal(m_lua, "on_event");
+    raw_getglobal(m_lua, "on_event");
     if (!lua_isfunction(m_lua, -1)) {
         lua_pop(m_lua, 1);
         return false;
@@ -457,7 +726,7 @@ bool LuaBackend::handle_graphics_event(const GraphicsEvent& e, QString* err) {
     lua_pushinteger(m_lua, e.button);
     lua_pushinteger(m_lua, e.modifiers);
     lua_pushinteger(m_lua, e.delta_y);
-    if (lua_pcall(m_lua, 6, 1, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 6, 1) != LUA_OK) {
         *err = QStringLiteral("on_event: %1").arg(pop_lua_error(m_lua));
         return false;
     }
@@ -468,7 +737,7 @@ bool LuaBackend::handle_graphics_event(const GraphicsEvent& e, QString* err) {
 
 QString LuaBackend::table_str(const char* key, const QString& d) {
     QString r = d;
-    if (lua_getfield(m_lua, -1, key) == LUA_TSTRING)
+    if (raw_getfield(m_lua, -1, key) == LUA_TSTRING)
         r = QString::fromUtf8(lua_tostring(m_lua, -1));
     lua_pop(m_lua, 1);
     return r;
@@ -476,7 +745,8 @@ QString LuaBackend::table_str(const char* key, const QString& d) {
 
 quint64 LuaBackend::table_uint(const char* key, quint64 d) {
     quint64 r = d;
-    if (lua_isinteger(m_lua, lua_getfield(m_lua, -1, key)))
+    raw_getfield(m_lua, -1, key);
+    if (lua_isinteger(m_lua, -1))
         r = static_cast<quint64>(lua_tointeger(m_lua, -1));
     else if (lua_isnumber(m_lua, -1))
         r = static_cast<quint64>(lua_tonumber(m_lua, -1));
@@ -484,14 +754,20 @@ quint64 LuaBackend::table_uint(const char* key, quint64 d) {
     return r;
 }
 
-bool LuaBackend::convert_fields(QVector<MsduFieldNode>* out, QString* err) {
+bool LuaBackend::convert_fields(QVector<MsduFieldNode>* out, QString* err, int depth) {
     if (!lua_istable(m_lua, -1)) {
         *err = QStringLiteral("fields must be a table");
         return false;
     }
-    const lua_Integer n = luaL_len(m_lua, -1);
+    // 每层压 2 个槽(field 表 + 子字段);深嵌套超出保证的栈空间即越界写。
+    // lua_checkstack 失败只返回 0(不抛错);深度上限与主程序解码一致
+    if (depth >= kMaxLuaFieldDepth || !lua_checkstack(m_lua, 4)) {
+        *err = QStringLiteral("fields nested too deep (max %1 levels)").arg(kMaxLuaFieldDepth);
+        return false;
+    }
+    const lua_Integer n = static_cast<lua_Integer>(lua_rawlen(m_lua, -1));
     for (lua_Integer i = 1; i <= n; ++i) {
-        lua_geti(m_lua, -1, i);  // field 表
+        lua_rawgeti(m_lua, -1, i);  // field 表
         if (!lua_istable(m_lua, -1)) {
             *err = QStringLiteral("field #%1 must be a table").arg(i);
             lua_pop(m_lua, 1);
@@ -501,17 +777,17 @@ bool LuaBackend::convert_fields(QVector<MsduFieldNode>* out, QString* err) {
         node.name = table_str("name");
         node.value = table_str("value");
         // relStart/relLen 可选
-        lua_getfield(m_lua, -1, "relStart");
+        raw_getfield(m_lua, -1, "relStart");
         node.rel_start = lua_isinteger(m_lua, -1)
             ? static_cast<int>(lua_tointeger(m_lua, -1)) : -1;
         lua_pop(m_lua, 1);
-        lua_getfield(m_lua, -1, "relLen");
+        raw_getfield(m_lua, -1, "relLen");
         node.rel_len = lua_isinteger(m_lua, -1)
             ? static_cast<int>(lua_tointeger(m_lua, -1)) : 0;
         lua_pop(m_lua, 1);
         // children 可选(递归)
-        if (lua_getfield(m_lua, -1, "children") == LUA_TTABLE) {
-            if (!convert_fields(&node.children, err)) {
+        if (raw_getfield(m_lua, -1, "children") == LUA_TTABLE) {
+            if (!convert_fields(&node.children, err, depth + 1)) {
                 lua_pop(m_lua, 2);  // children + field
                 return false;
             }
@@ -523,7 +799,7 @@ bool LuaBackend::convert_fields(QVector<MsduFieldNode>* out, QString* err) {
     return true;
 }
 
-ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
+ParseResult LuaBackend::parse_impl(const BplcFrame& frame, MsduState& msdu,
                               const ParseFilter& filter, QString* err) {
     Q_UNUSED(msdu);   // Phase2:Lua 插件不支持跨帧重组
     Q_UNUSED(filter);
@@ -533,7 +809,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
     r.arrival_us = frame.arrival_us;
     r.payload_for_log = frame.data;
 
-    lua_getglobal(m_lua, "parse");
+    raw_getglobal(m_lua, "parse");
     if (!lua_isfunction(m_lua, -1)) {
         *err = QStringLiteral("parse() not found");
         lua_pop(m_lua, 1);
@@ -587,7 +863,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
     lua_pushstring(m_lua, frame.msdu_summary.toUtf8().constData());
     lua_setfield(m_lua, -2, "msduSummary");
 
-    if (lua_pcall(m_lua, 1, 1, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 1, 1) != LUA_OK) {
         *err = QStringLiteral("parse: %1").arg(pop_lua_error(m_lua));
         r.accept = false; r.reject_reason = *err;
         return r;
@@ -599,7 +875,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
         return r;
     }
 
-    lua_getfield(m_lua, -1, "accept");
+    raw_getfield(m_lua, -1, "accept");
     r.accept = lua_toboolean(m_lua, -1);
     lua_pop(m_lua, 1);
     if (!r.accept) {
@@ -610,7 +886,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
     }
 
     // mpdu 可选
-    if (lua_getfield(m_lua, -1, "mpdu") == LUA_TTABLE) {
+    if (raw_getfield(m_lua, -1, "mpdu") == LUA_TTABLE) {
         r.mpdu.frame_type = static_cast<quint8>(table_uint("frameType"));
         r.mpdu.src_tei = static_cast<quint16>(table_uint("srcTei"));
         r.mpdu.dst_tei = static_cast<quint16>(table_uint("dstTei"));
@@ -622,7 +898,7 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
 
     r.msdu.present = true;
     r.msdu.summary = table_str("summary");
-    if (lua_getfield(m_lua, -1, "fields") == LUA_TTABLE) {
+    if (raw_getfield(m_lua, -1, "fields") == LUA_TTABLE) {
         if (!convert_fields(&r.msdu.tree, err)) {
             lua_pop(m_lua, 2);  // fields + result
             r.accept = false; r.reject_reason = *err;
@@ -635,14 +911,14 @@ ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
     return r;
 }
 
-QString LuaBackend::call_text_function(const char* name, QString* err) {
-    lua_getglobal(m_lua, name);
+QString LuaBackend::call_text_function_impl(const char* name, QString* err) {
+    raw_getglobal(m_lua, name);
     if (!lua_isfunction(m_lua, -1)) {
         lua_pop(m_lua, 1);
         *err = QStringLiteral("function %1 not found").arg(QLatin1String(name));
         return QString();
     }
-    if (lua_pcall(m_lua, 0, 1, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 0, 1) != LUA_OK) {
         *err = QStringLiteral("%1: %2")
                    .arg(QLatin1String(name), pop_lua_error(m_lua));
         return QString();
@@ -656,16 +932,82 @@ QString LuaBackend::call_text_function(const char* name, QString* err) {
     return s;
 }
 
-void LuaBackend::notify_frame_selected(qint64 frameIndex, bool force_history) {
-    lua_getglobal(m_lua, "on_frame_selected");
+void LuaBackend::notify_frame_selected_impl(qint64 frameIndex, bool force_history) {
+    raw_getglobal(m_lua, "on_frame_selected");
     if (!lua_isfunction(m_lua, -1)) {
         lua_pop(m_lua, 1);
         return;  // 脚本不关心帧选中:静默忽略
     }
     lua_pushinteger(m_lua, static_cast<lua_Integer>(frameIndex));
     lua_pushboolean(m_lua, force_history);
-    if (lua_pcall(m_lua, 2, 0, 0) != LUA_OK) {
+    if (guarded_pcall(m_lua, 2, 0) != LUA_OK) {
         qWarning() << "LuaBackend::notify_frame_selected:"
                    << pop_lua_error(m_lua);
     }
+}
+
+// ---- 受保护入口:body 整体在 lua_pcall 内执行(L12) ----
+bool LuaBackend::run_protected(const std::function<void()>& body, QString* err) {
+    if (!m_lua) {
+        if (err) *err = QStringLiteral("Lua plugin is not initialized");
+        return false;
+    }
+    const int top = lua_gettop(m_lua);
+    if (!lua_checkstack(m_lua, 2)) {   // 不抛错
+        if (err) *err = QStringLiteral("Lua stack exhausted");
+        return false;
+    }
+    // 轻量 C 函数 + 轻量用户数据:压栈不分配内存,pcall 之外不会抛错
+    lua_pushcfunction(m_lua, protected_entry);
+    lua_pushlightuserdata(m_lua, const_cast<std::function<void()>*>(&body));
+    const int rc = lua_pcall(m_lua, 1, 0, 0);
+    if (rc == LUA_OK) {
+        lua_settop(m_lua, top);
+        return true;
+    }
+    // body 中未被内层 pcall 接住的错误(实际只剩内存不足):状态由 pcall 复原,插件仍可用
+    const QString msg = pop_lua_error(m_lua);
+    lua_settop(m_lua, top);
+    qWarning() << "LuaBackend: unprotected Lua error caught by entry pcall:" << msg;
+    if (err) *err = QStringLiteral("Lua error: %1").arg(msg);
+    return false;
+}
+
+ParseResult LuaBackend::parse(const BplcFrame& frame, MsduState& msdu,
+                              const ParseFilter& filter, QString* err) {
+    ParseResult r;
+    if (!run_protected([&] { r = parse_impl(frame, msdu, filter, err); }, err)) {
+        r = ParseResult();
+        r.meta = frame.meta;
+        r.raw_wire = frame.raw_wire;
+        r.arrival_us = frame.arrival_us;
+        r.payload_for_log = frame.data;
+        r.accept = false;
+        r.reject_reason = err ? *err : QStringLiteral("Lua error");
+    }
+    return r;
+}
+
+QImage LuaBackend::render_graphics(int w, int h, QString* err) {
+    QImage img;
+    if (!run_protected([&] { img = render_graphics_impl(w, h, err); }, err)) return QImage();
+    return img;
+}
+
+bool LuaBackend::handle_graphics_event(const GraphicsEvent& e, QString* err) {
+    bool redraw = false;
+    if (!run_protected([&] { redraw = handle_graphics_event_impl(e, err); }, err)) return false;
+    return redraw;
+}
+
+QString LuaBackend::call_text_function(const char* name, QString* err) {
+    QString s;
+    if (!run_protected([&] { s = call_text_function_impl(name, err); }, err)) return QString();
+    return s;
+}
+
+void LuaBackend::notify_frame_selected(qint64 frameIndex, bool force_history) {
+    QString err;
+    if (!run_protected([&] { notify_frame_selected_impl(frameIndex, force_history); }, &err))
+        qWarning() << "LuaBackend::notify_frame_selected:" << err;
 }

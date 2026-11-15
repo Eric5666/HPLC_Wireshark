@@ -5,8 +5,8 @@
 ///          其余累计 suppressed。回放结束时主程序调 pa::summarize() 输出
 ///          按类别汇总。线程安全(解析线程写 / 回放线程读用 QMutex 串行)。
 ///          本模块只打日志,绝不改变 accept/present/字段树等任何判定与返回值。
-#ifndef PARSE_ANOMALY_H
-#define PARSE_ANOMALY_H
+#ifndef BPLC_PARSE_ANOMALY_H
+#define BPLC_PARSE_ANOMALY_H
 
 #include <QDateTime>
 #include <QHash>
@@ -76,4 +76,4 @@ inline void summarize() {
 
 } // namespace pa
 
-#endif // PARSE_ANOMALY_H
+#endif  // BPLC_PARSE_ANOMALY_H

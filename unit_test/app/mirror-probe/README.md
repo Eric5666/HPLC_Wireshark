@@ -19,11 +19,19 @@ cd build/probe_fb && ./mirror_probe_fb [auto|…]
 - 默认 update.json 是
   `https://raw.githubusercontent.com/aron566/HPLC_Wireshark/main/update.json`，
   需要联网；无网时 30 秒后打印 TIMEOUT，exit 2。
-- `fb/` 子目录是第二种构建配置：用**本地** `fb/updatemirror.cpp`
-  （变体实现）替代仓库的 `src/app/updatemirror.cpp` 编译，
-  二进制为 `mirror_probe_fb`；`fb/probe_fb.pro` 的路径按其深度
-  用 4 层 `$$PWD/../../../../src/app`，不要改回 3 层。
+- `fb/` 子目录是第二种构建配置：编译**仓库里真实的** `src/app/updatemirror.cpp`
+  （不再维护分叉副本），只通过 `DEFINES` 把前两个区域识别源
+  （cloudflare trace / country.is）指向不可达地址，强制走 ipwho.is 回退链路；
+  二进制为 `mirror_probe_fb`，stderr 应出现 `region source ipwho.is reports …`。
+  `fb/probe_fb.pro` 的路径按其深度用 4 层 `$$PWD/../../../../src/app`，
+  不要改回 3 层。
 
 ## 预期结果（有网时）
 
 `mode=auto url=…` + `RESOLVED effective=… prefix=(native)`，exit 0。
+
+## CI
+
+`protocol-regression.yml` 的 `runtime-probes-linux` job：先单独构建（门禁），再经 `unit_test/ci/probe_suite.sh app/mirror-probe`
+运行 `mirror_probe auto` 与 `mirror_probe_fb auto`，断言 `RESOLVED effective=`；依赖外部服务，运行步 `continue-on-error`、
+脚本内失败重试一次。

@@ -2,8 +2,8 @@
 /// @brief 16 字节/行格式的 hex+ASCII 视图控件
 /// @details 高亮使用 QPlainTextEdit::setExtraSelections(文本选区),
 ///          由控件原生处理坐标/滚动/重绘,避免自绘 paintEvent 偏移问题。
-#ifndef HEXVIEW_H
-#define HEXVIEW_H
+#ifndef BPLC_HEXVIEW_H
+#define BPLC_HEXVIEW_H
 
 #include <QPlainTextEdit>
 #include <QByteArray>
@@ -56,4 +56,4 @@ private:
     void render_hex();
 };
 
-#endif // HEXVIEW_H
+#endif  // BPLC_HEXVIEW_H

@@ -11,13 +11,25 @@
 #include <QUrl>
 
 #include "appconfig.h"
+#include "net_size_cap.h"
 
 namespace {
 constexpr int kRegionTimeoutMs  = 3500;   // 出口区域识别(每源)
 constexpr int kProbeTimeoutMs   = 4500;   // 清单探活(原生/每个镜像)
-const char* kTraceUrl     = "https://www.cloudflare.com/cdn-cgi/trace";
-const char* kCountryIsUrl = "https://api.country.is/";
-const char* kIpwhoUrl     = "https://ipwho.is/";
+// 区域识别源地址可在编译期覆盖(仅供 unit_test/app/mirror-probe 的 fb 变体
+// 把前两个源指向不可达地址,验证回退到 ipwho.is 的链路;正式构建不定义)
+#ifndef BPLC_MIRROR_TRACE_URL
+#define BPLC_MIRROR_TRACE_URL "https://www.cloudflare.com/cdn-cgi/trace"
+#endif
+#ifndef BPLC_MIRROR_COUNTRY_IS_URL
+#define BPLC_MIRROR_COUNTRY_IS_URL "https://api.country.is/"
+#endif
+#ifndef BPLC_MIRROR_IPWHO_URL
+#define BPLC_MIRROR_IPWHO_URL "https://ipwho.is/"
+#endif
+const char* kTraceUrl     = BPLC_MIRROR_TRACE_URL;
+const char* kCountryIsUrl = BPLC_MIRROR_COUNTRY_IS_URL;
+const char* kIpwhoUrl     = BPLC_MIRROR_IPWHO_URL;
 } // namespace
 
 UpdateMirrorResolver::UpdateMirrorResolver(QObject* parent)
@@ -31,6 +43,8 @@ void UpdateMirrorResolver::get(const QString& url, int timeoutMs,
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = m_nam->get(req);
+    // 探活只读区域 JSON / update.json,超过上限即中止(按普通探测失败处理)
+    netcap::cap_reply_size(reply, netcap::kMaxManifestBytes);
     auto* timer = new QTimer(reply);
     timer->setSingleShot(true);
     connect(timer, &QTimer::timeout, reply, &QNetworkReply::abort);
@@ -41,7 +55,7 @@ void UpdateMirrorResolver::get(const QString& url, int timeoutMs,
     });
 }
 
-bool UpdateMirrorResolver::looksLikeManifest(const QByteArray& body,
+bool UpdateMirrorResolver::looks_like_manifest(const QByteArray& body,
                                                const QString& manifest_key) {
     const QJsonDocument doc = QJsonDocument::fromJson(body);
     return doc.isObject() && doc.object().contains(manifest_key);
@@ -70,18 +84,18 @@ void UpdateMirrorResolver::resolve(const QString& updateUrl,
         finish(m_url, QString());
     } else if (mode == QStringLiteral("proxy")) {
         qInfo("[update-mirror] mode=proxy, probing mirrors");
-        probeMirror(0);
+        probe_mirror(0);
     } else {
         if (mode != QStringLiteral("auto"))
             qWarning("[update-mirror] unknown mirror_mode \"%s\", falling back to auto",
                      qPrintable(mode));
-        detectRegion();
+        detect_region();
     }
 }
 
-void UpdateMirrorResolver::detectRegion() { detectFromSource(0); }
+void UpdateMirrorResolver::detect_region() { detect_from_source(0); }
 
-void UpdateMirrorResolver::detectFromSource(int idx) {
+void UpdateMirrorResolver::detect_from_source(int idx) {
     if (idx == 0) {
         // 源 1:Cloudflare cdn-cgi/trace(纯文本,loc=XX)
         get(QString::fromLatin1(kTraceUrl), kRegionTimeoutMs, [this](QNetworkReply* r) {
@@ -96,9 +110,9 @@ void UpdateMirrorResolver::detectFromSource(int idx) {
             if (loc.size() == 2) {
                 qInfo("[update-mirror] region source cloudflare-trace reports %s",
                       qPrintable(loc));
-                onRegion(loc);
+                on_region(loc);
             } else {
-                detectFromSource(1);
+                detect_from_source(1);
             }
         });
         return;
@@ -111,7 +125,7 @@ void UpdateMirrorResolver::detectFromSource(int idx) {
     };
     const int si = idx - 1;
     if (si >= int(sizeof(kJsonSources) / sizeof(kJsonSources[0]))) {
-        onRegion(QString());   // 三源全灭 → 未知,走原生探活链
+        on_region(QString());   // 三源全灭 → 未知,走原生探活链
         return;
     }
     const JsonSource src = kJsonSources[si];
@@ -128,43 +142,43 @@ void UpdateMirrorResolver::detectFromSource(int idx) {
             if (cc.size() == 2) {
                 qInfo("[update-mirror] region source %s reports %s",
                       src.name, qPrintable(cc));
-                onRegion(cc);
+                on_region(cc);
             } else {
-                detectFromSource(idx + 1);
+                detect_from_source(idx + 1);
             }
         });
 }
 
-void UpdateMirrorResolver::onRegion(const QString& countryCode) {
+void UpdateMirrorResolver::on_region(const QString& countryCode) {
     if (countryCode == QStringLiteral("CN")) {
         qInfo("[update-mirror] egress region=CN, probing mirrors");
-        probeMirror(0);
+        probe_mirror(0);
     } else if (!countryCode.isEmpty()) {
         qInfo("[update-mirror] egress region=%s, using native URL",
               qPrintable(countryCode));
         finish(m_url, QString());
     } else {
         qInfo("[update-mirror] egress region unknown, probing native URL first");
-        probeNative();
+        probe_native();
     }
 }
 
-void UpdateMirrorResolver::probeNative() {
+void UpdateMirrorResolver::probe_native() {
     get(m_url, kProbeTimeoutMs, [this](QNetworkReply* r) {
         const bool ok = r->error() == QNetworkReply::NoError
             && r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200
-            && looksLikeManifest(r->readAll(), m_manifest_key);
+            && looks_like_manifest(r->readAll(), m_manifest_key);
         if (ok) {
             qInfo("[update-mirror] native URL reachable, using native");
             finish(m_url, QString());
         } else {
             qWarning("[update-mirror] native URL probe failed, probing mirrors");
-            probeMirror(0);
+            probe_mirror(0);
         }
     });
 }
 
-void UpdateMirrorResolver::probeMirror(int index) {
+void UpdateMirrorResolver::probe_mirror(int index) {
     if (index >= m_mirrors.size()) {
         qWarning("[update-mirror] all mirrors unavailable, falling back to native URL");
         finish(m_url, QString());
@@ -174,13 +188,13 @@ void UpdateMirrorResolver::probeMirror(int index) {
     get(prefix + m_url, kProbeTimeoutMs, [this, index, prefix](QNetworkReply* r) {
         const bool ok = r->error() == QNetworkReply::NoError
             && r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200
-            && looksLikeManifest(r->readAll(), m_manifest_key);
+            && looks_like_manifest(r->readAll(), m_manifest_key);
         if (ok) {
             qInfo("[update-mirror] mirror selected: %s", qPrintable(prefix));
             finish(prefix + m_url, prefix);
         } else {
             qWarning("[update-mirror] mirror probe failed: %s", qPrintable(prefix));
-            probeMirror(index + 1);
+            probe_mirror(index + 1);
         }
     });
 }

@@ -79,16 +79,21 @@ QString assemble(const QByteArray& body, MpduInfo& info, MsduState& msdu,
             // eFC(表11/13,固定 16B):FCH 16B + eFC 16B = 32B。帧长不足 32B 时
             // eFC 字段读到 byte27 会越界(新 H1),先整帧拒收;再按南网同款
             // 校验 eFC CRC24(eFC[13..15],即 p[29..31]),不对同样整帧拒收。
-            if (body.size() < 32)
+            // 拒收时清空 PB/站点信息,树层不按半成品 MpduInfo 画 PB 节点。
+            if (body.size() < 32) {
+                info.pb_num = 0; info.pb_size = 0; info.sof_stations.clear();
                 return trl::L("OFDMA/TDA eFC 截断(帧长 %1B，需至少 32B)").arg(body.size());
+            }
             {
                 const quint32 efc_crc_calc = crc24_lsb(p + 16, 16);
                 const quint32 efc_crc_rx =
                     (quint32)p[29] | ((quint32)p[30] << 8) | ((quint32)p[31] << 16);
-                if (efc_crc_calc != efc_crc_rx)
+                if (efc_crc_calc != efc_crc_rx) {
+                    info.pb_num = 0; info.pb_size = 0; info.sof_stations.clear();
                     return trl::L("OFDMA/TDA eFC CRC24 错(calc=%1 rx=%2)")
                                .arg(efc_crc_calc, 6, 16, QChar('0'))
                                .arg(efc_crc_rx, 6, 16, QChar('0'));
+                }
             }
             const bool is_ofdma = (sof_dt == 2);
             // 站点数(表10 (7,3,2) / 表12 (7,3,2)):0=保留 1=2站 2=3站 3=4站

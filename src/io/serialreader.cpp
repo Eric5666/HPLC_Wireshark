@@ -15,7 +15,7 @@
 ReaderWorker::ReaderWorker(QObject* parent) : QObject(parent),
     m_serial(nullptr), m_file(nullptr),
     m_get3c(false), m_frame_rx_us(0), m_playback_base_ms(-1), m_first_frame(false),
-    m_last_ntb(0), m_last_ft(0), m_running(false), m_abort(false), m_active(false),
+    m_last_ntb(0), m_last_ft(0), m_running(false), m_active(false),
     m_raw_base_ms(-1),
     m_hex_seg_first(false), m_hex_seg_base_ts(0), m_hex_seg_base_us(0),
     m_last_local_ms(0), m_pending_seg_start(false), m_file_size(0), m_last_progress(-1),
@@ -26,18 +26,32 @@ ReaderWorker::~ReaderWorker() {
 }
 
 void ReaderWorker::abort() {
-    m_abort.store(true);
+    m_current_session.store(0);
+}
+
+quint64 ReaderWorker::begin_session() {
+    const quint64 id = m_session_gen.fetch_add(1) + 1;
+    m_current_session.store(id);
+    return id;
 }
 
 void ReaderWorker::start_reading(const ReaderConfig& cfg) {
+    start_session(cfg, begin_session());
+}
+
+void ReaderWorker::start_session(const ReaderConfig& cfg, quint64 session) {
     if (m_running) stop_reading();
+    m_run_session = session;
+    if (aborted()) {        // start 之后已 stop(或又 start 了新会话):不启动
+        emit finished();
+        return;
+    }
     if (m_file) {
         m_file->close();
         delete m_file;
         m_file = nullptr;
     }
     m_cfg = cfg;
-    m_abort.store(false);
     m_active.store(true);   // 采集/回放开始(串口/文件/裸hex 均计入)
     m_in_buf.clear();
     m_get3c = false;
@@ -85,7 +99,7 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
         m_frame_count = 0;
         // 一次性读完整文件(不用 timer,快速回放);每块 1MB,切帧即时 emit
         while (!m_file->atEnd()) {
-            if (m_abort.load()) break;   // 立即响应 stop()(切协议重建等)
+            if (aborted()) break;   // 立即响应 stop()(切协议重建等)
             QByteArray chunk = m_file->read(1024 * 1024);
             if (chunk.isEmpty()) break;
             m_in_buf.append(chunk);
@@ -122,7 +136,7 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
         m_raw_base_ms = -1;   // 未给出时间头 → 首帧用本地时刻作基准,段内按 NTB 差推进
         m_hex_seg_first = true;
         while (!m_file->atEnd()) {
-            if (m_abort.load()) break;   // 立即响应 stop()
+            if (aborted()) break;   // 立即响应 stop()
             QByteArray line = m_file->readLine().trimmed();
             if (line.isEmpty()) continue;
             // 时间头行(首帧时间文本,如 TIME: 2026-09-07 18:43:00.123)
@@ -142,9 +156,10 @@ void ReaderWorker::start_reading(const ReaderConfig& cfg) {
 }
 
 void ReaderWorker::stop_reading() {
+    // 只释放资源,不改会话号:排队中的 stop_reading 晚于新的 start() 执行时,
+    // 不能把新会话取消(取消由 GUI 线程 stop() 直接 abort() 完成)
     m_running = false;
     m_active.store(false);
-    m_abort.store(true);
     if (m_serial)   { m_serial->close(); m_serial->deleteLater(); m_serial = nullptr; }
     if (m_file)     { m_file->close(); m_file->deleteLater(); m_file = nullptr; }
     emit finished();
@@ -176,6 +191,39 @@ void ReaderWorker::on_serial_ready_read() {
     try_extract_frame();
 }
 
+int ReaderWorker::last_bcd_tag_offset(const QByteArray& buf) {
+    // 先按"8 字节都是 BCD 数字"快筛(随机数据命中率约 5e-4),命中再做完整日期校验
+    const auto* p = reinterpret_cast<const uchar*>(buf.constData());
+    for (qsizetype k = buf.size() - 8; k >= 0; --k) {
+        bool digits = true;
+        for (int j = 0; j < 8 && digits; ++j)
+            digits = (p[k + j] >> 4) <= 9 && (p[k + j] & 0x0F) <= 9;
+        if (digits && bcd_ms_of(buf.mid(k, 8)) >= 0) return int(k);
+    }
+    return -1;
+}
+
+bool ReaderWorker::emit_frame(const BplcFrame& frame) {
+    if (!m_credit) {
+        emit frame_ready(frame, FrameCredit::kNoGeneration);
+        return true;
+    }
+    quint64 gen = FrameCredit::kNoGeneration;
+    if (m_cfg.mode == ReaderMode::SerialPort) {
+        // 实时串口绝不阻塞读取:在此等待会让驱动/QSerialPort 缓冲溢出而静默丢字节。
+        // 只记在途数,不等待(串口速率本身有上限,无需背压)
+        if (aborted()) return false;
+        gen = m_credit->acquire_nowait();
+    } else if (!m_credit->acquire([this]() { return aborted(); }, &gen)) {
+        // 文件回放背压:在途帧已满时在此等待消费者;stop() 置中止标志后 50 ms 内放弃
+        return false;
+    }
+    // 额度代号随帧信号透传(不改 BplcFrame 布局,免动插件 ABI 指纹):消费者按代号
+    // 归还,新会话 reset 后旧会话迟到的归还不会扣减新会话的在途计数
+    emit frame_ready(frame, gen);
+    return true;
+}
+
 bool ReaderWorker::try_consume_bcd_tag() {
     // 仅文件回放有段间 8B 标注;合法 BCD 不含 0x3C/0x3D/0x3E,不会误吃帧哨兵
     if (m_cfg.mode != ReaderMode::FilePlayback || m_in_buf.size() < 8)
@@ -202,11 +250,13 @@ void ReaderWorker::emit_drop_frame(const QByteArray& wire, const QString& reason
     drop.accepted = false;
     drop.error_reason = reason;
     ++m_frame_count;
-    emit frame_ready(drop);
+    emit_frame(drop);
 }
 
 void ReaderWorker::try_extract_frame() {
     while (!m_in_buf.isEmpty()) {
+        // 每帧检查中止:大块回放时 stop() 不必等整块切完
+        if (aborted()) return;
         if (!m_get3c) {
             // 段间 8B 标注可能独占本段缓冲(0x3C 在下一次 1024B read)
             if (try_consume_bcd_tag())
@@ -217,9 +267,21 @@ void ReaderWorker::try_extract_frame() {
                 // 文件块末尾可能是下一段 BCD 的前 1~7B,留待下次 read 补齐。
                 if (m_cfg.mode == ReaderMode::FilePlayback && m_in_buf.size() < 8)
                     return;
-                // 无 0x3C:剔除 1 字节,回到循环顶重新匹配 8B BCD(滑窗对齐帧头)
-                m_in_buf.remove(0, 1);
-                continue;
+                // 无 0x3C:整段一次性丢弃(旧做法每次丢 1 字节再全量 indexOf,O(n²))。
+                // 串口:没有 BCD 标注,全部丢弃。回放:与逐字节滑窗等价——取缓冲内
+                // 最后一个完整 8B 标注(多个标注依次生效时最后一个胜出),否则只保留
+                // 末尾 7 字节(可能是下一段标注的前缀)。
+                if (m_cfg.mode != ReaderMode::FilePlayback) {
+                    m_in_buf.clear();
+                    return;
+                }
+                const int tag = last_bcd_tag_offset(m_in_buf);
+                if (tag >= 0) {
+                    m_in_buf.remove(0, tag);   // 循环顶 try_consume_bcd_tag 吃掉它
+                    continue;
+                }
+                m_in_buf.remove(0, m_in_buf.size() - 7);
+                return;
             }
             if (idx > 0) {
                 // 0x3C 前紧贴完整 8B 标注(标注前允许有噪声)
@@ -266,7 +328,7 @@ void ReaderWorker::try_extract_frame() {
                     // 下一真帧的时间仍以前一真帧为基准(commit 3 的解析器锚点同理)
                     ++m_frame_count;
                     drop.meta.local_rx_ms = QDateTime::currentMSecsSinceEpoch();  // 收帧本地时刻(回退显示时间用)
-                    emit frame_ready(drop);
+                    emit_frame(drop);
                 }
                 m_in_buf.remove(0, next_3c);
                 continue;
@@ -323,7 +385,7 @@ void ReaderWorker::try_extract_frame() {
                 drop.error_reason = trl::L("DROP:双 0x3C 成帧垃圾");
                 ++m_frame_count;
                 drop.meta.local_rx_ms = QDateTime::currentMSecsSinceEpoch();  // 收帧本地时刻(回退显示时间用)
-                emit frame_ready(drop);
+                emit_frame(drop);
             }
             m_in_buf.remove(0, idx3c);
             m_get3c = false;
@@ -389,7 +451,7 @@ void ReaderWorker::try_extract_frame() {
             drop.error_reason = trl::L("DROP:帧长小于 FCH(16B)");
             ++m_frame_count;
             drop.meta.local_rx_ms = QDateTime::currentMSecsSinceEpoch();  // 收帧本地时刻(回退显示时间用)
-            emit frame_ready(drop);
+            emit_frame(drop);
             continue;
         }
 
@@ -479,7 +541,7 @@ void ReaderWorker::try_extract_frame() {
         bf.meta.has_time_tag = false;
         bf.data = unesc;
         ++m_frame_count;
-        emit frame_ready(bf);
+        emit_frame(bf);
     }
 }
 
@@ -556,7 +618,7 @@ void ReaderWorker::process_raw_hex_line(const QByteArray& line) {
         bf.meta.local_rx_ms = QDateTime::currentMSecsSinceEpoch();  // 收帧本地时刻(解析器回退显示时间用)
         bf.raw_wire   = raw;   // 0x3C...0x3E 原样
         bf.data       = data;  // 反转义后的 [dlen][ts][media][MPDU]
-        emit frame_ready(bf);
+        emit_frame(bf);
         return;
     }
 }
@@ -591,10 +653,12 @@ qint64 ReaderWorker::bcd_ms_of(const QByteArray& b) {
 SerialReader::SerialReader(QObject* parent) : QObject(parent), m_thread(nullptr), m_worker(nullptr) {
     m_thread = new QThread(this);
     m_worker = new ReaderWorker();
+    m_credit = std::make_shared<FrameCredit>();   // 消费者接入前不限流(enabled=false)
+    m_worker->set_flow_credit(m_credit);
     m_worker->moveToThread(m_thread);
     connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
 
-    connect(this, &SerialReader::request_start, m_worker, &ReaderWorker::start_reading);
+    connect(this, &SerialReader::request_start, m_worker, &ReaderWorker::start_session);
     connect(this, &SerialReader::request_stop,  m_worker, &ReaderWorker::stop_reading);
 
     connect(m_worker, &ReaderWorker::frame_ready,    this, &SerialReader::on_frame);
@@ -607,13 +671,25 @@ SerialReader::SerialReader(QObject* parent) : QObject(parent), m_thread(nullptr)
 }
 
 SerialReader::~SerialReader() {
+    // 所有回放/切帧循环与背压等待都检查会话号,stop() 后在有限时间内返回,
+    // 因此可以无超时等待;旧实现 wait(2000) 超时后析构仍在运行的 QThread 会 qFatal
     stop();
     m_thread->quit();
-    m_thread->wait(2000);
+    if (!m_thread->wait(5000)) {
+        // 有界首等:超时只告警不放弃(强杀/析构仍在跑的 QThread 都更糟),随后继续等到退出
+        qWarning() << "SerialReader: thread still running after 5000 ms, waiting for it to finish";
+        m_thread->wait();
+    }
 }
 
 bool SerialReader::start(const ReaderConfig& cfg) {
-    emit request_start(cfg);
+    // GUI 线程分配会话号:旧会话立即失效(回放循环/背压等待随即退出),
+    // 之后若紧跟 stop(),worker 再处理本次 start 时会直接返回
+    const quint64 session = m_worker->begin_session();
+    // 新会话:额度换代,上一会话未归还/迟到的 release 一律作废。必须在 begin_session
+    // 之后:否则 reset 唤醒的旧回放循环尚未见到中止,会抢到新一代额度
+    m_credit->reset();
+    emit request_start(cfg, session);
     return true;
 }
 
@@ -628,7 +704,7 @@ bool SerialReader::is_running() const {
     return m_worker && m_worker->is_active();
 }
 
-void SerialReader::on_frame(BplcFrame f) { emit frame_ready(f); }
+void SerialReader::on_frame(BplcFrame f, quint64 credit_gen) { emit frame_ready(f, credit_gen); }
 void SerialReader::on_status(QString s) { emit status_message(s); }
 void SerialReader::on_error(QString e)  { emit error_occurred(e); }
 void SerialReader::on_progress(int p)   { emit progress_percent(p); }

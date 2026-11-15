@@ -76,6 +76,9 @@ include(src/plugin/app_integration/app_integration.pri)
 include(src/plugin/market/market.pri)
 include(src/app/app.pri)
 
+# 插件自动化截图测试(测试侧代码,默认不编进产品):qmake CONFIG+=plugin_autotest
+plugin_autotest: include(unit_test/app/plugin-autotest/plugin_autotest.pri)
+
 # main.cpp 在工程根目录,不在任何模块里
 SOURCES += main.cpp
 HEADERS +=

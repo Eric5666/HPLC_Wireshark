@@ -15,7 +15,7 @@
 ///   每个已安装插件目录下有 meta.json: { "enabled": bool, "installed_at",
 ///   "source", "updated_at" }。README 优先读插件目录下 README.md,
 ///   其次拉取 feed 的 readme_url。
-///   校验链(当前):feed 提供的 sha256 校验下载包 + 清单合法性 +
+///   校验链(当前):feed 必须提供 sha256(缺失/格式错拒装)并校验下载包 + 清单合法性 +
 ///   min_app_version 兼容性。Ed25519 官方签名为后续步骤,见 docs/MARKET.md。
 #ifndef BPLC_PLUGIN_MARKET_H
 #define BPLC_PLUGIN_MARKET_H
@@ -101,6 +101,9 @@ public:
     /// @brief 将市场资源 URL 按 feed 选中的代理前缀改写(已改写/非 HTTP URL 保持不变)
     static QString resolve_market_url(const QString& url,
                                       const QString& mirror_prefix);
+    /// @brief 文本拉取允许的 URL 方案(M3):只放行 http/https;file:// 仅在调试构建
+    ///        或环境变量 BPLC_ALLOW_FILE_FEED=1 时放行(本地联调用)
+    static bool is_allowed_text_url(const QString& url);
     /// @brief 拉取任意文本(如 README markdown,异步)
     void fetch_text(const QString& url,
                     const QString& mirror_prefix = QString());
@@ -113,6 +116,8 @@ public:
     /// @brief 部署/卸载前卸载插件的回调(删除旧目录前调用,需同步等待
     ///        native DLL 释放文件锁;由主界面注入 unload_all_sync)
     std::function<void()> unload_cb;
+    /// @brief unload_cb 之后部署失败时调用:重新加载插件,避免用户插件停在卸载状态
+    std::function<void()> reload_cb;
 
     /// @brief 扫描安装目录,返回已安装插件
     QList<InstalledPlugin> installed_plugins() const;
@@ -125,15 +130,27 @@ public:
                                            const QList<MarketPlugin>& feed);
 
     // ---- 静态工具(可独立测试) ----
+    /// @brief 安装根目录 base 下插件 name 的目录路径(路径穿越防护,三处入口共用)
+    /// @return 合法时返回规范化绝对路径;name 不合白名单、不是 base 的一级子目录、
+    ///         或已存在目录(含符号链接)解析后落在 base 之外时返回空串
+    static QString plugin_dir_path(const QString& base_dir, const QString& name);
+    /// @brief 是否为 64 位十六进制 SHA-256 摘要(市场安装的必要条件)
+    static bool is_sha256_hex(const QString& s);
     static bool verify_sha256(const QString& file_path,
                               const QString& expected_hex);
+    /// @brief 解包到 dest_dir:拒绝不安全条目名(见 safe_extract_path),
+    ///        限制单条目 64 MB / 总量 256 MB / 条目数 4096
     static bool unzip_to_dir(const QString& zip_path, const QString& dest_dir,
                              QString* err);
+    /// @brief zip 条目在 dest_dir 下的落盘路径;绝对路径、盘符、UNC、反斜杠、
+    ///        ".." 组件或规范化后不在 dest_dir 内时返回空串
+    static QString safe_extract_path(const QString& dest_dir,
+                                     const QString& entry_name);
     /// @brief 语义化版本比较: <0(a<b) 0(==) >0(a>b)
     static int compare_version(const QString& a, const QString& b);
     /// @brief 当前宿主版本是否满足 min_app_version
     static bool app_version_ok(const QString& min_app_version);
-    /// @brief 当前运行平台标识,如 linux-x86_64 / windows-x86_64
+    /// @brief 当前运行平台标识,如 linux-x86_64 / linux-arm64 / windows-x86_64 / windows-arm64(见 plugin_host_platform())
     static QString current_platform();
     /// @brief 该版本是否可在当前平台安装(platforms 为空=全平台)
     static bool version_platform_ok(const MarketVersion& v);
@@ -151,18 +168,21 @@ signals:
     void install_finished(bool ok, const QString& error, const QString& name);
 
 private:
-    void finish_install_from_zip(const QString& zip_path,
-                                 const QString& expected_sha256);
+    /// @brief 一次安装的上下文(按值随请求传递;并发安装互不串扰)
+    struct InstallContext {
+        QString name;        ///< 期望的插件名(离线安装解包后才知道)
+        QString sha256;      ///< 期望的 sha256(离线安装为空)
+        QString source;      ///< 来源(feed URL / file)
+        QString updated_at;  ///< 版本更新时间(可空)
+    };
+    void finish_install_from_zip(const QString& zip_path, const InstallContext& ctx);
     bool deploy_staged(const QString& staged_dir, const QString& plugin_name,
-                       QString* err);
+                       const InstallContext& ctx, QString* err);
     /// 写插件目录下的 meta.json(默认启用,记录来源与版本更新时间)
-    bool write_meta_json(const QString& plugin_dir, QString* err);
+    static bool write_meta_json(const QString& plugin_dir, const InstallContext& ctx,
+                                QString* err);
 
     QNetworkAccessManager* m_nam = nullptr;
-    QString m_pending_name;       ///< 本次安装中的插件名
-    QString m_pending_sha256;     ///< 本次安装期望的 sha256(离线安装为空)
-    QString m_pending_source;     ///< 本次安装的来源(feed URL / offline / file)
-    QString m_pending_updated_at; ///< 本次安装版本的更新时间(可空)
 };
 
 #endif // BPLC_PLUGIN_MARKET_H

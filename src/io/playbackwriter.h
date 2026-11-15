@@ -9,8 +9,8 @@
 ///          (年月日时分秒毫秒,与解码器 has_time_tag 头同构):
 ///          data = [bcd_time8][dlen2LE][ts4LE][phr][option][channel][isRF][MPDU]。
 ///          原始捕获时刻;老文件(无该字段)回退到本地时间。
-#ifndef PLAYBACKWRITER_H
-#define PLAYBACKWRITER_H
+#ifndef BPLC_PLAYBACKWRITER_H
+#define BPLC_PLAYBACKWRITER_H
 
 #include "bplcframe.h"
 #include <QVector>
@@ -352,4 +352,4 @@ private:
 
 }  // namespace playback
 
-#endif // PLAYBACKWRITER_H
+#endif  // BPLC_PLAYBACKWRITER_H

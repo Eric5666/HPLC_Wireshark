@@ -4,8 +4,8 @@
 ///          链路层与国网 GW_2022 差异:FCH 网络标识为 SNID 4b(非 NID 24b),
 ///          各帧型字段坐标不同,MSDU 头用 MAC 48b + VLAN 标签。
 ///          字段坐标以协议原文为准。
-#ifndef NW_2021_PARSER_H
-#define NW_2021_PARSER_H
+#ifndef BPLC_NW_2021_PARSER_H
+#define BPLC_NW_2021_PARSER_H
 
 #include "bplcframe.h"
 #include "iprotocolparser.h"
@@ -36,4 +36,4 @@ private:
     DisplayContext m_display_ctx;     ///< 分发器给的行序号 + 本地时间
 };
 
-#endif // NW_2021_PARSER_H
+#endif  // BPLC_NW_2021_PARSER_H

@@ -46,6 +46,7 @@ static QByteArray build_gw_multi(bool is_tda, bool flip0, bool flip1) {
     else
         set_bits(e, 2, 0, 5, 2);     // OFDMA 分集拷贝模式(表11 (b+2,0,5))
     // OFDMA 站点 1 PB 数码 (18,5,1)=0 -> 1 块(留 0)
+    put_crc24(e, 16);                // eFC FCS -> bytes 29..31(上游 877f838 起 eFC CRC24 错整帧拒收)
     f.replace(32, 136, build_gw_block(flip0));
     f.replace(168, 136, build_gw_block(flip1));
     return f;
@@ -94,6 +95,16 @@ int main(int argc, char** argv) {
     run("ofdma-flipboth", false, true, true, {false, false});
     run("tda-ok", true, false, false, {true, true});
     run("tda-flip1", true, false, true, {true, false});
+
+    // eFC FCS 坏 ⇒ 整帧拒收(与 FC CRC 坏同口径),不出站点
+    for (bool is_tda : {false, true}) {
+        QByteArray f = build_gw_multi(is_tda, false, false);
+        f[29] = char(quint8(f[29]) ^ 0x01);
+        MpduInfo info; MsduState msdu; QByteArray complete;
+        const QString err = gw_2026_sof::assemble(f, info, msdu, complete, 0xFF, false);
+        check(is_tda ? "tda-bad-efc rejected" : "ofdma-bad-efc rejected",
+              err.contains(QStringLiteral("CRC24")) && info.sof_stations.isEmpty());
+    }
 
     std::printf("RESULT: %s\n", fails == 0 ? "ALL PASS" : "FAILURES");
     return fails == 0 ? 0 : 1;

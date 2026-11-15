@@ -745,6 +745,123 @@ int main(int argc, char** argv) {
           normalized.has_channel_info && normalized.reporter_tei == kTei
           && normalized.channel_event.nid == kNid);
 
+    // ---- 存储失败语义(同线程直接调用 worker 槽)
+    {
+        QTemporaryDir dir;
+        const QString db_path = dir.filePath(QStringLiteral("store-fail.sqlite3"));
+        TopoReplayWorker worker(db_path, 2, 4);
+        QStringList errors;
+        int live_changes = 0, resets = 0;
+        TopoFramePage frame_page; bool frame_page_seen = false;
+        TopoAnomalyPage anomaly_page; bool anomaly_page_seen = false;
+        QObject::connect(&worker, &TopoReplayWorker::worker_error, &app,
+            [&](const QString& m) { errors << m; }, Qt::DirectConnection);
+        QObject::connect(&worker, &TopoReplayWorker::live_state_changed, &app,
+            [&](quint32, const TopoState&) { ++live_changes; }, Qt::DirectConnection);
+        QObject::connect(&worker, &TopoReplayWorker::live_states_reset, &app,
+            [&](const TopoStateMap&) { ++resets; }, Qt::DirectConnection);
+        QObject::connect(&worker, &TopoReplayWorker::frame_page_ready, &app,
+            [&](const TopoFramePage& p) { frame_page = p; frame_page_seen = true; }, Qt::DirectConnection);
+        QObject::connect(&worker, &TopoReplayWorker::anomaly_page_ready, &app,
+            [&](const TopoAnomalyPage& p) { anomaly_page = p; anomaly_page_seen = true; }, Qt::DirectConnection);
+        worker.initialize();
+        worker.submit_frame(association_frame(1, kMac));
+        const int changes_after_first = live_changes;
+
+        auto side_exec = [&](const QString& sql) {
+            bool ok = false;
+            {
+                QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), QStringLiteral("store-fail-side"));
+                db.setDatabaseName(db_path);
+                if (db.open()) {
+                    QSqlQuery q(db);
+                    ok = q.exec(sql);
+                    if (!ok) std::fprintf(stderr, "side sql failed: %s\n", qPrintable(q.lastError().text()));
+                }
+                db.close();
+            }
+            QSqlDatabase::removeDatabase(QStringLiteral("store-fail-side"));
+            return ok;
+        };
+
+        // 1) 入库失败:实时拓扑照常推进(与 main 一致),历史回放标记不可用,错误只报一次
+        const bool trig = side_exec(QStringLiteral(
+            "CREATE TRIGGER block_insert BEFORE INSERT ON topo_frames BEGIN SELECT RAISE(ABORT,'injected insert failure'); END;"));
+        errors.clear();
+        worker.submit_frame(association_frame_for(2, 6, kMac + 1));
+        const int changes_after_fail1 = live_changes;
+        worker.submit_frame(association_frame_for(3, 7, kMac + 2));
+        CHECK("store-fail: failed frame insert still advances live topology",
+              trig && changes_after_first > 0 && changes_after_fail1 > changes_after_first
+              && live_changes > changes_after_fail1);
+        CHECK("store-fail: consecutive insert failures reported once",
+              errors.size() == 1 && errors.value(0).contains(QStringLiteral("insert topology frame")));
+        bool hist_ok = false, hist_failed = false;
+        QObject::connect(&worker, &TopoReplayWorker::history_ready, &app,
+            [&](quint64 id, qint64, qint64, bool, const TopoStateMap&) { hist_ok = id == 7301; }, Qt::DirectConnection);
+        QObject::connect(&worker, &TopoReplayWorker::history_failed, &app,
+            [&](quint64 id, qint64, qint64, bool, const QString&) { hist_failed = id == 7300; }, Qt::DirectConnection);
+        worker.request_history(7300, 3, 1003, true);
+        CHECK("store-fail: history replay is marked unavailable after an insert failure",
+              hist_failed && !hist_ok && errors.size() == 1);
+        side_exec(QStringLiteral("DROP TRIGGER block_insert"));
+        const int changes_before_recover = live_changes;
+        worker.submit_frame(association_frame_for(4, 8, kMac + 3));
+        CHECK("store-fail: live topology keeps advancing after inserts recover",
+              live_changes > changes_before_recover && errors.size() == 1);
+        // 成功清库后库与实时状态重新一致,历史回放恢复可用(不永久中毒)
+        resets = 0;
+        worker.clear();
+        worker.submit_frame(association_frame(1, kMac));
+        worker.submit_frame(association_frame_for(2, 6, kMac + 1));
+        worker.request_history(7301, 2, 1002, true);
+        CHECK("store-fail: successful clear makes history replay available again",
+              resets == 1 && hist_ok && errors.size() == 1);
+
+        // 2) 清库失败:内存实时状态仍随帧序号重置,历史标记不可用;此后帧序号从 1 重来,
+        //    不得把每一帧都当乱序帧触发全量回放(回放风暴)
+        const bool trig2 = side_exec(QStringLiteral(
+            "CREATE TRIGGER block_delete BEFORE DELETE ON topo_frames BEGIN SELECT RAISE(ABORT,'injected delete failure'); END;"));
+        errors.clear(); resets = 0;
+        worker.clear();
+        CHECK("store-fail: failed clear is reported and still resets the live view",
+              trig2 && resets == 1 && errors.size() == 1
+              && errors.value(0).contains(QStringLiteral("clear topology store")));
+        hist_failed = false;
+        QObject::connect(&worker, &TopoReplayWorker::history_failed, &app,
+            [&](quint64 id, qint64, qint64, bool, const QString&) { if (id == 7302) hist_failed = true; }, Qt::DirectConnection);
+        worker.request_history(7302, 1, 1001, true);
+        CHECK("store-fail: history is unavailable after a failed clear", hist_failed);
+        const int changes_before_restart = live_changes;
+        for (int i = 1; i <= 8; ++i)
+            worker.submit_frame(association_frame_for(i, quint16(10 + i), kMac + 0x100 + quint64(i)));
+        CHECK("store-fail: frames after a failed clear do not trigger replay",
+              resets == 1 && live_changes >= changes_before_restart + 8 && errors.size() == 1);
+        side_exec(QStringLiteral("DROP TRIGGER block_delete"));
+        worker.clear();
+        worker.submit_frame(association_frame(1, kMac));
+        worker.submit_frame(association_frame_for(2, 6, kMac + 1));
+        frame_page_seen = false;
+        worker.request_frame_page(1, 0, 50);
+        CHECK("store-fail: store recovers after the next successful clear",
+              resets == 2 && frame_page_seen && frame_page.ok && frame_page.total == 2);
+
+        // 3) 分页查询出错:ok=false + error,不是空结果
+        const bool dropped = side_exec(QStringLiteral("DROP TABLE topo_anomalies"));
+        anomaly_page_seen = false;
+        worker.request_anomaly_page(2, kNid, 0, 50);
+        CHECK("store-fail: anomaly page error is flagged, not an empty page",
+              dropped && anomaly_page_seen && !anomaly_page.ok && !anomaly_page.error.isEmpty()
+              && anomaly_page.items.isEmpty());
+
+        // 4) 正常清库仍然有效(重建表后)
+        side_exec(QStringLiteral("CREATE TABLE topo_anomalies(x)"));
+        worker.request_frame_page(3, 0, 50);
+        CHECK("store-fail: ok page carries ok=true and no error",
+              frame_page.ok && frame_page.error.isEmpty() && frame_page.total == 2);
+        worker.shutdown();
+    }
+
     std::printf("RESULT: %s failures: %d\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

@@ -1,29 +1,41 @@
 # golden
 
-PacketEntry 块序列化 golden：合成 1/57/250/1000 条目块，
-编码后打印 `n/bytes/sha256`。
+PacketEntry 块序列化 golden（盘块换页格式 `pser::encode_block` / `decode_block`）：合成 1/57/250/1000
+条目块，与入库的 `v<block_version>_n<N>.bin` 比对。
 
 ## 构建与运行
 
 ```
 ./build.sh
-mkdir -p build/run && cd build/run && ../golden/golden
+mkdir -p build/run && cd build/run
+../golden/golden --check ../..      # CI 门禁
 ```
 
-**不要在用例根目录运行**：程序把 `v3_n%1.bin` 写到当前目录，
-在根目录运行会覆盖已入库的 golden 文件。
-正确做法是在 `build/run/`（忽略目录）里跑，再比对 sha256。
+`--check <dir>` 逐档检查：
 
-## 状态：已入库 golden 已过期
+1. 编码 → `decode_block` → 再编码，逐字节一致（无损往返、条目数正确）；
+2. 当前读取器能解 `<dir>/v<ver>_n<N>.bin`（`<ver>` = `pser::block_version()`）；
+3. 解出的 golden 用当前编码器重编码 == 本次编码（按内容比对：块内字符串池经 `qCompress`
+   用系统 zlib，不同 zlib 实现压缩字节可能不同而内容相同；字节不同但内容相同时只打印 note）。
 
-再生字节与已入库文件全部不匹配
-（330 vs 312、5802 vs 5514、24207 vs 22720、95505 vs 90080 字节，
-约每条目 +5 字节），说明 `packetentry_serialize` 的格式自 golden
-录制后已漂移。已入库文件原样保留未覆盖；是否重录 golden
-需另行决定——归集时不擅自用新输出覆盖参考文件。
+预期 `RESULT: ALL PASS (0 failures)`，exit 0。CI：`protocol-regression.yml` 的 `protocol-probes-linux` job。
 
-## 搬迁说明
+## 格式有意变更时
 
-`main.cpp` 的输出路径原为绝对旧路径
-`/home/hatch/workspace/golden/v3_n%1.bin`，已改为 CWD 相对
-`v3_n%1.bin`（纯路径字面量，编码/打印逻辑不动）。
+`packetentry_serialize.h` 改了块格式就必须 bump `block_version()`（读取器拒绝其他版本），
+然后重录 golden 并删除旧版本文件：
+
+```
+cd build/run && ../golden/golden --record ../.. && git rm ../../v<旧版本>_n*.bin
+```
+
+格式变了却没 bump 版本 ⇒ 第 2/3 项失败（golden 解不出或内容不同）；bump 了没重录 ⇒
+`golden v<新版本>_n<N>.bin present` 失败。
+
+无参数运行保持旧行为：在 CWD 写 `v<ver>_n<N>.bin` 并打印 sha256，**不要在用例根目录无参运行**。
+
+## 历史
+
+归集时入库的是 v3 格式 golden（`v3_n*.bin`），格式已演进到 v20，旧文件早已无法被读取器解码、
+再生字节也全部不同（README 记为"已过期"）。2026-11 起改为按 `block_version` 命名并重录 v20、
+删除 v3 文件，同时加 `--check` 模式接入 CI。

@@ -2,7 +2,7 @@
 # Craft NW_2026 (SPLC) test MPDUs with known TEI-MAC pairs for the learn probe.
 # Layouts verified against nw_2026_parser.cpp / nw_2026_msdu_parser.cpp.
 # All CRCs: crc24_lsb (poly 0xC60001, init 0, LSB-first), stored LE.
-import struct, os
+import struct, os, zlib
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crafted")
 os.makedirs(OUT, exist_ok=True)
@@ -86,7 +86,10 @@ def data_msdu(src, dst, total):
 def mme_msdu(src, dst, mme_type, body, pad_to):
     mme = bytes([0x01, mme_type & 0xFF, (mme_type >> 8) & 0xFF, 0, 0, 0]) + body
     portion = msdu_header(dst, src, True) + mme
-    full = msdu(src, dst, portion)
+    # MSDU 帧尾 4B CRC32(载荷区 = MAC 头 32B 之后 MSDULength 字节;与 crc.h::crc32_le 同语义 =
+    # zlib.crc32,小端)。旧版不写 CRC、后面直接补零:补的 0 被当成 CRC32 ⇒ FAIL ⇒ MSDU CRC 门控
+    # 清空摘要、不学习(TEI 列表 / Gather 两帧学不到),属夹具过时而非解析器回归。
+    full = msdu(src, dst, portion) + struct.pack("<I", zlib.crc32(portion) & 0xFFFFFFFF)
     assert len(full) <= pad_to
     return full + bytes(pad_to - len(full))
 

@@ -88,14 +88,17 @@ void PluginHost::on_connected() {
 void PluginHost::on_ready_read() {
     m_rx_buf.append(m_socket.readAll());
     // 帧:[quint32 len][quint8 type][payload]
-    while (m_rx_buf.size() >= 5) {
-        QDataStream hdr(m_rx_buf);
-        hdr.setVersion(plugin_ipc::kStreamVersion);
-        quint32 len = 0;
-        hdr >> len;
-        if (m_rx_buf.size() < 4 + (int)len) break;  // 等更多数据
-        const QByteArray frame = m_rx_buf.mid(4, len);
-        m_rx_buf.remove(0, 4 + len);
+    for (;;) {
+        QByteArray frame;
+        const auto took = plugin_ipc::try_take_frame(m_rx_buf, frame);
+        if (took == plugin_ipc::FrameTake::NeedMore) break;  // 等更多数据
+        if (took == plugin_ipc::FrameTake::Bad) {
+            // 帧长非法:流已失步,断开并退出(主程序会把插件标为断开)
+            m_rx_buf.clear();
+            m_socket.abort();
+            QCoreApplication::exit(3);
+            return;
+        }
 
         QDataStream ds(frame);
         ds.setVersion(plugin_ipc::kStreamVersion);

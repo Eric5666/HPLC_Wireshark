@@ -111,21 +111,76 @@ local function crc32_le(tvb, off, len)
 end
 
 -- 语言开关: 读取 Wireshark 界面语言 (Edit→Preferences→Appearance→Language)
--- Wireshark 4.x 把界面语言存于 %APPDATA%\Wireshark\language 文件 (内容如 "language: en")
+-- Wireshark 4.x 把界面语言存于个人配置目录的 language 文件 (Windows: %APPDATA%\Wireshark\language,
+-- Linux/macOS: ~/.config/wireshark/language; 内容如 "language: en")
 -- Lua pref 在脚本加载阶段恒为默认值, 无法用于决定字段名; 直接读该文件最可靠
 
--- 判断系统语言是否为中文: 优先 LANG 环境变量, 其次 Windows 注册表 (GUI 从桌面启动时无 LANG)
+-- 判断系统语言是否为中文: 优先 LC_ALL/LC_MESSAGES/LANG 环境变量, 其次仅在 Windows 查注册表 (GUI 从桌面启动时无 LANG)
 local function system_is_chinese()
-    local lc = os.getenv("LANG") or os.getenv("LANGUAGE") or ""
-    if lc:lower():match("^zh") then return true end
-    -- Windows 注册表 LocaleName (如 zh-CN)
-    local h = io.popen('reg query "HKCU\\Control Panel\\International" /v LocaleName 2>nul')
-    if h then
-        local out = h:read("*a")
+    -- 1) 区域设置环境变量 (POSIX 优先级 LC_ALL > LC_MESSAGES > LANG, 首个非空者决定; 都没设再看 GNU LANGUAGE)
+    local function env(name)
+        local v = os.getenv(name)
+        if v and v ~= "" then return v end
+        return nil
+    end
+    local lc = env("LC_ALL") or env("LC_MESSAGES") or env("LANG")
+    if lc then
+        if lc:lower():match("^zh") then return true end
+    else
+        local language = env("LANGUAGE")
+        if language and language:lower():match("^zh") then return true end
+    end
+    -- 2) 仅 Windows: 注册表 LocaleName (如 zh-CN; GUI 从桌面启动时通常无 LANG)
+    --    非 Windows 绝不执行: POSIX shell 会把 "2>nul" 当成重定向到当前目录下名为 nul 的文件并创建它,
+    --    而且 Linux/macOS 上本就没有 reg 命令
+    local sep = (type(package) == "table" and type(package.config) == "string"
+                 and package.config:sub(1, 1)) or "/"
+    if sep ~= "\\" or lc then return false end
+    if type(io) ~= "table" or type(io.popen) ~= "function" then return false end
+    local ok, h = pcall(io.popen, 'reg query "HKCU\\Control Panel\\International" /v LocaleName 2>nul')
+    if ok and h then
+        local out = h:read("*a") or ""
         h:close()
         if out:lower():match("zh%-") then return true end
     end
     return false
+end
+
+-- Wireshark 界面语言文件路径 (跨平台, 取不到返回 nil, 调用方回退默认语言, 绝不抛错)
+--   Windows : %APPDATA%\Wireshark\language
+--   其他平台: 优先 Wireshark API Dir.personal_config_path("language") (pcall 包住, 存在才用),
+--             否则 $XDG_CONFIG_HOME/wireshark/language, 再否则 $HOME/.config/wireshark/language
+--             (macOS 的 Wireshark 同样用 ~/.config/wireshark)
+-- 旧代码 os.getenv("APPDATA") .. "\\Wireshark\\language" 在 Linux/macOS 上 getenv 返回 nil,
+-- 拼接抛错导致整个插件加载失败
+local function wireshark_language_file()
+    local sep = (type(package) == "table" and type(package.config) == "string"
+                 and package.config:sub(1, 1)) or "/"
+    local function env(name)
+        local v = os.getenv(name)
+        if v and v ~= "" then return v end
+        return nil
+    end
+    local function ws_api_path()
+        if type(Dir) ~= "table" and type(Dir) ~= "userdata" then return nil end
+        local ok_get, fn = pcall(function() return Dir.personal_config_path end)
+        if not ok_get or type(fn) ~= "function" then return nil end
+        local ok, p = pcall(fn, "language")
+        if ok and type(p) == "string" and p ~= "" then return p end
+        return nil
+    end
+    if sep == "\\" then
+        local appdata = env("APPDATA")
+        if appdata then return appdata .. "\\Wireshark\\language" end
+        return ws_api_path()
+    end
+    local p = ws_api_path()
+    if p then return p end
+    local xdg = env("XDG_CONFIG_HOME")
+    if xdg then return xdg .. sep .. "wireshark" .. sep .. "language" end
+    local home = env("HOME")
+    if home then return home .. sep .. ".config" .. sep .. "wireshark" .. sep .. "language" end
+    return nil
 end
 
 local function detect_english()
@@ -134,8 +189,8 @@ local function detect_english()
     if env == "en" then return true end
     if env == "zh" then return false end
     -- 2) 读 Wireshark language 文件
-    local lang_file = os.getenv("APPDATA") .. "\\Wireshark\\language"
-    local f = io.open(lang_file, "r")
+    local lang_file = wireshark_language_file()
+    local f = lang_file and io.open(lang_file, "r")
     if f then
         local content = f:read("*a")
         f:close()
@@ -1271,7 +1326,13 @@ local function dissect_sof_vf(tvb, tree, is_rf)
             -- 表13 TDA 每站 4B×[TEI/符号数9b/频段/分集/RSV], 站点数决定条数
             -- eFC 固定 16 字节(表11/13 内部字节号 0-15) ⇒ PB 自 byte32 起
             local sn = read_bits(tvb, 7*8+3, 2)
-            if ftype == 2 then
+            if tvb:len() < 32 then
+                -- eFC 截断(帧长 < 32B): 不读 byte16 之后的站点字段(与 Qt 解析器同口径)
+                if sn >= 1 then
+                    tree:add_expert_info(PI_MALFORMED, PI_WARN,
+                        T("OFDMA/TDA eFC 截断(帧长 < 32B)", "OFDMA/TDA eFC Truncated (Frame Length < 32B)"))
+                end
+            elseif ftype == 2 then
                 for s = 1, sn do
                     local b = 16 + (s - 1) * 3
                     add_val(tree, f.efc1_st_tei, tvb, b, 2, read_bits(tvb, b*8, 12))
@@ -2616,6 +2677,11 @@ function gw.dissector(tvb, pinfo, tree)
                     root:add_expert_info(PI_MALFORMED, PI_WARN,
                         T("OFDMA/TDA 站点数为保留值 0(表10/表12 仅定义 1-3)",
                           "OFDMA/TDA Station Count Is Reserved Value 0 (Tables 10/12 Define 1-3 Only)"))
+                elseif tvb:len() < 32 then
+                    -- eFC(byte16-31)截断: 拒绝逐站 PB 分组, 避免越界取 tvb(与 Qt 解析器同口径)
+                    root:add_expert_info(PI_MALFORMED, PI_WARN,
+                        T("OFDMA/TDA eFC 截断(帧长 < 32B)", "OFDMA/TDA eFC Truncated (Frame Length < 32B)"))
+                    return tvb:len()
                 else
                     local blk = 32
                     for s = 0, n_sites - 1 do

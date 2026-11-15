@@ -5,6 +5,10 @@
 #include "i18n.h"
 #include <QHash>
 #include <QCoreApplication>
+#include <QReadLocker>
+#include <QReadWriteLock>
+#include <QWriteLocker>
+#include <atomic>
 
 namespace {
 
@@ -71,35 +75,56 @@ const struct { const char* zh; const char* en; } en_dict[] = {
       "Capturing/replaying, please stop before dropping a file" },
 };
 
-QHash<QString, QString>& dict() {
-    static QHash<QString, QString> d;
-    static bool inited = false;
-    if (!inited) {
-        for (const auto& e : en_dict) d.insert(QString::fromUtf8(e.zh),
-                                               QString::fromUtf8(e.en));
-        inited = true;
+/// @brief 词典 + 读写锁
+/// @details 解析线程每个字段都在 trl::L 查找,GUI 线程运行期仍会注册(设置对话框里的
+///          协议显示名、插件)。QHash 不支持并发读写(insert 触发 rehash 时读方会访问
+///          已释放的桶),故读取加读锁、注册加写锁。函数内静态对象的初始化由 C++11
+///          保证线程安全(取代旧的 static bool inited 惰性初始化)。
+struct Dict {
+    QReadWriteLock lock;
+    QHash<QString, QString> map;
+    Dict() {
+        for (const auto& e : en_dict) map.insert(QString::fromUtf8(e.zh),
+                                                 QString::fromUtf8(e.en));
     }
+};
+
+Dict& dict() {
+    static Dict d;
     return d;
 }
 
-bool g_en = false;
+std::atomic<bool> g_en{false};
 
 }  // namespace
 
 namespace trl {
 
-void set_enabled(bool enabled) { g_en = enabled; }
+void set_enabled(bool enabled) { g_en.store(enabled, std::memory_order_relaxed); }
 
-bool enabled() { return g_en; }
+bool enabled() { return g_en.load(std::memory_order_relaxed); }
 
 void register_en(const char* zh, const char* en) {
-    dict().insert(QString::fromUtf8(zh), QString::fromUtf8(en));
+    const QString k = QString::fromUtf8(zh);
+    const QString v = QString::fromUtf8(en);
+    Dict& d = dict();
+    {
+        // 重复注册(如每次打开设置对话框)多数是同值:读锁判定后直接返回,不与解析线程争写锁
+        QReadLocker rl(&d.lock);
+        const auto it = d.map.constFind(k);
+        if (it != d.map.constEnd() && it.value() == v) return;
+    }
+    QWriteLocker wl(&d.lock);
+    d.map.insert(k, v);
 }
 
 QString L(const char* zh) {
-    if (!g_en || !zh) return QString::fromUtf8(zh);
-    const auto it = dict().constFind(QString::fromUtf8(zh));
-    return (it != dict().constEnd()) ? it.value() : QString::fromUtf8(zh);
+    if (!g_en.load(std::memory_order_relaxed) || !zh) return QString::fromUtf8(zh);
+    const QString k = QString::fromUtf8(zh);
+    Dict& d = dict();
+    QReadLocker rl(&d.lock);
+    const auto it = d.map.constFind(k);
+    return (it != d.map.constEnd()) ? it.value() : k;
 }
 
 }  // namespace trl

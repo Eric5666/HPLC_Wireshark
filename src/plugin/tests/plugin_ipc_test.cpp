@@ -15,6 +15,11 @@
 #include <cstdio>
 #include <QTextStream>
 #include <QDir>
+#include <QHash>
+
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 
 #include "../ipc/plugin_ipc.h"
 #include "../ipc/plugin_serialization.h"
@@ -35,11 +40,13 @@ void check(bool ok, const QString& name, const QString& detail = {}) {
         log() << "  [PASS] " << name;
         if (!detail.isEmpty()) log() << " - " << detail;
         log() << "\n";
+        log().flush();
     } else {
         ++g_fail;
         log() << "  [FAIL] " << name;
         if (!detail.isEmpty()) log() << " - " << detail;
         log() << "\n";
+        log().flush();
     }
 }
 
@@ -68,53 +75,48 @@ struct RecvResult {
     QString error;
 };
 
-RecvResult recv_msg(QLocalSocket* sock, int timeout_ms = 15000) {
+/// @brief 收一帧 host→app 消息
+/// @details 按真实帧格式(plugin_ipc::try_take_frame)从每个 socket 自己的缓冲取帧。
+///   旧实现先读 4 字节头,再 waitForReadyRead() 等帧体:帧体若已随头一起到达
+///   缓冲区,waitForReadyRead 不会再触发,于是一直等到超时并把后续帧读错位
+///   (表现为 "timeout waiting for body" / "bad frame len" 与整体卡死)。
+///   插件主动发的 RequestRedraw 与本测试无关,直接跳过。
+RecvResult recv_msg(QLocalSocket* sock, int timeout_ms = 10000) {
+    static QHash<QLocalSocket*, QByteArray> s_bufs;
+    QByteArray& buf = s_bufs[sock];
     RecvResult r;
-    fprintf(stdout, "DEBUG: recv_msg waiting for header...\n");
-    fflush(stdout);
-    // 读 4 字节长度
-    QByteArray hdr;
     QElapsedTimer timer;
     timer.start();
-    while (hdr.size() < 4) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-        if (sock->bytesAvailable() >= (4 - hdr.size())) {
-            hdr.append(sock->read(4 - hdr.size()));
-        } else if (!sock->waitForReadyRead(100)) {
-            if (timer.elapsed() > timeout_ms) {
-                r.error = QStringLiteral("timeout waiting for header");
-                return r;
-            }
-            continue;
-        } else {
-            hdr.append(sock->read(4 - hdr.size()));
+    for (;;) {
+        QByteArray body;
+        switch (plugin_ipc::try_take_frame(buf, body)) {
+        case plugin_ipc::FrameTake::Ok: {
+            const auto t = static_cast<plugin_ipc::MsgType>(static_cast<quint8>(body[0]));
+            if (t == plugin_ipc::MsgType::RequestRedraw) continue;
+            r.type = t;
+            r.payload = body.mid(1);
+            r.ok = true;
+            return r;
         }
-    }
-    fprintf(stdout, "DEBUG: got header, len bytes\n");
-    fflush(stdout);
-    QDataStream hds(hdr);
-    hds.setVersion(plugin_ipc::kStreamVersion);
-    quint32 len = 0;
-    hds >> len;
-    if (len < 1 || len > 32 * 1024 * 1024) {
-        r.error = QStringLiteral("bad frame len %1").arg(len);
-        return r;
-    }
-    QByteArray body;
-    while (body.size() < (int)len) {
-        if (!sock->waitForReadyRead(1000)) {
-            if (timer.elapsed() > timeout_ms) {
-                r.error = QStringLiteral("timeout waiting for body");
-                return r;
-            }
-            continue;
+        case plugin_ipc::FrameTake::Bad:
+            r.error = QStringLiteral("bad frame header");
+            buf.clear();
+            return r;
+        case plugin_ipc::FrameTake::NeedMore:
+            break;
         }
-        body.append(sock->read(len - body.size()));
+        if (timer.elapsed() > timeout_ms) {
+            r.error = QStringLiteral("timeout (%1 bytes buffered)").arg(buf.size());
+            return r;
+        }
+        if (sock->bytesAvailable() == 0 &&
+            sock->state() != QLocalSocket::ConnectedState) {
+            r.error = QStringLiteral("host disconnected");
+            return r;
+        }
+        if (sock->bytesAvailable() == 0) sock->waitForReadyRead(100);
+        buf.append(sock->readAll());
     }
-    r.type = static_cast<plugin_ipc::MsgType>(static_cast<quint8>(body[0]));
-    r.payload = body.mid(1);
-    r.ok = true;
-    return r;
 }
 
 BplcFrame make_test_frame(const QByteArray& data, qint64 arrival_us) {
@@ -131,33 +133,20 @@ bool test_plugin(const QString& host_bin, const QString& plugin_dir,
 
     const QString sock_name = QStringLiteral("test_%1_%2")
         .arg(plugin_name).arg(QCoreApplication::applicationPid());
-    fprintf(stdout, "DEBUG: sock_name=%s\n", qPrintable(sock_name));
-    fflush(stdout);
     QLocalServer::removeServer(sock_name);
     QLocalServer server;
-    fprintf(stdout, "DEBUG: listening...\n");
-    fflush(stdout);
     if (!server.listen(sock_name)) {
         check(false, QStringLiteral("server listen"), server.errorString());
         return false;
     }
-    fprintf(stdout, "DEBUG: listening ok, fullName=%s\n",
-            qPrintable(server.fullServerName()));
-    fflush(stdout);
 
     QProcess host;
-    fprintf(stdout, "DEBUG: starting host %s\n", qPrintable(host_bin));
-    fflush(stdout);
     host.start(host_bin, {QStringLiteral("--socket"), sock_name,
                           QStringLiteral("--plugin"), plugin_dir});
-    fprintf(stdout, "DEBUG: waitForStarted...\n");
-    fflush(stdout);
     if (!host.waitForStarted(5000)) {
         check(false, QStringLiteral("host start"), host.errorString());
         return false;
     }
-    fprintf(stdout, "DEBUG: host started, waiting for connection...\n");
-    fflush(stdout);
 
     // 轮询等待连接(兼容 offscreen 模式)
     QLocalSocket* pending_sock = nullptr;
@@ -171,21 +160,12 @@ bool test_plugin(const QString& host_bin, const QString& plugin_dir,
         // 检查 host 是否已退出
         if (host.state() == QProcess::NotRunning) {
             QString host_err = QString::fromLocal8Bit(host.readAllStandardError());
-            fprintf(stdout, "DEBUG: host exited early. stderr: %s\n",
-                    qPrintable(host_err));
-            fflush(stdout);
             break;
         }
         QThread::msleep(100);
     }
-    fprintf(stdout, "DEBUG: poll done, pending=%d\n",
-            pending_sock ? 1 : 0);
-    fflush(stdout);
     if (!pending_sock) {
         QString host_err = QString::fromLocal8Bit(host.readAllStandardError());
-        fprintf(stdout, "DEBUG: no connection. host stderr: %s\n",
-                qPrintable(host_err));
-        fflush(stdout);
         check(false, QStringLiteral("host connect"),
               QStringLiteral("timeout; host stderr: %1").arg(host_err.left(200)));
         host.kill();
@@ -333,8 +313,14 @@ bool test_plugin(const QString& host_bin, const QString& plugin_dir,
 
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
-    fprintf(stdout, "DEBUG: app started\n");
-    fflush(stdout);
+    // 总时长看门狗:任何一步卡住都在 120 s 内以失败退出,绝不挂死 CI
+    // (测试全程是阻塞调用,QTimer 不会被调度,所以用独立线程)
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(120));
+        std::fprintf(stderr, "FAIL: plugin_ipc_test watchdog (120 s) expired\n");
+        std::fflush(stderr);
+        std::_Exit(3);
+    }).detach();
     QCommandLineParser cli;
     cli.addHelpOption();
     QCommandLineOption host_opt(QStringList{QStringLiteral("host")},

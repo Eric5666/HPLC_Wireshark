@@ -9,7 +9,7 @@
 set -e
 cd "$(dirname "$0")"
 REPO_ROOT="$(cd "../../.." && pwd)"
-QT="$HOME/qt/6.11.2/gcc_64"
+QT="${QT_ROOT:-$HOME/qt/6.11.2/gcc_64}"   # QT_ROOT(Qt 前缀或 CI 的 symlink farm)优先
 LIBFIX="$HOME/workspace/build_deps/libfix"
 NW26="$REPO_ROOT/src/protocol/nw_protocol/nw_2026"
 NW21="$REPO_ROOT/src/protocol/nw_protocol/nw_2021"

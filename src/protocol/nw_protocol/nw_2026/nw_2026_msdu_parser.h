@@ -4,8 +4,8 @@
 ///          - MAC 帧头(MSDU_BASE 32B 长/12B 短):TEI/SNID/重启次数/广播方向/目的 MAC
 ///          - MSDU 帧头(MSDU_LONGHEAD 18B / SHORTHEAD 2B):MAC 48b + VLAN + MSDU 类型
 ///          字段坐标移植自 MSDU_Class.py(MSDU_BASE/MSDU_LONGHEAD/MSDU_SHORTHEAD)。
-#ifndef NW_2026_MSDU_PARSER_H
-#define NW_2026_MSDU_PARSER_H
+#ifndef BPLC_NW_2026_MSDU_PARSER_H
+#define BPLC_NW_2026_MSDU_PARSER_H
 
 #include "bplcframe.h"
 
@@ -148,4 +148,4 @@ public:
     static MsduInfo parse(const QByteArray& body);
 };
 
-#endif // NW_2026_MSDU_PARSER_H
+#endif  // BPLC_NW_2026_MSDU_PARSER_H

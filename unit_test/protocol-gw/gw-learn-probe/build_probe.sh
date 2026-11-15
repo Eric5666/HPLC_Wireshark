@@ -32,7 +32,7 @@ else echo "未找到 moc(检查 $QT)" >&2; exit 1; fi
 mkdir -p build
 "$MOC" "$R/3rdparty/qslog/QsLogDestFunctor.h" -o build/moc_QsLogDestFunctor.cpp
 EGL_LIBS=""
-for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /usr/local/lib; do
+for d in "/usr/lib/$(uname -m)-linux-gnu" /usr/lib64 /usr/lib /usr/local/lib; do
     [ -e "$d/libEGL.so" ] && { EGL_LIBS="-lEGL -lGL"; break; }
 done
 

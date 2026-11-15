@@ -165,7 +165,8 @@ bool TopoReplayWorker::decode_frame(const QByteArray& bytes, TopoFrameInput& fra
 }
 
 bool TopoReplayWorker::insert_frame(const TopoFrameInput& frame) {
-    if (!open_store()) return false;
+    // 历史已标记不可用(入库失败/清库失败)时不再往库里追加帧,等成功清库后恢复
+    if (m_store_failed || !open_store()) return false;
     const QByteArray blob = encode_frame(frame);
     if (blob.isEmpty()) {
         report_store_error(QStringLiteral("Could not encode topology frame %1").arg(frame.frame_index));
@@ -174,6 +175,8 @@ bool TopoReplayWorker::insert_frame(const TopoFrameInput& frame) {
     m_insert_query.bindValue(0, frame.frame_index);
     m_insert_query.bindValue(1, blob);
     if (!m_insert_query.exec()) {
+        // 入库失败:库内历史从此缺帧,历史回放标记为不可用(与 main 一致);
+        // report_store_error 只报一次,后续帧不再刷屏
         report_db_error(QStringLiteral("insert topology frame"), m_insert_query.lastError().text());
         return false;
     }
@@ -339,6 +342,7 @@ void TopoReplayWorker::maybe_checkpoint(qint64 frame_index) {
 
 void TopoReplayWorker::submit_frame(const TopoFrameInput& frame) {
     if (frame.net_id == 0 || frame.frame_index <= 0) return;
+    // 实时拓扑总是推进(与 main 一致);入库失败只影响历史回放,错误由 report_store_error 报一次
     const bool stored = insert_frame(frame);
     if (frame.frame_index <= m_last_applied_frame) {
         if (stored) rebuild_live_from(frame.frame_index);
@@ -430,34 +434,46 @@ void TopoReplayWorker::request_frame_page(quint64 request_id, qint64 offset, int
     page.request_id = request_id;
     page.offset = qMax<qint64>(0, offset);
     limit = qBound(1, limit, 500);
-    if (!open_store()) { emit frame_page_ready(page); return; }
+    // 出错时 ok=false + error,不再与"真的没有数据"的空页混淆
+    auto fail = [&](const QString& message) {
+        page.ok = false; page.error = message; page.items.clear();
+        emit frame_page_ready(page);
+    };
+    if (!open_store()) {
+        fail(m_store_error_message.isEmpty() ? QStringLiteral("Topology replay store is unavailable")
+                                             : m_store_error_message);
+        return;
+    }
     QSqlQuery count_query(m_db);
     if (!count_query.exec(QStringLiteral("SELECT COUNT(*) FROM topo_frames"))) {
         report_db_error(QStringLiteral("count topology frames"), count_query.lastError().text());
-        emit frame_page_ready(page); return;
+        fail(QStringLiteral("Topology SQLite %1 failed: %2").arg(QStringLiteral("count topology frames"), count_query.lastError().text())); return;
     }
     if (count_query.next()) page.total = count_query.value(0).toLongLong();
     QSqlQuery query(m_db);
     if (!query.prepare(QStringLiteral("SELECT payload FROM topo_frames ORDER BY frame_index,id LIMIT ? OFFSET ?"))) {
         report_db_error(QStringLiteral("prepare topology frame page"), query.lastError().text());
-        emit frame_page_ready(page); return;
+        fail(QStringLiteral("Topology SQLite %1 failed: %2").arg(QStringLiteral("prepare topology frame page"), query.lastError().text())); return;
     }
     query.bindValue(0, limit); query.bindValue(1, page.offset);
     if (!query.exec()) {
         report_db_error(QStringLiteral("prepare topology frame page"), query.lastError().text());
-        emit frame_page_ready(page); return;
+        fail(QStringLiteral("Topology SQLite %1 failed: %2").arg(QStringLiteral("prepare topology frame page"), query.lastError().text())); return;
     }
     while (query.next()) {
         const QByteArray data = query.value(0).toByteArray();
         TopoFrameInput frame;
         if (data.isEmpty() || !decode_frame(data, frame)) {
             report_store_error(QStringLiteral("Corrupt topology frame in page query"));
-            emit frame_page_ready(page); return;
+            fail(QStringLiteral("Corrupt topology frame in page query")); return;
         }
         page.items.append(std::move(frame));
     }
-    if (query.lastError().type() != QSqlError::NoError)
+    if (query.lastError().type() != QSqlError::NoError) {
         report_db_error(QStringLiteral("read topology frame page"), query.lastError().text());
+        fail(QStringLiteral("Topology SQLite read topology frame page failed: %1").arg(query.lastError().text()));
+        return;
+    }
     emit frame_page_ready(page);
 }
 
@@ -465,28 +481,36 @@ void TopoReplayWorker::request_anomaly_page(quint64 request_id, quint32 nid, qin
     TopoAnomalyPage page;
     page.request_id = request_id; page.nid = nid; page.offset = qMax<qint64>(0, offset);
     limit = qBound(1, limit, 500);
-    if (!open_store()) { emit anomaly_page_ready(page); return; }
+    auto fail = [&](const QString& message) {
+        page.ok = false; page.error = message; page.items.clear();
+        emit anomaly_page_ready(page);
+    };
+    if (!open_store()) {
+        fail(m_store_error_message.isEmpty() ? QStringLiteral("Topology replay store is unavailable")
+                                             : m_store_error_message);
+        return;
+    }
     QSqlQuery count_query(m_db);
     if (!count_query.prepare(QStringLiteral("SELECT COUNT(*) FROM topo_anomalies WHERE nid=?"))) {
         report_db_error(QStringLiteral("count topology anomalies"), count_query.lastError().text());
-        emit anomaly_page_ready(page); return;
+        fail(QStringLiteral("Topology SQLite %1 failed: %2").arg(QStringLiteral("count topology anomalies"), count_query.lastError().text())); return;
     }
     count_query.bindValue(0, nid);
     if (!count_query.exec()) {
         report_db_error(QStringLiteral("count topology anomalies"), count_query.lastError().text());
-        emit anomaly_page_ready(page); return;
+        fail(QStringLiteral("Topology SQLite %1 failed: %2").arg(QStringLiteral("count topology anomalies"), count_query.lastError().text())); return;
     }
     if (count_query.next()) page.total = count_query.value(0).toLongLong();
     QSqlQuery query(m_db);
     if (!query.prepare(QStringLiteral("SELECT kind,tei,tei_old,mac,mac_old,is_rf,trips,value_from,value_to,first_ms,last_ms,first_frame,last_frame "
                                       "FROM topo_anomalies WHERE nid=? ORDER BY last_frame DESC LIMIT ? OFFSET ?"))) {
         report_db_error(QStringLiteral("prepare topology anomaly page"), query.lastError().text());
-        emit anomaly_page_ready(page); return;
+        fail(QStringLiteral("Topology SQLite %1 failed: %2").arg(QStringLiteral("prepare topology anomaly page"), query.lastError().text())); return;
     }
     query.bindValue(0, nid); query.bindValue(1, limit); query.bindValue(2, page.offset);
     if (!query.exec()) {
         report_db_error(QStringLiteral("prepare topology anomaly page"), query.lastError().text());
-        emit anomaly_page_ready(page); return;
+        fail(QStringLiteral("Topology SQLite %1 failed: %2").arg(QStringLiteral("prepare topology anomaly page"), query.lastError().text())); return;
     }
     while (query.next()) {
         TopoAnomaly a;
@@ -500,8 +524,11 @@ void TopoReplayWorker::request_anomaly_page(quint64 request_id, quint32 nid, qin
         a.first_frame = query.value(11).toLongLong(); a.last_frame = query.value(12).toLongLong();
         page.items.append(a);
     }
-    if (query.lastError().type() != QSqlError::NoError)
+    if (query.lastError().type() != QSqlError::NoError) {
         report_db_error(QStringLiteral("read topology anomaly page"), query.lastError().text());
+        fail(QStringLiteral("Topology SQLite read topology anomaly page failed: %1").arg(query.lastError().text()));
+        return;
+    }
     emit anomaly_page_ready(page);
 }
 
@@ -525,23 +552,44 @@ void TopoReplayWorker::request_history(quint64 request_id, qint64 target_frame,
 
 bool TopoReplayWorker::clear_store() {
     if (!m_db.isOpen()) return true;
+    // 两张表在同一事务里清:任一失败整体回滚,不留"帧清了异常没清"的半状态
+    m_insert_query.finish();
     QSqlQuery query(m_db);
-    if (!query.exec(QStringLiteral("DELETE FROM topo_frames"))) {
-        report_db_error(QStringLiteral("clear topology store"), query.lastError().text());
+    auto fail = [&](const QString& detail) {
+        QSqlQuery rollback(m_db);
+        rollback.exec(QStringLiteral("ROLLBACK"));
+        // 每次清库失败都要让用户知道(report_store_error 只报一次)
+        emit worker_error(QStringLiteral("Topology SQLite clear topology store failed: %1").arg(detail));
         return false;
-    }
-    if (!query.exec(QStringLiteral("DELETE FROM topo_anomalies"))) {
-        report_db_error(QStringLiteral("clear topology store"), query.lastError().text());
-        return false;
-    }
+    };
+    if (!query.exec(QStringLiteral("BEGIN IMMEDIATE"))) return fail(query.lastError().text());
+    if (!query.exec(QStringLiteral("DELETE FROM topo_frames"))) return fail(query.lastError().text());
+    if (!query.exec(QStringLiteral("DELETE FROM topo_anomalies"))) return fail(query.lastError().text());
+    if (!query.exec(QStringLiteral("COMMIT"))) return fail(query.lastError().text());
     return true;
 }
 
 void TopoReplayWorker::clear() {
-    clear_store();
+    // 调用方(MainWindow::on_clear)清空后帧序号从 1 重新开始。清库失败时若保留
+    // m_last_applied_frame,此后每帧都被当作乱序帧触发全量回放,打满 worker。
+    // 因此无论清库成败,内存实时状态都随之重置;清库失败时库内仍是旧帧,与新的
+    // 帧序号不再一致,历史回放标记为不可用(rebuild/回放均被挡住,不会回放风暴),
+    // 直到下次清库成功才恢复。
+    const bool store_open = m_db.isOpen();
+    const bool cleared = clear_store();
     m_live_states.clear();
     m_checkpoints.clear();
     m_last_applied_frame = -1;
+    if (!cleared) {
+        m_store_failed = true;
+        m_store_error_message = QStringLiteral("Topology history is unavailable because clearing the replay store failed");
+        m_store_error_reported = true;   // clear_store 已上报具体原因
+    } else if (store_open) {
+        // 库已清空、实时状态随之重置,两者重新一致:此前入库失败造成的"历史不可用"到此为止
+        m_store_failed = false;
+        m_store_error_reported = false;
+        m_store_error_message.clear();
+    }
     emit live_states_reset(m_live_states);
 }
 

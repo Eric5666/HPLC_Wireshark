@@ -6,8 +6,8 @@
 ///            - make_parser_by_id   :按协议 id 取解析器(插件经 IPC 代理)
 ///            - make_tree_builder   :按变体取字段树构建器(声明在 protocol_tree_builder.h)
 ///            - registered_protocols:界面枚举协议(按 order 升序,顺序由协议自述)
-#ifndef PROTOCOLFACTORY_H
-#define PROTOCOLFACTORY_H
+#ifndef BPLC_PROTOCOLFACTORY_H
+#define BPLC_PROTOCOLFACTORY_H
 
 #include "iprotocolparser.h"
 #include "iprotocolprovider.h"
@@ -49,4 +49,4 @@ void register_parser(const QString& protocol_id, ParserFactoryFn fn);
 /// @brief 兼容旧接口:同 unregister_protocol
 void unregister_parser(const QString& protocol_id);
 
-#endif // PROTOCOLFACTORY_H
+#endif  // BPLC_PROTOCOLFACTORY_H

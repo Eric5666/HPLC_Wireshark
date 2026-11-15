@@ -2,7 +2,6 @@
 #
 # 模块内文件:
 #   - bplcframe.h    帧/元信息/条目定义
-#   - ringbuffer.h   字节环形缓冲 + 帧队列(备用)
 #   - i18n.h/.cpp    运行时中文/英文显示翻译(L()/register_en)
 #   - mac_format.h   48-bit MAC u64 格式化唯一实现(四处旧拷贝委托于此)
 #
@@ -10,7 +9,6 @@
 
 HEADERS += \
     $$PWD/bplcframe.h \
-    $$PWD/ringbuffer.h \
     $$PWD/mac_format.h \
     $$PWD/i18n.h
 

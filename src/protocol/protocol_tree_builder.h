@@ -4,8 +4,8 @@
 ///          各实现一个 IProtocolTreeBuilder 子类(独立源文件,放各自协议目录),
 ///          工厂按 variant 实例化。公共渲染工具(加节点/位域节点/MSDU 字段树
 ///          渲染)协议无关,两实现共用。
-#ifndef PROTOCOL_TREE_BUILDER_H
-#define PROTOCOL_TREE_BUILDER_H
+#ifndef BPLC_PROTOCOL_TREE_BUILDER_H
+#define BPLC_PROTOCOL_TREE_BUILDER_H
 
 #include "bplcframe.h"
 #include "common/protocolvariant.h"
@@ -107,4 +107,4 @@ public:
 /// 工厂:按 variant 实例化对应字段树构建器(实现在 protocolfactory.cpp)
 std::unique_ptr<IProtocolTreeBuilder> make_tree_builder(ProtocolVariant v);
 
-#endif // PROTOCOL_TREE_BUILDER_H
+#endif  // BPLC_PROTOCOL_TREE_BUILDER_H

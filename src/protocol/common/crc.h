@@ -3,8 +3,8 @@
 /// @details 从原 fieldspec.h 抽取。算法:
 ///   - crc32_le:poly=0xEDB88320,init=0xFFFFFFFF,LSB 先行,末取反;遍历前 len-4 字节
 ///   - crc24_lsb:poly=0xC60001,init=0,LSB 先行;遍历前 len-3 字节,存储末 3B(低字节在前)
-#ifndef PROTOCOL_CRC_H
-#define PROTOCOL_CRC_H
+#ifndef BPLC_CRC_H
+#define BPLC_CRC_H
 
 #include <QtGlobal>
 
@@ -40,4 +40,4 @@ inline quint32 crc24_lsb(const quint8* d, int len) {
     return crc & 0xFFFFFF;
 }
 
-#endif // PROTOCOL_CRC_H
+#endif  // BPLC_CRC_H

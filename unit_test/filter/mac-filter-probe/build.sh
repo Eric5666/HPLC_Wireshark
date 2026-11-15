@@ -61,7 +61,7 @@ else
     # libegl1-mesa-dev,裸加 -lEGL 会 "cannot find -lEGL" 直接挂。故探测到
     # 开发用符号链接 libEGL.so 才追加。libfix 路径同理,已按目录存在与否判断。
     EGL_OK=0
-    for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /usr/local/lib; do
+    for d in "/usr/lib/$(uname -m)-linux-gnu" /usr/lib64 /usr/lib /usr/local/lib; do
         [ -e "$d/libEGL.so" ] && { EGL_OK=1; break; }
     done
     [ "$EGL_OK" = "1" ] && LIBS="$LIBS -lEGL -lGL"

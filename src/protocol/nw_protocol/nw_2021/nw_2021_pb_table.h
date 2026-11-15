@@ -5,8 +5,8 @@
 ///     TMI_EXT(BPLC-2 表121 j)节:仅 13 触发扩展,14 无扩展定义)
 ///   - 无线路径:载荷 PB 大小(PBLen,表130)→ PB size,0-5 → 16/40/72/136/264/520
 /// @note PB 大小映射见协议表(载波 TMI 映射表 / 无线 PBLen 表130)。与国网独立,勿共享。
-#ifndef NW_2021_PB_TABLE_H
-#define NW_2021_PB_TABLE_H
+#ifndef BPLC_NW_2021_PB_TABLE_H
+#define BPLC_NW_2021_PB_TABLE_H
 
 #include <QtGlobal>
 
@@ -68,4 +68,4 @@ inline int nw_2021_max_pb_num(quint8 band, quint8 tmi, quint8 tmi_ext) {
     return nw_2021_pb_num_table[band][col];
 }
 
-#endif // NW_2021_PB_TABLE_H
+#endif  // BPLC_NW_2021_PB_TABLE_H

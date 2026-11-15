@@ -1,0 +1,223 @@
+/// @file paging_race_probe.cpp
+/// @brief M2/M3 回归:盘块后台落盘未完成时,data()/过滤/导出快照不得丢帧;clear 后会话隔离
+/// @details 用阻塞任务占满全局线程池,让落盘任务排队不执行,稳定复现"块号已分配、文件未写"窗口。
+#include "packetlistmodel.h"
+#include "packetentry_serialize.h"
+
+#include <QApplication>
+#include <QSemaphore>
+#include <QThread>
+#include <QThreadPool>
+#include <climits>
+#include <cstdio>
+
+static int g_fail = 0;
+static void check(bool ok, const char* what) {
+    std::printf("%s %s\n", ok ? "PASS" : "FAIL", what);
+    if (!ok) ++g_fail;
+}
+
+static QVector<PacketEntry> make_entries(int first_index, int n) {
+    QVector<PacketEntry> v;
+    v.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        PacketEntry e;
+        e.index = first_index + i;
+        e.accepted = true;
+        e.mpdu.frame_type = 0;   // BEACON
+        e.mpdu.net_id = 0xA1D500;
+        e.raw_bytes = QByteArray(40, char(0x55));
+        e.raw_wire = QByteArray(48, char(0x3C));
+        v.append(e);
+    }
+    return v;
+}
+
+/// 占满全局线程池:返回后所有新任务排队,直到 release()
+struct PoolGate {
+    QSemaphore gate;
+    QSemaphore started;
+    int n = 0;
+    void block() {
+        n = QThreadPool::globalInstance()->maxThreadCount();
+        for (int i = 0; i < n; ++i)
+            QThreadPool::globalInstance()->start([this]() { started.release(); gate.acquire(); });
+        started.acquire(n);
+    }
+    void release() { gate.release(n); }
+};
+
+static int row_index(PacketListModel& m, int row) {
+    return m.data(m.index(row, PacketListModel::COL_INDEX)).toInt();
+}
+
+/// 与 MainWindow::run_export 同口径:内存副本优先,否则读文件
+static qint64 count_snapshot(const PacketListModel::ExportSnapshot& s, bool* order_ok, int first_index) {
+    qint64 n = 0;
+    *order_ok = true;
+    auto take = [&](const PacketEntry& e) {
+        if (e.index != first_index + n) *order_ok = false;
+        ++n;
+    };
+    for (int b = 0; b < s.block_paths.size(); ++b) {
+        if (const auto mem = s.block_mem.value(b)) { for (const auto& e : *mem) take(e); continue; }
+        QVector<PacketEntry> blk;
+        if (!pser::read_block_file(s.block_paths[b], blk)) continue;
+        for (const auto& e : blk) take(e);
+    }
+    for (const auto& e : s.hot) take(e);
+    return n;
+}
+
+static void drain(QApplication& app, PacketListModel& m) {
+    for (int i = 0; i < 5000 && (m.pending_block_count() > 0 || m.filtering()); ++i) {
+        QThreadPool::globalInstance()->waitForDone(5);
+        app.processEvents();
+    }
+    app.processEvents();
+}
+
+// L2:模板延迟实例化——旧代码没有 set_entry_limit 时退到"缺失"分支,源码仍可在旧提交上编译
+template <typename M>
+static auto l2_case(QApplication& app, M& m4, int) -> decltype(m4.set_entry_limit(1), void()) {
+    int signals_seen = 0;
+    qint64 sig_limit = -1;
+    QObject::connect(&m4, &M::entry_limit_reached, [&](qint64 l) { ++signals_seen; sig_limit = l; });
+    m4.set_entry_limit(2500);
+    for (int i = 0; i < 6; ++i) m4.append_packets(make_entries(1 + i * 500, 500));
+    check(m4.total_count() == 2500 && m4.rowCount() == 2500 && m4.dropped_count() == 500,
+          "entry limit: 3000 appended, 2500 kept, 500 dropped (counted)");
+    check(signals_seen == 1 && sig_limit == 2500, "entry limit: entry_limit_reached emitted once");
+    check(row_index(m4, 0) == 1 && row_index(m4, 2499) == 2500, "entry limit: kept rows intact (not blank)");
+    m4.set_display_filter(QStringLiteral("beacon"));
+    drain(app, m4);
+    check(m4.rowCount() == 2500, "entry limit: async filter over capped model keeps 2500 rows");
+    m4.set_display_filter(QString());
+    check(m4.rowCount() == 2500, "entry limit: unfilter keeps 2500 rows");
+    m4.clear_all();
+    m4.append_packets(make_entries(1, 10));
+    check(m4.rowCount() == 10 && m4.dropped_count() == 0, "entry limit: clear_all resets counters");
+    check(M::kMaxEntries < qint64(INT_MAX), "entry limit: default cap below INT_MAX");
+}
+template <typename M>
+static void l2_case(QApplication&, M&, long) {
+    check(false, "entry limit API present (L2: int(m_total) narrowing unguarded)");
+}
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+    PacketListModel model;
+    PoolGate gate;
+
+    // ① 落盘任务全部排队:5 块已分配块号但文件不存在
+    gate.block();
+    model.append_packets(make_entries(1, 5500));
+    check(model.pending_block_count() == 5, "5 blocks pending while pool is blocked");
+    bool all_rows = true;
+    for (int r : {0, 999, 1000, 2500, 4999, 5000, 5499})
+        if (row_index(model, r) != r + 1) all_rows = false;
+    check(all_rows, "rows in unwritten blocks are served from memory (no blank rows)");
+
+    // ② 导出快照:未就绪块带内存副本,条数与顺序完整
+    {
+        const auto snap = model.make_export_snapshot();
+        bool order = false;
+        const qint64 n = count_snapshot(snap, &order, 1);
+        check(snap.total == 5500 && n == 5500 && order, "export snapshot includes unwritten blocks");
+    }
+
+    // ③ 过滤快照在落盘前取得,结果必须覆盖全部 5500 行
+    model.set_display_filter(QStringLiteral("beacon"));
+    gate.release();
+    drain(app, model);
+    check(!model.filtering() && model.rowCount() == 5500, "filter over unwritten blocks keeps all rows");
+    check(model.pending_block_count() == 0, "all blocks became ready after the pool drained");
+    model.set_display_filter(QString());
+
+    // ④ 就绪后从文件读
+    all_rows = true;
+    for (int r : {0, 1999, 3000, 4999, 5400})
+        if (row_index(model, r) != r + 1) all_rows = false;
+    check(all_rows, "rows read back from published block files");
+    {
+        const auto snap = model.make_export_snapshot();
+        bool order = false;
+        check(count_snapshot(snap, &order, 1) == 5500 && order, "export snapshot from files complete");
+    }
+
+    // ⑤ clear 与旧会话迟到的写:旧块写任务在 clear 之后才执行,不得混入新会话
+    gate.block();
+    model.clear_all();
+    model.append_packets(make_entries(100001, 1500));   // 旧会话无块;造 1 个新块后再 clear 一次
+    model.clear_all();
+    model.append_packets(make_entries(200001, 3200));   // 新会话 3 块
+    gate.release();
+    drain(app, model);
+    all_rows = model.rowCount() == 3200;
+    for (int r : {0, 999, 1000, 2999, 3199})
+        if (row_index(model, r) != 200001 + r) all_rows = false;
+    check(all_rows && model.pending_block_count() == 0, "new session blocks not mixed with stale writes");
+    {
+        const auto snap = model.make_export_snapshot();
+        bool order = false;
+        check(count_snapshot(snap, &order, 200001) == 3200 && order, "export after clear is the new session only");
+    }
+
+    // ⑥ M4:异步过滤完成时补入过滤期间暂存的条目。观察方只凭信号维护行数,
+    //    rowsAboutToBeInserted 的 first 必须等于它已知的行数(追加),reset 后重取
+    {
+        PacketListModel m2;
+        int known = 0;
+        int violations = 0;
+        QObject::connect(&m2, &QAbstractItemModel::modelReset, [&] { known = m2.rowCount(); });
+        QObject::connect(&m2, &QAbstractItemModel::rowsAboutToBeInserted,
+                         [&](const QModelIndex&, int first, int) { if (first != known) ++violations; });
+        QObject::connect(&m2, &QAbstractItemModel::rowsInserted,
+                         [&](const QModelIndex&, int first, int last) {
+                             known += last - first + 1;
+                             if (known != m2.rowCount()) ++violations;
+                         });
+        m2.append_packets(make_entries(1, 1500));
+        m2.set_display_filter(QStringLiteral("coord"));   // 0 行
+        drain(app, m2);
+        m2.set_display_filter(QStringLiteral("beacon"));  // 异步:全部 1500 行
+        m2.append_packets(make_entries(1501, 300));        // 过滤中:暂存
+        drain(app, m2);
+        check(violations == 0 && m2.rowCount() == 1800 && known == 1800,
+              "filter completion resets before inserting deferred rows");
+    }
+
+    // ⑦ M5:过滤卡住(线程池占满)期间持续 append 25000 条:暂存不得无上限增长。
+    //    修复后超过 kMaxDeferred(20000)即作废本次过滤、暂存转正常 append(total 立即增长)
+    //    并重新过滤;放行后全部条目可见、顺序正确、不丢帧
+    {
+        PacketListModel m3;
+        m3.append_packets(make_entries(1, 1200));
+        gate.block();
+        m3.set_display_filter(QStringLiteral("beacon"));   // 异步过滤排队,不会完成
+        for (int i = 0; i < 50; ++i) m3.append_packets(make_entries(1201 + i * 500, 500));
+        const qint64 total_during = m3.total_count();
+        std::printf("  stalled filter: total_count=%lld after 25000 appends (old: deferred unbounded, total stays 1200)\n",
+                    static_cast<long long>(total_during));
+        check(total_during >= 1200 + 25000 - 20000, "deferred appends bounded while filter is stalled (<= 20000 held back)");
+        gate.release();
+        drain(app, m3);
+        bool order = m3.rowCount() == 26200 && m3.total_count() == 26200 && !m3.filtering();
+        for (int r : {0, 1199, 1200, 9999, 20000, 26199})
+            if (order && row_index(m3, r) != r + 1) order = false;
+        check(order, "after stalled filter: all 26200 rows visible in order (no loss)");
+        m3.set_display_filter(QStringLiteral("coord"));
+        drain(app, m3);
+        check(m3.rowCount() == 0 && m3.total_count() == 26200, "re-filter after overflow restart still correct");
+    }
+
+    // ⑧ L2:条目总数上限。调小上限模拟 int 行号边界:超出部分被丢弃并发信号,
+    //    已有行不变空;清空后计数复位(旧代码无上限接口 ⇒ 判失败)
+    {
+        PacketListModel m4;
+        l2_case(app, m4, 0);
+    }
+
+    std::printf("paging_race_probe: %s (%d failures)\n", g_fail ? "FAIL" : "OK", g_fail);
+    return g_fail ? 1 : 0;
+}

@@ -7,8 +7,8 @@
 ///                              ChangeProxyBitMapCnf/HeartBeatCheck/
 ///                              DiscoverNodeList/SuccessRateReport
 ///            MSDUType 48(应用):APP_BASE + PacketID 0x0008 EventPacket
-#ifndef MSDUPARSER_H
-#define MSDUPARSER_H
+#ifndef BPLC_GW_2022_MSDU_PARSER_H
+#define BPLC_GW_2022_MSDU_PARSER_H
 
 #include "bplcframe.h"
 
@@ -100,4 +100,4 @@ public:
     static MsduInfo parse(const QByteArray& body);
 };
 
-#endif // MSDUPARSER_H
+#endif  // BPLC_GW_2022_MSDU_PARSER_H

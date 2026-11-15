@@ -33,13 +33,18 @@
 ///   on_frame_selected(frameIndex, forceHistory)  -- 主帧列表选中变化;
 ///     forceHistory=true 时强制历史冻结(双击),否则插件按是否为最新帧
 ///     自行决定 live/历史;未定义时静默忽略
-/// @note 安全边界是进程隔离;Lua 标准库全开(含 io/os),插件崩溃不影响主程序。
+/// @note 安全边界是进程隔离 + 受限标准库(无 io/debug/os.execute,require 限插件目录,
+///       拒字节码);每次脚本调用有指令预算(默认 2 亿条,超限抛 Lua 错误)。
 #ifndef BPLC_LUA_BACKEND_H
 #define BPLC_LUA_BACKEND_H
 
 #include "plugin_backend.h"
 
+#include <functional>
+#include <memory>
+
 struct lua_State;
+struct LuaBudget;
 
 /// @brief Lua 插件后端
 class LuaBackend : public IPluginBackend {
@@ -68,13 +73,26 @@ public:
     void notify_frame_selected(qint64 frameIndex, bool force_history) override;
 
 private:
+    /// @brief 在 lua_pcall 内执行 body(经 C 函数 protected_entry);body 中未被内层
+    ///        pcall 接住的 Lua 错误回到这一层,返回 false 并给出错误,状态一致、插件仍可用
+    ///        (不再用 lua_atpanic + setjmp/longjmp,越过 C++ 栈帧会跳过析构)
+    bool run_protected(const std::function<void()>& body, QString* err);
+    bool initialize_impl(const PluginManifest& m, QString* err);
+    ParseResult parse_impl(const BplcFrame& frame, MsduState& msdu,
+                           const ParseFilter& filter, QString* err);
+    QImage render_graphics_impl(int w, int h, QString* err);
+    bool handle_graphics_event_impl(const GraphicsEvent& e, QString* err);
+    QString call_text_function_impl(const char* name, QString* err);
+    void notify_frame_selected_impl(qint64 frameIndex, bool force_history);
+
     /// @brief Lua fields 表(数组) → MsduFieldNode 树(递归)。表在栈顶
-    bool convert_fields(QVector<MsduFieldNode>* out, QString* err);
+    bool convert_fields(QVector<MsduFieldNode>* out, QString* err, int depth = 0);
     /// @brief 取表字段的字符串/整数(字段不存在给缺省)
     QString table_str(const char* key, const QString& d = QString());
     quint64 table_uint(const char* key, quint64 d = 0);
 
     lua_State* m_lua = nullptr;
+    std::unique_ptr<LuaBudget> m_budget;  ///< 每次调用的指令预算(count hook 读写)
     bool m_has_graphics = false;
     QString m_plugin_dir;  ///< 插件目录(设置/环境变量用)
     QString m_protocol_id;

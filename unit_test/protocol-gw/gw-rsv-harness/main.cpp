@@ -24,10 +24,12 @@ int main(int argc, char* argv[]) {
     MpduInfo info; MsduState msdu; QByteArray mb;
     QString err = gw_2022_sof::assemble(body, info, msdu, mb, 0xFF, true);
     const int expect_sym = 0xAB | (1 << 8);   // 427
+    // 无线 SOF 的字节11 bit4-7(MCS,表28)存 MpduInfo::mcs;tmi 只用于载波(分集拷贝基本模式)。
+    // 各解析器/树/导出均按 is_rf ? mcs : tmi 取值,旧断言 info.tmi == 3 是归集前的过时口径。
     bool ok = err.isEmpty() && info.pb_num == 1 && info.pb_size == 72
-              && info.symbol_num == expect_sym && info.tmi_ext == 0x5 && info.tmi == 3;
-    std::printf("[RF rsv] err='%s' sym=%d(exp %d) ext=%d(exp 5) pb_size=%d mcs=%d => %s\n",
+              && info.symbol_num == expect_sym && info.tmi_ext == 0x5 && info.mcs == 3;
+    std::printf("[RF rsv] err='%s' sym=%d(exp %d) ext=%d(exp 5) pb_size=%d mcs=%d(exp 3) tmi=%d => %s\n",
                 qPrintable(err), info.symbol_num, expect_sym, info.tmi_ext,
-                info.pb_size, info.tmi, ok ? "PASS" : "FAIL");
+                info.pb_size, info.mcs, info.tmi, ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

@@ -12,7 +12,7 @@
   ② 未配对键: trl::L("X") 的 X 不在任何 register_en 第一参数集合中
   ③ 死键: register_en("X", ...) 的 X 没有任何 trl::L("X") 使用
 
-退出码: --strict 且有 ① 时返回 1，否则 0。
+退出码: --strict 且有 ①/②/③ 任一问题时返回 1，否则 0。
 """
 from __future__ import annotations
 
@@ -145,7 +145,7 @@ def scan(root: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description='i18n 配对与裸中文自查')
-    ap.add_argument('--strict', action='store_true', help='有裸中文时返回非 0')
+    ap.add_argument('--strict', action='store_true', help='有裸中文、未配对键或死键时返回非 0')
     ap.add_argument('--list', action='store_true', help='列出全部明细')
     ap.add_argument('--root', default='src', help='源码根目录(默认 src)')
     args = ap.parse_args()
@@ -185,7 +185,7 @@ def main() -> int:
     if not bare and not unpaired and not dead:
         print('✅ 全部通过')
 
-    return 1 if (bare and args.strict) else 0
+    return 1 if (args.strict and (bare or unpaired or dead)) else 0
 
 
 if __name__ == '__main__':
